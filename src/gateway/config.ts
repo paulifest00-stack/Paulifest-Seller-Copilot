@@ -11,11 +11,13 @@ export interface GatewayConfig {
   pairingTtlSeconds: number;       // Default: 300 (5 minutos)
   gstTtlSeconds: number;           // Default: 7200 (2 horas)
   sessionRefreshTtlDays: number;   // Default: 14 dias
+  databaseUrl?: string;            // PostgreSQL connection string (Fase 4C.2)
 }
 
 export function loadGatewayConfig(env: Record<string, string | undefined> = process.env): GatewayConfig {
   const environment = (env.NODE_ENV === 'production' ? 'production' : env.NODE_ENV === 'test' ? 'test' : 'development') as GatewayConfig['environment'];
   const port = parseInt(env.GATEWAY_PORT || '3001', 10);
+  const databaseUrl = env.DATABASE_URL?.trim() || undefined;
 
   if (environment === 'production') {
     // Validação estrita em Produção: nenhum segredo pode usar fallback fictício
@@ -67,7 +69,8 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       environment,
       pairingTtlSeconds: 300,        // 5 minutos
       gstTtlSeconds: 7200,          // 2 horas
-      sessionRefreshTtlDays: 14     // 14 dias
+      sessionRefreshTtlDays: 14,    // 14 dias
+      databaseUrl
     };
   }
 
@@ -119,7 +122,8 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       environment,
       pairingTtlSeconds: 300,
       gstTtlSeconds: 7200,
-      sessionRefreshTtlDays: 14
+      sessionRefreshTtlDays: 14,
+      databaseUrl
     };
   }
 
@@ -154,6 +158,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     environment,
     pairingTtlSeconds: 300,
     gstTtlSeconds: 7200,
-    sessionRefreshTtlDays: 14
+    sessionRefreshTtlDays: 14,
+    databaseUrl
   };
 }

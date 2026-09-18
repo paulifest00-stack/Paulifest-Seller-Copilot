@@ -11,7 +11,7 @@ export default defineConfig({
       fileName: () => 'test.mjs'
     },
     rollupOptions: {
-      external: [/^node:/, 'node:assert', 'node:test', 'node:crypto', 'node:http', 'node:buffer', 'node:url']
+      external: [/^node:/, 'node:assert', 'node:test', 'node:crypto', 'node:http', 'node:buffer', 'node:url', 'pg']
     }
   }
 });

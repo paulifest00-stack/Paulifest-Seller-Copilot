@@ -15,7 +15,11 @@ const SENSITIVE_KEYS = new Set([
   'set-cookie',
   'code',
   'state',
-  'token'
+  'token',
+  'database_url',
+  'databaseurl',
+  'db_url',
+  'connection_string'
 ]);
 
 /**
@@ -26,8 +30,10 @@ export function sanitizeForLogs(value: unknown, depth: number = 0): unknown {
   if (value === null || value === undefined) return value;
 
   if (typeof value === 'string') {
+    // Mascara connection strings de banco (ex: postgres://user:password@host:port/db)
+    let sanitized = value.replace(/postgres(?:ql)?:\/\/[^:]+:[^@]+@[^\s"']+/gi, 'postgresql://[REDACTED]@[REDACTED]');
     // Mascara Bearer tokens
-    let sanitized = value.replace(/Bearer\s+[A-Za-z0-9-_.]+/gi, 'Bearer [REDACTED]');
+    sanitized = sanitized.replace(/Bearer\s+[A-Za-z0-9-_.]+/gi, 'Bearer [REDACTED]');
     // Mascara Basic auth
     sanitized = sanitized.replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [REDACTED]');
     return sanitized;

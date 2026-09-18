@@ -12,13 +12,14 @@
     "build": "tsc && vite build",
     "test": "vite build --config vite.test.config.ts && node dist-test/test.mjs",
     "typecheck:gateway": "tsc --project tsconfig.gateway.json --noEmit",
-    "build:gateway": "tsc --project tsconfig.gateway.json",
+    "build:gateway": "tsc --project tsconfig.gateway.json && node scripts/copy-gateway-migrations.mjs",
     "verify:extension-isolation": "npm run clean:extension && npm run build && node scripts/verify-extension-isolation.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
     "clsx": "^2.1.1",
     "lucide-react": "^1.16.0",
+    "pg": "^8.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.0.2"
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@types/chrome": "^0.0.312",
     "@types/node": "^22.13.10",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",

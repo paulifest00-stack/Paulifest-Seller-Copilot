@@ -25,6 +25,7 @@ import { constantTimeCompare, hashSecret } from '../crypto/pairing-state.ts';
 import type {
   BlingConnectionRecord,
   OAuthPairingRequestRecord,
+  ConsumeOAuthStateResult,
   GatewaySessionRecord
 } from '../types/contracts.ts';
 
@@ -65,7 +66,9 @@ export interface IGatewayRepository {
   // Pareamentos OAuth (Pairing Requests)
   savePairingRequest(pairing: OAuthPairingRequestRecord): Promise<void>;
   getPairingByStateHash(stateHash: string): Promise<OAuthPairingRequestRecord | undefined>;
-  attachConnectionToPairing(stateHash: string, connectionId: string): Promise<boolean>;
+  getPairingById(pairingId: string): Promise<OAuthPairingRequestRecord | undefined>;
+  consumeOAuthState(stateHash: string): Promise<ConsumeOAuthStateResult>;
+  attachConnectionToPairing(pairingId: string, connectionId: string): Promise<boolean>;
   verifyAndAttachConnectionToPairing(
     stateHash: string,
     connectionId: string
@@ -99,6 +102,25 @@ export interface IGatewayRepository {
   revokeSessionFamily(tokenFamilyId: string): Promise<void>;
   getSessionByRefreshHash(refreshHash: string): Promise<GatewaySessionRecord | undefined>;
 
+  // Coordenação de Refresh Distribuído Bling (Lease/Claim - Fase 4C.2)
+  acquireRefreshLease(
+    connectionId: string,
+    ownerId: string,
+    durationMs?: number
+  ): Promise<{ acquired: boolean; tokenVersion: number; currentOwner?: string }>;
+  releaseRefreshLease(
+    connectionId: string,
+    ownerId: string,
+    options?: { incrementVersion?: boolean }
+  ): Promise<boolean>;
+  getRefreshLeaseState(connectionId: string): Promise<{
+    isLeased: boolean;
+    leaseOwner?: string | null;
+    leaseExpiresAt?: string | null;
+    tokenVersion: number;
+  }>;
+  getConnectionTokenVersion(connectionId: string): Promise<number | undefined>;
+
   // Limpeza
   cleanupExpired(): Promise<{ pairingsRemoved: number; sessionsRemoved: number }>;
   clearAll(): Promise<void>;
@@ -114,7 +136,19 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
   // Conexões Bling
   // ---------------------------------------------------------------------------
   async saveConnection(conn: BlingConnectionRecord): Promise<void> {
-    this.connections.set(conn.id, { ...conn });
+    return this.mutex.runExclusive(async () => {
+      const existing = this.connections.get(conn.id);
+      if (existing) {
+        this.connections.set(conn.id, {
+          ...conn,
+          refreshLeaseOwner: existing.refreshLeaseOwner,
+          refreshLeaseExpiresAt: existing.refreshLeaseExpiresAt,
+          tokenVersion: existing.tokenVersion
+        });
+      } else {
+        this.connections.set(conn.id, { ...conn });
+      }
+    });
   }
 
   async getConnection(id: string): Promise<BlingConnectionRecord | undefined> {
@@ -182,7 +216,17 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
   // Pareamentos OAuth (Guardrail 1: DoS Prevention & Single-Use)
   // ---------------------------------------------------------------------------
   async savePairingRequest(pairing: OAuthPairingRequestRecord): Promise<void> {
-    this.pairings.set(pairing.pairingId, { ...pairing });
+    return this.mutex.runExclusive(async () => {
+      if (this.pairings.has(pairing.pairingId)) {
+        throw new Error(`Pairing ${pairing.pairingId} já existe. Recriação não permitida.`);
+      }
+      for (const p of this.pairings.values()) {
+        if (p.stateHash && constantTimeCompare(p.stateHash, pairing.stateHash)) {
+          throw new Error(`stateHash já registrado em outro pairing.`);
+        }
+      }
+      this.pairings.set(pairing.pairingId, { ...pairing });
+    });
   }
 
   async getPairingByStateHash(stateHash: string): Promise<OAuthPairingRequestRecord | undefined> {
@@ -194,28 +238,7 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
     return undefined;
   }
 
-  async attachConnectionToPairing(stateHash: string, connectionId: string): Promise<boolean> {
-    const res = await this.verifyAndAttachConnectionToPairing(stateHash, connectionId);
-    return res.ok;
-  }
-
-  /**
-   * Validação atômica e consumo do State OAuth no callback (Guardrail de Concorrência e Anti-Replay).
-   * 
-   * Ordem estrita de validação:
-   * 1. Existência e comparação em tempo constante do stateHash;
-   * 2. Verificação de TTL (expiração);
-   * 3. Verificação de estado já consumido ou previamente vinculado;
-   * 4. Consumo imediato e atômico (stateHash é limpo para impedir qualquer replay ou concorrência).
-   */
-  async verifyAndAttachConnectionToPairing(
-    stateHash: string,
-    connectionId: string
-  ): Promise<{
-    ok: boolean;
-    pairing?: OAuthPairingRequestRecord;
-    error?: string;
-  }> {
+  async consumeOAuthState(stateHash: string): Promise<ConsumeOAuthStateResult> {
     return this.mutex.runExclusive(async () => {
       if (!stateHash) {
         return { ok: false, error: 'MISSING_STATE_HASH' };
@@ -229,37 +252,64 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
         }
       }
 
-      // 1. Verificação de existência
       if (!targetPairing) {
         return { ok: false, error: 'STATE_NOT_FOUND' };
       }
 
-      // 2. Verificação de single-use prévio
-      if (targetPairing.consumed) {
-        return { ok: false, error: 'PAIRING_ALREADY_CONSUMED' };
-      }
-
-      // 3. Verificação de TTL (expiração)
       const now = Date.now();
-      if (now > new Date(targetPairing.expiresAt).getTime()) {
-        return { ok: false, error: 'PAIRING_EXPIRED' };
+      const expiresAt = new Date(targetPairing.expiresAt).getTime();
+      if (now > expiresAt) {
+        return { ok: false, error: 'STATE_EXPIRED' };
       }
 
-      // 4. Verificação de conexão já vinculada
-      if (targetPairing.connectionId) {
-        return { ok: false, error: 'PAIRING_ALREADY_ATTACHED' };
+      if (targetPairing.stateConsumedAt || (targetPairing as any).stateConsumed) {
+        return { ok: false, error: 'STATE_ALREADY_CONSUMED' };
       }
 
-      // 5. Sucesso: vínculo da conexão e consumo definitivo do stateHash (Anti-Replay)
-      targetPairing.connectionId = connectionId;
-      targetPairing.stateHash = ''; // Invalida o stateHash para chamadas subsequentes/concorrentes
+      targetPairing.stateConsumedAt = new Date().toISOString();
+      (targetPairing as any).stateConsumed = true;
+      targetPairing.stateHash = ''; // Invalida stateHash para chamadas subsequentes
       this.pairings.set(targetPairing.pairingId, targetPairing);
 
       return {
         ok: true,
+        pairingId: targetPairing.pairingId,
+        clientSessionId: targetPairing.clientSessionId,
         pairing: { ...targetPairing }
       };
     });
+  }
+
+  async attachConnectionToPairing(pairingId: string, connectionId: string): Promise<boolean> {
+    return this.mutex.runExclusive(async () => {
+      const targetPairing = this.pairings.get(pairingId);
+      if (!targetPairing) return false;
+      targetPairing.connectionId = connectionId;
+      this.pairings.set(pairingId, targetPairing);
+      return true;
+    });
+  }
+
+  async verifyAndAttachConnectionToPairing(
+    stateHash: string,
+    connectionId: string
+  ): Promise<{
+    ok: boolean;
+    pairing?: OAuthPairingRequestRecord;
+    error?: string;
+  }> {
+    const consumeRes = await this.consumeOAuthState(stateHash);
+    if (!consumeRes.ok || !consumeRes.pairing) {
+      return consumeRes;
+    }
+    const attached = await this.attachConnectionToPairing(consumeRes.pairing.pairingId, connectionId);
+    if (!attached) {
+      return { ok: false, error: 'ATTACH_FAILED' };
+    }
+    return {
+      ok: true,
+      pairing: { ...consumeRes.pairing, connectionId }
+    };
   }
 
   /**
@@ -295,7 +345,9 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
       }
 
       // 4. Guardrail 1: Proteção contra Brute Force / DoS
-      if (pairing.failedAttempts >= pairing.maxAttempts) {
+      const currentFailed = pairing.attemptCount ?? pairing.failedAttempts ?? 0;
+      const maxLimit = pairing.maxAttempts ?? 5;
+      if (currentFailed >= maxLimit) {
         return { ok: false, error: 'PAIRING_MAX_ATTEMPTS_EXCEEDED', remainingAttempts: 0 };
       }
 
@@ -305,9 +357,11 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
 
       if (!matches) {
         // Falha de senha NÃO consome/destrói o pairing imediatamente (evita DoS por atacante avulso)
-        pairing.failedAttempts += 1;
+        const nextFailed = currentFailed + 1;
+        pairing.failedAttempts = nextFailed;
+        pairing.attemptCount = nextFailed;
         this.pairings.set(pairingId, pairing);
-        const remaining = Math.max(0, pairing.maxAttempts - pairing.failedAttempts);
+        const remaining = Math.max(0, maxLimit - nextFailed);
         return {
           ok: false,
           error: 'INVALID_PAIRING_SECRET',
@@ -335,7 +389,17 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
   // Sessões do Gateway (Guardrail 2: Rotação e Detecção de Reuse)
   // ---------------------------------------------------------------------------
   async createGatewaySession(session: GatewaySessionRecord): Promise<void> {
-    this.sessions.set(session.id, { ...session });
+    return this.mutex.runExclusive(async () => {
+      if (this.sessions.has(session.id)) {
+        throw new Error(`Sessão ${session.id} já existe.`);
+      }
+      for (const s of this.sessions.values()) {
+        if (s.refreshTokenHash === session.refreshTokenHash) {
+          throw new Error(`refreshTokenHash já registrado.`);
+        }
+      }
+      this.sessions.set(session.id, { ...session });
+    });
   }
 
   async getSessionByRefreshHash(refreshHash: string): Promise<GatewaySessionRecord | undefined> {
@@ -461,6 +525,82 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
     }
 
     return { pairingsRemoved, sessionsRemoved };
+  }
+
+  async getPairingById(pairingId: string): Promise<OAuthPairingRequestRecord | undefined> {
+    const pairing = this.pairings.get(pairingId);
+    return pairing ? { ...pairing } : undefined;
+  }
+
+  async acquireRefreshLease(
+    connectionId: string,
+    ownerId: string,
+    durationMs: number = 15000
+  ): Promise<{ acquired: boolean; tokenVersion: number; currentOwner?: string }> {
+    return this.mutex.runExclusive(async () => {
+      const conn = this.connections.get(connectionId);
+      if (!conn) throw new Error(`Conexão ${connectionId} não encontrada.`);
+      const now = Date.now();
+      const currentExpiry = conn.refreshLeaseExpiresAt ? new Date(conn.refreshLeaseExpiresAt).getTime() : 0;
+      const isLeased = Boolean(conn.refreshLeaseOwner && currentExpiry > now && conn.refreshLeaseOwner !== ownerId);
+      if (isLeased) {
+        return {
+          acquired: false,
+          tokenVersion: conn.tokenVersion || 1,
+          currentOwner: conn.refreshLeaseOwner || undefined
+        };
+      }
+      conn.refreshLeaseOwner = ownerId;
+      conn.refreshLeaseExpiresAt = new Date(now + durationMs).toISOString();
+      return {
+        acquired: true,
+        tokenVersion: conn.tokenVersion || 1,
+        currentOwner: ownerId
+      };
+    });
+  }
+
+  async releaseRefreshLease(
+    connectionId: string,
+    ownerId: string,
+    options: { incrementVersion?: boolean } = {}
+  ): Promise<boolean> {
+    return this.mutex.runExclusive(async () => {
+      const conn = this.connections.get(connectionId);
+      if (!conn || conn.refreshLeaseOwner !== ownerId) return false;
+      conn.refreshLeaseOwner = null;
+      conn.refreshLeaseExpiresAt = null;
+      if (options.incrementVersion) {
+        conn.tokenVersion = (conn.tokenVersion || 1) + 1;
+      }
+      return true;
+    });
+  }
+
+  async getRefreshLeaseState(connectionId: string): Promise<{
+    isLeased: boolean;
+    leaseOwner?: string | null;
+    leaseExpiresAt?: string | null;
+    tokenVersion: number;
+  }> {
+    const conn = this.connections.get(connectionId);
+    if (!conn) {
+      return { isLeased: false, tokenVersion: 1 };
+    }
+    const now = Date.now();
+    const currentExpiry = conn.refreshLeaseExpiresAt ? new Date(conn.refreshLeaseExpiresAt).getTime() : 0;
+    const isLeased = Boolean(conn.refreshLeaseOwner && currentExpiry > now);
+    return {
+      isLeased,
+      leaseOwner: conn.refreshLeaseOwner,
+      leaseExpiresAt: conn.refreshLeaseExpiresAt,
+      tokenVersion: conn.tokenVersion || 1
+    };
+  }
+
+  async getConnectionTokenVersion(connectionId: string): Promise<number | undefined> {
+    const conn = this.connections.get(connectionId);
+    return conn ? conn.tokenVersion || 1 : undefined;
   }
 
   async clearAll(): Promise<void> {

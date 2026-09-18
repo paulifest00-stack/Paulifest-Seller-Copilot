@@ -139,6 +139,7 @@ export class GatewayApp {
       clientSessionId,
       pairingSecretHash,
       stateHash,
+      attemptCount: 0,
       failedAttempts: 0,
       maxAttempts: 5,
       consumed: false,
@@ -306,12 +307,11 @@ export class GatewayApp {
     }
 
     const stateHash = hashSecret(state);
-    const connectionId = `conn_${randomUUID()}`;
 
-    // Validação e consumo atômico com verificação de existência, TTL, constant-time compare e vínculo único
-    const attachResult = await this.repository.verifyAndAttachConnectionToPairing(stateHash, connectionId);
+    // Fase A: Consumo atômico do state OAuth (transação curta sem espera de rede)
+    const consumeResult = await this.repository.consumeOAuthState(stateHash);
 
-    if (!attachResult.ok) {
+    if (!consumeResult.ok || !consumeResult.pairing) {
       res.writeHead(400);
       res.end(`
         <!DOCTYPE html>
@@ -325,6 +325,18 @@ export class GatewayApp {
       `);
       return;
     }
+
+    // Fase B: (Fase 4C.2B) Chamada externa ao Bling ocorrerá aqui fora de qualquer transação de banco
+
+    // Fase C: Persistência da conexão e vinculação ao pairingId
+    const connectionId = `conn_${randomUUID()}`;
+    await this.repository.saveConnection({
+      id: connectionId,
+      status: 'requires_reauth',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    await this.repository.attachConnectionToPairing(consumeResult.pairing.pairingId, connectionId);
 
     // HTML de sucesso: NUNCA reflete code, state, access_token ou segredos
     res.writeHead(200);
