@@ -263,7 +263,7 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
             </button>
           </div>
           <p className="text-[10px] text-[#86868b]">
-            Insira sua chave do Google AI Studio para usar visão real e Fact-or-Omit em nuvem. A chave é salva apenas no armazenamento local seguro do seu navegador.
+            Insira sua chave do Google AI Studio para usar visão real e Fact-or-Omit em nuvem. A chave é armazenada localmente neste navegador via chrome.storage.local.
           </p>
           <div className="flex gap-1.5">
             <input

@@ -531,8 +531,57 @@ export async function runIdentificationTests() {
     assert.strictEqual(resolved.status, 'approved');
   });
 
+  // ---------------------------------------------------------------------------
+  // 19. Regressão Fact-or-Omit: Ficha inicial sem defaults inventados
+  // ---------------------------------------------------------------------------
+  await runTest('19. Regressão Fact-or-Omit: Ficha inicial não possui categoria, peso, dimensões ou garantia inventados', () => {
+    const sheet = createInitialSheet();
+
+    // 1. Nenhuma categoria ML pré-definida sem evidência
+    assert.strictEqual(sheet.categoryIdML.status, 'missing');
+    assert.strictEqual(sheet.categoryIdML.value, '');
+    assert.strictEqual(sheet.categoryIdML.confidence, 0.0);
+    assert.strictEqual(sheet.categoryPathML.status, 'missing');
+    assert.strictEqual(sheet.categoryPathML.value, '');
+    assert.strictEqual(sheet.categoryPathML.confidence, 0.0);
+
+    // 2. Nenhum peso ou dimensão inventados
+    assert.strictEqual(sheet.packageWeightKg.status, 'missing');
+    assert.strictEqual(sheet.packageWeightKg.value, 0);
+    assert.strictEqual(sheet.packageWeightKg.confidence, 0.0);
+    assert.strictEqual(sheet.packageHeightCm.status, 'missing');
+    assert.strictEqual(sheet.packageHeightCm.value, 0);
+    assert.strictEqual(sheet.packageHeightCm.confidence, 0.0);
+    assert.strictEqual(sheet.packageWidthCm.status, 'missing');
+    assert.strictEqual(sheet.packageWidthCm.value, 0);
+    assert.strictEqual(sheet.packageWidthCm.confidence, 0.0);
+    assert.strictEqual(sheet.packageLengthCm.status, 'missing');
+    assert.strictEqual(sheet.packageLengthCm.value, 0);
+    assert.strictEqual(sheet.packageLengthCm.confidence, 0.0);
+
+    // 3. Nenhuma garantia inventada
+    assert.strictEqual(sheet.warrantyDays.status, 'missing');
+    assert.strictEqual(sheet.warrantyDays.value, 0);
+    assert.strictEqual(sheet.warrantyDays.confidence, 0.0);
+
+    // 4. Nenhum campo da ficha inicial sem evidência possui confiança positiva
+    const fields = [
+      sheet.ean, sheet.sku, sheet.title, sheet.brand, sheet.model,
+      sheet.categoryIdML, sheet.categoryPathML, sheet.ncm,
+      sheet.packageWeightKg, sheet.packageHeightCm, sheet.packageWidthCm, sheet.packageLengthCm,
+      sheet.costPrice, sheet.suggestedSalePrice, sheet.descriptionPlain,
+      sheet.warrantyDays
+    ];
+    for (const f of fields) {
+      if (!f.evidence) {
+        assert.strictEqual(f.confidence, 0.0, `Campo possui confidence ${f.confidence} > 0 sem evidência`);
+        assert.strictEqual(f.status, 'missing', `Campo possui status "${f.status}" sem evidência`);
+      }
+    }
+  });
+
   console.log('\n================================================================');
-  console.log(process.exitCode ? '❌ ALGUNS TESTES DA FASE 3 FALHARAM' : '🎉 TODOS OS 18 TESTES DA FASE 3 PASSARAM COM ÊXITO!');
+  console.log(process.exitCode ? '❌ ALGUNS TESTES DA FASE 3 FALHARAM' : '🎉 TODOS OS TESTES DA FASE 3 PASSARAM COM ÊXITO!');
   console.log('================================================================\n');
 }
 
