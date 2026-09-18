@@ -22,7 +22,8 @@
     "sidePanel",
     "tabs",
     "storage",
-    "activeTab"
+    "activeTab",
+    "webNavigation"
   ],
   "host_permissions": [
     "*://*.mercadolivre.com.br/*",

@@ -16,7 +16,9 @@ import { createInitialSheet } from '../core/schema/product.ts';
 import { 
   loadActiveSheet, 
   saveActiveSheet, 
-  clearActiveSheet 
+  clearActiveSheet,
+  loadSheet,
+  saveSheet
 } from '../core/storage/storage.ts';
 import { StepInput } from './components/steps/StepInput.tsx';
 import { StepSheet } from './components/steps/StepSheet.tsx';
@@ -42,28 +44,91 @@ export const App: React.FC = () => {
   const [sheet, setSheet] = useState<CentralProductSheet>(createInitialSheet());
   const [isLoaded, setIsLoaded] = useState<boolean>(false);
 
+  // 4. Estado da Aba Conectada (Fase 4B)
+  const [tabContext, setTabContext] = useState<any>(null);
+
   // Carrega a ficha persistida e escuta o contexto do Service Worker
   useEffect(() => {
-    // Carrega Ficha salva do storage
-    loadActiveSheet().then((savedSheet) => {
-      if (savedSheet && (savedSheet.costPrice?.value > 0 || savedSheet.ean?.value || savedSheet.title?.value)) {
-        setSheet(savedSheet);
-        setActiveFlow(true);
+    // Requisito 3: Se a aba é Bling, carregar loadSheet(activeSheetId); se não possui activeSheetId, NÃO carregar loadActiveSheet()
+    const reloadSheet = (targetSheetId?: string, platform?: string) => {
+      if (platform === 'bling') {
+        if (targetSheetId) {
+          loadSheet(targetSheetId).then((savedSheet) => {
+            if (savedSheet) {
+              setSheet(savedSheet);
+              if (savedSheet.costPrice?.value > 0 || savedSheet.ean?.value || savedSheet.title?.value || savedSheet.currentSalePrice?.value > 0) {
+                setActiveFlow(true);
+              } else {
+                setActiveFlow(false);
+              }
+            } else {
+              setSheet(createInitialSheet());
+              setActiveFlow(false);
+            }
+            setIsLoaded(true);
+          });
+        } else {
+          // Aba Bling sem ficha vinculada: NUNCA herdar/cair para loadActiveSheet() global
+          setSheet(createInitialSheet());
+          setActiveFlow(false);
+          setIsLoaded(true);
+        }
+        return;
       }
-      setIsLoaded(true);
-    });
 
-    // Busca inicial do contexto
-    chrome.runtime?.sendMessage<ExtensionMessage>({ type: 'GET_CONTEXT' }, (res) => {
-      if (res && res.platform) {
-        setContext(res);
-      }
-    });
+      // Fluxo legado/neutro: fallback para loadSheet(targetSheetId) ou loadActiveSheet()
+      const loadPromise = targetSheetId
+        ? loadSheet(targetSheetId)
+        : loadActiveSheet();
+
+      loadPromise.then((savedSheet) => {
+        if (savedSheet) {
+          setSheet(savedSheet);
+          if (savedSheet.costPrice?.value > 0 || savedSheet.ean?.value || savedSheet.title?.value || savedSheet.currentSalePrice?.value > 0) {
+            setActiveFlow(true);
+          }
+        } else {
+          setSheet(createInitialSheet());
+        }
+        setIsLoaded(true);
+      });
+    };
+
+    // Busca inicial do contexto da aba ativa
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'GET_ACTIVE_TAB_CONTEXT' }, (res) => {
+        if (res && res.platform) {
+          setTabContext(res);
+          setContext((prev) => ({
+            ...prev,
+            platform: res.platform,
+            url: res.url,
+            title: res.url,
+            summaryLabel: res.platform === 'bling' ? `Bling ERP • ${res.pageType}` : prev.summaryLabel
+          }));
+          reloadSheet(res.activeSheetId, res.platform);
+        } else {
+          reloadSheet();
+        }
+      });
+    } else {
+      reloadSheet();
+    }
 
     // Listener para eventos em tempo real
-    const listener = (message: ExtensionMessage) => {
+    const listener = (message: any) => {
       if (message.type === 'CONTEXT_UPDATED' && message.payload) {
         setContext(message.payload);
+      }
+      if (message.type === 'ACTIVE_TAB_CONTEXT_UPDATED' && message.state) {
+        setTabContext(message.state);
+        setContext((prev) => ({
+          ...prev,
+          platform: message.state.platform,
+          url: message.state.url,
+          summaryLabel: message.state.platform === 'bling' ? `Bling ERP • ${message.state.pageType}` : prev.summaryLabel
+        }));
+        reloadSheet(message.state.activeSheetId, message.state.platform);
       }
     };
 
@@ -76,7 +141,7 @@ export const App: React.FC = () => {
   // Salva automaticamente no storage quando a ficha sofrer alterações
   useEffect(() => {
     if (isLoaded && activeFlow) {
-      saveActiveSheet(sheet);
+      saveSheet(sheet);
     }
   }, [sheet, isLoaded, activeFlow]);
 
@@ -94,8 +159,22 @@ export const App: React.FC = () => {
     const initial = createInitialSheet();
     setSheet(initial);
     saveActiveSheet(initial);
+    saveSheet(initial);
     setActiveFlow(true);
     setCurrentStep(1);
+
+    // Requisito 4: Se o usuário iniciar nova ficha com TabContextState ativo, vincular à aba
+    if (tabContext && typeof tabContext.tabId === 'number') {
+      chrome.runtime?.sendMessage({
+        type: 'LINK_SHEET_TO_TAB',
+        tabId: tabContext.tabId,
+        sheetId: initial.id
+      }, (res) => {
+        if (res?.state) {
+          setTabContext(res.state);
+        }
+      });
+    }
   };
 
   const handleReset = () => {
@@ -178,6 +257,27 @@ export const App: React.FC = () => {
         </div>
       </header>
 
+      {/* Banner Contextual da Aba Bling (Fase 4B) */}
+      {tabContext?.platform === 'bling' && (
+        <div className="bg-emerald-50 border-b border-emerald-200/60 px-4 py-2 flex items-center justify-between text-xs text-emerald-900">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-[10px] bg-emerald-600 text-white px-1.5 py-0.5 rounded tracking-wide">
+              BLING
+            </span>
+            <span className="font-medium text-[11px]">
+              {tabContext.pageType === 'product_form_new'
+                ? 'Novo Produto • Cadastro em andamento'
+                : tabContext.detectedProduct?.id
+                  ? `Produto Detectado: #${tabContext.detectedProduct.id}`
+                  : 'Lista de Produtos'}
+            </span>
+          </div>
+          <span className="text-[9px] font-bold text-emerald-800 uppercase tracking-wider bg-emerald-200/60 px-2 py-0.5 rounded border border-emerald-300/60">
+            Simulação 4B
+          </span>
+        </div>
+      )}
+
       {/* 2. Conteúdo Principal */}
       <main className="flex-1 p-4 space-y-4 max-w-lg mx-auto w-full">
         {/* Card de Contexto Atual da Página */}
@@ -225,6 +325,12 @@ export const App: React.FC = () => {
                 Identifique por foto, EAN-13 ou custo CMV, preencha a Ficha Central e calcule o preço de venda ideal com margem líquida limpa.
               </p>
             </div>
+
+            {tabContext?.platform === 'bling' && !tabContext?.activeSheetId && (
+              <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200/70 rounded-lg px-2.5 py-1.5 text-center font-medium">
+                Nenhuma ficha vinculada a esta aba do Bling. Inicie uma nova ficha abaixo ou importe via dock na página.
+              </div>
+            )}
 
             {/* Pipeline de Passos Visual */}
             <div className="grid grid-cols-3 gap-1 py-2 text-[10px] font-medium text-[#86868b]">

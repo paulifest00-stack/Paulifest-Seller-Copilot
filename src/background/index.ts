@@ -1,7 +1,17 @@
-import { detectPageContext } from './context-detector';
-import { ExtensionMessage, PageContextState } from '../shared/types';
+import { tabContextManager } from './tab-context-manager.ts';
+import { messageRouter } from './message-router.ts';
+import { classifyBlingUrl } from '../content-scripts/bling/dom-identifier.ts';
+import { isBlingDomain } from '../shared/tab-context-contracts.ts';
 
-let currentContext: PageContextState = detectPageContext(undefined, 'Inicializando...');
+function isMlDomain(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr);
+    const host = parsed.hostname.toLowerCase();
+    return host === 'mercadolivre.com.br' || host.endsWith('.mercadolivre.com.br') || host === 'mercadolibre.com' || host.endsWith('.mercadolibre.com');
+  } catch {
+    return false;
+  }
+}
 
 // 1. Configura a ação do ícone para abrir a SidePanel nativa
 chrome.runtime.onInstalled.addListener(() => {
@@ -13,54 +23,97 @@ chrome.runtime.onInstalled.addListener(() => {
   console.info('[Paulifest Copilot] Extensão instalada com sucesso.');
 });
 
-// 2. Atualiza o contexto da aba ativa
-async function updateActiveTabContext(tabId?: number) {
-  try {
-    let tab: chrome.tabs.Tab | undefined;
-    if (tabId) {
-      tab = await chrome.tabs.get(tabId);
-    } else {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      tab = tabs[0];
-    }
+// 2. Reidratação automática de contexto por aba quando o Service Worker acordar
+tabContextManager.rehydrate().catch((err) => {
+  console.debug('[Paulifest Copilot] Erro na reidratação do TabContextManager:', err);
+});
 
-    if (tab) {
-      currentContext = detectPageContext(tab.url, tab.title, tab.id);
-      
-      // Notifica a Sidebar sobre a mudança de contexto
-      chrome.runtime.sendMessage<ExtensionMessage>({
-        type: 'CONTEXT_UPDATED',
-        payload: currentContext
-      }).catch(() => {
-        // Ignora erro caso a sidebar não esteja aberta no momento
-      });
+// 3. Listener nativo de navegação SPA: chrome.webNavigation.onHistoryStateUpdated
+if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
+  chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+    // Filtra apenas frames principais (frameId === 0)
+    if (details.frameId === 0 && details.tabId > 0 && details.url) {
+      if (isBlingDomain(details.url)) {
+        const classified = classifyBlingUrl(details.url);
+        tabContextManager.registerOrUpdateTab(details.tabId, {
+          platform: 'bling',
+          url: details.url,
+          pageType: classified.pageType,
+          detectedProduct: classified.detectedId ? { id: classified.detectedId } : undefined
+        }).then((updatedState) => {
+          messageRouter.dispatchUiStateToContentScript(details.tabId, updatedState);
+          messageRouter.notifyActiveTabToSidebar(details.tabId, updatedState);
+        }).catch(() => {});
+      }
     }
-  } catch (err) {
-    console.debug('[Paulifest Copilot] Aba inacessível:', err);
-  }
+  });
 }
 
-// 3. Listeners de ciclo de vida das abas
-chrome.tabs.onActivated.addListener((activeInfo) => {
-  updateActiveTabContext(activeInfo.tabId);
+// 4. Listeners de ciclo de vida das abas
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  const tabId = activeInfo.tabId;
+  const tabState = await tabContextManager.getTabState(tabId);
+  if (tabState) {
+    messageRouter.notifyActiveTabToSidebar(tabId, tabState);
+  } else {
+    // Busca informações da aba caso ainda não esteja registrada
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab && tab.url) {
+        const isBling = isBlingDomain(tab.url);
+        const isML = isMlDomain(tab.url);
+        const platform = isBling ? 'bling' : isML ? 'mercadolivre' : 'neutral';
+        const classified = isBling ? classifyBlingUrl(tab.url) : { pageType: 'other' as const };
+
+        const registered = await tabContextManager.registerOrUpdateTab(tabId, {
+          platform,
+          url: tab.url,
+          pageType: classified.pageType,
+          detectedProduct: (classified as any).detectedId ? { id: (classified as any).detectedId } : undefined
+        });
+        messageRouter.notifyActiveTabToSidebar(tabId, registered);
+      }
+    } catch {}
+  }
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' || changeInfo.url) {
-    if (tab.active) {
-      updateActiveTabContext(tabId);
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.url || changeInfo.status === 'complete') {
+    const url = tab.url || changeInfo.url || '';
+    if (url) {
+      const isBling = isBlingDomain(url);
+      const isML = isMlDomain(url);
+      const platform = isBling ? 'bling' : isML ? 'mercadolivre' : 'neutral';
+      const classified = isBling ? classifyBlingUrl(url) : { pageType: 'other' as const };
+
+      const registered = await tabContextManager.registerOrUpdateTab(tabId, {
+        platform,
+        url,
+        pageType: classified.pageType,
+        detectedProduct: (classified as any).detectedId ? { id: (classified as any).detectedId } : undefined
+      });
+
+      if (isBling) {
+        messageRouter.dispatchUiStateToContentScript(tabId, registered);
+      }
+      if (tab.active) {
+        messageRouter.notifyActiveTabToSidebar(tabId, registered);
+      }
     }
   }
 });
 
-// 4. Atendimento a mensagens internas
-chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
-  if (message.type === 'GET_CONTEXT') {
-    // Atualiza imediatamente e responde
-    updateActiveTabContext().then(() => {
-      sendResponse(currentContext);
-    });
-    return true; // Resposta assíncrona
-  }
-  return false;
+// 5. Limpeza de estado quando uma aba é fechada
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabContextManager.removeTab(tabId).catch((err) => {
+    console.debug('[Paulifest Copilot] Erro ao remover aba do manager:', err);
+  });
+});
+
+// 6. Roteamento centralizado de mensagens tipadas
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  messageRouter.handleMessage(message, sender, sendResponse).catch((err) => {
+    console.error('[Paulifest Copilot] Erro no roteador de mensagens:', err);
+  });
+  return true; // Mantém o canal de mensagens aberto para resposta assíncrona
 });

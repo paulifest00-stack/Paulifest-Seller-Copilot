@@ -94,7 +94,7 @@ export function detectPageContext(url?: string, title: string = '', tabId?: numb
     }
 
     // 2. Bling ERP
-    if (host.includes('bling.com.br')) {
+    if (host === 'bling.com.br' || host.endsWith('.bling.com.br')) {
       if (path.includes('/produtos/novo') || path.includes('/produtos/editar')) {
         return {
           platform: 'bling',

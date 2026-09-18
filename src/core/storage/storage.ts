@@ -53,22 +53,72 @@ function removeStorageItem(key: string) {
   memoryStore.delete(key);
 }
 
+const SHEET_STORAGE_PREFIX = 'paulifest_sheet_';
+
 /**
- * Salva a ficha de produto ativa no storage após validar conformidade com o Schema v2.
- * Se a ficha for inválida, a persistência é abortada para proteger a integridade do storage.
+ * Salva uma ficha de produto pelo seu próprio ID no storage permanente (chrome.storage.local).
+ * Garante validação de integridade com Schema v2 antes da gravação.
  */
-export async function saveActiveSheet(sheet: CentralProductSheet): Promise<void> {
+export async function saveSheet(sheet: CentralProductSheet): Promise<void> {
   const validation = validateSheetV2(sheet);
   if (!validation.isValid) {
     throw new Error(`Não é possível salvar ficha inválida no storage: ${validation.errors.join('; ')}`);
   }
 
   sheet.updatedAt = new Date().toISOString();
+  const sheetKey = `${SHEET_STORAGE_PREFIX}${sheet.id}`;
+
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    await chrome.storage.local.set({ [STORAGE_KEYS.ACTIVE_SHEET]: sheet });
+    await chrome.storage.local.set({ 
+      [sheetKey]: sheet,
+      [STORAGE_KEYS.ACTIVE_SHEET]: sheet 
+    });
   } else {
+    setStorageItem(sheetKey, JSON.stringify(sheet));
     setStorageItem(STORAGE_KEYS.ACTIVE_SHEET, JSON.stringify(sheet));
   }
+}
+
+/**
+ * Carrega uma ficha de produto pelo seu ID a partir do storage permanente (chrome.storage.local).
+ */
+export async function loadSheet(sheetId: string): Promise<CentralProductSheet | null> {
+  if (!sheetId || typeof sheetId !== 'string') return null;
+
+  const sheetKey = `${SHEET_STORAGE_PREFIX}${sheetId}`;
+  let raw: any = null;
+
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    const res = await chrome.storage.local.get(sheetKey);
+    raw = res[sheetKey] || null;
+  } else {
+    const serialized = getStorageItem(sheetKey);
+    raw = serialized ? JSON.parse(serialized) : null;
+  }
+
+  if (!raw) {
+    const active = await loadActiveSheet();
+    if (active && active.id === sheetId) {
+      return active;
+    }
+    return null;
+  }
+
+  try {
+    const migrated = migrateSheetToV2(raw);
+    return migrated;
+  } catch (err) {
+    console.error(`Falha ao validar/migrar ficha ${sheetId} do storage:`, err);
+    return null;
+  }
+}
+
+/**
+ * Salva a ficha de produto ativa no storage após validar conformidade com o Schema v2.
+ * Mantido como camada de compatibilidade com a Fase 2/3.
+ */
+export async function saveActiveSheet(sheet: CentralProductSheet): Promise<void> {
+  return saveSheet(sheet);
 }
 
 /**
