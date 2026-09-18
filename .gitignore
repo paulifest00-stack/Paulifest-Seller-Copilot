@@ -4,6 +4,7 @@ node_modules/
 # Builds e bundles de teste
 dist/
 dist-test/
+dist-gateway/
 
 # Material de referência e auditoria de terceiros (não versionar)
 reference_extensions/

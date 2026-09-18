@@ -6,8 +6,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "clean:extension": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
+    "clean:gateway": "node -e \"fs.rmSync('dist-gateway', { recursive: true, force: true })\"",
+    "clean": "npm run clean:extension && npm run clean:gateway",
     "build": "tsc && vite build",
     "test": "vite build --config vite.test.config.ts && node dist-test/test.mjs",
+    "typecheck:gateway": "tsc --project tsconfig.gateway.json --noEmit",
+    "build:gateway": "tsc --project tsconfig.gateway.json",
+    "verify:extension-isolation": "npm run clean:extension && npm run build && node scripts/verify-extension-isolation.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

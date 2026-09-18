@@ -7,6 +7,7 @@ import { runSchemaMigrationTests } from './schema-migration.test.ts';
 import { runTabContextManagerTests } from './tab-context-manager.test.ts';
 import { runSpaDetectorTests } from './spa-detector.test.ts';
 import { runMessageRouterTests } from './message-router.test.ts';
+import { runGatewaySecurityTests } from './gateway-security.test.ts';
 
 async function main() {
   console.log('🚀 INICIANDO TESTES DO PAULIFEST SELLER COPILOT...');
@@ -18,6 +19,7 @@ async function main() {
   await runTabContextManagerTests();
   await runSpaDetectorTests();
   await runMessageRouterTests();
+  await runGatewaySecurityTests();
 
   if (process.exitCode) {
     console.error('❌ Falha detectada em uma ou mais suítes.');
