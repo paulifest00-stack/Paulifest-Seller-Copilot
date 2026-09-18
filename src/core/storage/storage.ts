@@ -1,5 +1,5 @@
-// Camada de Persistência Local Tipada com suporte a chrome.storage.local e fallback robusto
 import type { CentralProductSheet } from '../schema/product.ts';
+import { migrateSheetToV2, validateSheetV2 } from '../schema/migrations.ts';
 
 const STORAGE_KEYS = {
   ACTIVE_SHEET: 'paulifest_active_product_sheet_v1',
@@ -54,9 +54,15 @@ function removeStorageItem(key: string) {
 }
 
 /**
- * Salva a ficha de produto ativa no storage.
+ * Salva a ficha de produto ativa no storage após validar conformidade com o Schema v2.
+ * Se a ficha for inválida, a persistência é abortada para proteger a integridade do storage.
  */
 export async function saveActiveSheet(sheet: CentralProductSheet): Promise<void> {
+  const validation = validateSheetV2(sheet);
+  if (!validation.isValid) {
+    throw new Error(`Não é possível salvar ficha inválida no storage: ${validation.errors.join('; ')}`);
+  }
+
   sheet.updatedAt = new Date().toISOString();
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     await chrome.storage.local.set({ [STORAGE_KEYS.ACTIVE_SHEET]: sheet });
@@ -66,15 +72,28 @@ export async function saveActiveSheet(sheet: CentralProductSheet): Promise<void>
 }
 
 /**
- * Recupera a ficha de produto ativa do storage.
+ * Recupera a ficha de produto ativa do storage, aplicando migração segura e transparente (v1 -> v2)
+ * se necessário. Se os dados armazenados estiverem corrompidos, o storage legado é preservado intacto.
  */
 export async function loadActiveSheet(): Promise<CentralProductSheet | null> {
+  let raw: any = null;
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     const res = await chrome.storage.local.get(STORAGE_KEYS.ACTIVE_SHEET);
-    return res[STORAGE_KEYS.ACTIVE_SHEET] || null;
+    raw = res[STORAGE_KEYS.ACTIVE_SHEET] || null;
   } else {
-    const raw = getStorageItem(STORAGE_KEYS.ACTIVE_SHEET);
-    return raw ? JSON.parse(raw) : null;
+    const serialized = getStorageItem(STORAGE_KEYS.ACTIVE_SHEET);
+    raw = serialized ? JSON.parse(serialized) : null;
+  }
+
+  if (!raw) return null;
+
+  try {
+    const migrated = migrateSheetToV2(raw);
+    return migrated;
+  } catch (err) {
+    console.error('Falha ao validar/migrar ficha legada do storage:', err);
+    // Preserva o storage legado intacto caso a migração falhe
+    return null;
   }
 }
 

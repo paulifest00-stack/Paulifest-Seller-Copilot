@@ -1,0 +1,31 @@
+{
+  "id": 123456789,
+  "nome": "Parafusadeira e Furadeira de Impacto Bosch GSB 18V-50",
+  "codigo": "BOSCH-GSB18V-50",
+  "preco": 649.90,
+  "precoCusto": 420.00,
+  "tipo": "P",
+  "situacao": "A",
+  "formato": "S",
+  "descricaoCurta": "Parafusadeira e Furadeira de Impacto Bosch GSB 18V-50 Brushless 18V",
+  "gtin": "7891009876543",
+  "marca": "Bosch",
+  "dimensoes": {
+    "largura": 22.5,
+    "altura": 10.0,
+    "profundidade": 30.0
+  },
+  "pesoBruto": 2.15,
+  "tributacao": {
+    "ncm": "8467.21.00",
+    "origem": 0
+  },
+  "midia": {
+    "imagens": {
+      "externas": [
+        { "link": "https://img.bling.com.br/bosch_1.jpg" },
+        { "link": "https://img.bling.com.br/bosch_2.jpg" }
+      ]
+    }
+  }
+}

@@ -27,7 +27,8 @@ export type EvidenceSourceType =
   | 'marketplace_pdp'         // Tier 6: Anúncio de marketplace / concorrente
   | 'image_ocr'               // Evidência visual extraída da foto do item
   | 'user_input'              // Informado diretamente pelo vendedor
-  | 'rule_engine';            // Regra matemática determinística
+  | 'rule_engine'             // Regra matemática determinística
+  | 'erp_api_record';         // Tier 4: Registro extraído de ERP / API oficial
 
 export interface FieldEvidence {
   sourceType?: EvidenceSourceType;
@@ -94,7 +95,19 @@ export interface ProductImage {
   status: AuditedField<'approved' | 'warning' | 'rejected'>;
 }
 
+export interface ExternalProductReference {
+  system: 'bling' | 'mercadolivre' | string;
+  externalId: string;
+  parentExternalId?: string;
+  sku?: string;
+  context?: string;
+  importedAt: string;
+  lastSyncedAt?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface CentralProductSheet {
+  schemaVersion: number;
   id: string;
   createdAt: string;
   updatedAt: string;
@@ -119,7 +132,8 @@ export interface CentralProductSheet {
 
   // 4. Custos e Financeiro
   costPrice: AuditedField<number>;          // CMV em R$
-  suggestedSalePrice: AuditedField<number>; // Preço final sugerido
+  currentSalePrice: AuditedField<number>;   // Preço de venda praticado no ERP / canal
+  suggestedSalePrice: AuditedField<number>; // Preço final sugerido pela extensão
 
   // 5. Conteúdo Comercial
   descriptionPlain: AuditedField<string>;
@@ -130,7 +144,10 @@ export interface CentralProductSheet {
   images: ProductImage[];
   attributes: TechnicalAttribute[];
 
-  // 7. Metadados Operacionais
+  // 7. Vínculos e Referências Externas
+  externalReferences: ExternalProductReference[];
+
+  // 8. Metadados Operacionais
   overallConfidenceScore: number;
   hasUnresolvedConflicts: boolean;
 }
@@ -154,6 +171,7 @@ export function createAuditedField<T>(
 export function createInitialSheet(): CentralProductSheet {
   const now = new Date().toISOString();
   return {
+    schemaVersion: 2,
     id: `prod_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     createdAt: now,
     updatedAt: now,
@@ -170,12 +188,14 @@ export function createInitialSheet(): CentralProductSheet {
     packageWidthCm: createAuditedField(0, 'rule_engine', 0.0, 'missing'),
     packageLengthCm: createAuditedField(0, 'rule_engine', 0.0, 'missing'),
     costPrice: createAuditedField(0, 'user_manual', 0.0, 'missing'),
+    currentSalePrice: createAuditedField(0, 'rule_engine', 0.0, 'missing'),
     suggestedSalePrice: createAuditedField(0, 'rule_engine', 0.0, 'missing'),
     descriptionPlain: createAuditedField('', 'user_manual', 0.0, 'missing'),
     bulletPoints: createAuditedField([], 'user_manual', 0.0, 'missing'),
     warrantyDays: createAuditedField(0, 'rule_engine', 0.0, 'missing'),
     images: [],
     attributes: [],
+    externalReferences: [],
     overallConfidenceScore: 0,
     hasUnresolvedConflicts: false
   };

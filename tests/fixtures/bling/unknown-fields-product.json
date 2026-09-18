@@ -1,0 +1,14 @@
+{
+  "id": 333444,
+  "nome": "Produto Teste com Campos Desconhecidos e Estoque",
+  "codigo": "TESTE-UNK",
+  "preco": 89.90,
+  "campo_inventado_xyz": "valor arbitrario",
+  "custom_meta_property": 42,
+  "flag_externa_qualquer": true,
+  "estoque": {
+    "saldo": 150,
+    "minimo": 10,
+    "localizacao": "Prateleira B3"
+  }
+}

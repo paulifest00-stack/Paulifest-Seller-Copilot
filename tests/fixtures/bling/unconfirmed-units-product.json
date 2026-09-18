@@ -1,0 +1,12 @@
+{
+  "id": 99887766,
+  "nome": "Nível Laser Autonivelante",
+  "codigo": "NIVEL-LASER-360",
+  "preco": 399.00,
+  "pesoBruto": 1.2,
+  "dimensoes": {
+    "largura": 15,
+    "altura": 12,
+    "profundidade": 18
+  }
+}

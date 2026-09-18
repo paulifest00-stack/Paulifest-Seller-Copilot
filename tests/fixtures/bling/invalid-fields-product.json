@@ -1,0 +1,13 @@
+{
+  "id": 111222,
+  "nome": "Produto Teste com Campos Inválidos",
+  "codigo": "TESTE-INV",
+  "preco": "não-e-numero",
+  "precoCusto": -50.00,
+  "gtin": "123_letras_invalidas",
+  "dimensoes": {
+    "largura": -10,
+    "altura": "altura-invalida",
+    "profundidade": 15
+  }
+}
