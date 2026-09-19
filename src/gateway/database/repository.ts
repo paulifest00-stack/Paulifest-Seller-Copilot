@@ -26,7 +26,10 @@ import type {
   BlingConnectionRecord,
   OAuthPairingRequestRecord,
   ConsumeOAuthStateResult,
-  GatewaySessionRecord
+  GatewaySessionRecord,
+  RefreshTokensUpdateData,
+  ConsumePairingAndCreateSessionParams,
+  ConsumePairingAndCreateSessionResult
 } from '../types/contracts.ts';
 
 /**
@@ -69,6 +72,7 @@ export interface IGatewayRepository {
   getPairingById(pairingId: string): Promise<OAuthPairingRequestRecord | undefined>;
   consumeOAuthState(stateHash: string): Promise<ConsumeOAuthStateResult>;
   attachConnectionToPairing(pairingId: string, connectionId: string): Promise<boolean>;
+  createConnectionAndAttachPairing(connection: BlingConnectionRecord, pairingId: string): Promise<boolean>;
   verifyAndAttachConnectionToPairing(
     stateHash: string,
     connectionId: string
@@ -86,9 +90,13 @@ export interface IGatewayRepository {
     error?: string;
     remainingAttempts?: number;
   }>;
+  consumePairingAndCreateGatewaySession(
+    params: ConsumePairingAndCreateSessionParams
+  ): Promise<ConsumePairingAndCreateSessionResult>;
 
   // Sessões do Gateway (com Rotação e Reuse Detection)
   createGatewaySession(session: GatewaySessionRecord): Promise<void>;
+  getSession(sessionId: string): Promise<GatewaySessionRecord | undefined>;
   rotateGatewaySession(
     oldRefreshToken: string,
     newRefreshToken: string,
@@ -108,11 +116,22 @@ export interface IGatewayRepository {
     ownerId: string,
     durationMs?: number
   ): Promise<{ acquired: boolean; tokenVersion: number; currentOwner?: string }>;
+  extendRefreshLease(
+    connectionId: string,
+    ownerId: string,
+    durationMs?: number
+  ): Promise<boolean>;
   releaseRefreshLease(
     connectionId: string,
     ownerId: string,
     options?: { incrementVersion?: boolean }
   ): Promise<boolean>;
+  updateTokensWithFencing(
+    connectionId: string,
+    ownerId: string,
+    expectedVersion: number,
+    updateData: RefreshTokensUpdateData
+  ): Promise<{ success: boolean; newTokenVersion?: number }>;
   getRefreshLeaseState(connectionId: string): Promise<{
     isLeased: boolean;
     leaseOwner?: string | null;
@@ -120,6 +139,7 @@ export interface IGatewayRepository {
     tokenVersion: number;
   }>;
   getConnectionTokenVersion(connectionId: string): Promise<number | undefined>;
+  disconnect(connectionId: string): Promise<void>;
 
   // Limpeza
   cleanupExpired(): Promise<{ pairingsRemoved: number; sessionsRemoved: number }>;
@@ -290,6 +310,23 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
     });
   }
 
+  async createConnectionAndAttachPairing(
+    connection: BlingConnectionRecord,
+    pairingId: string
+  ): Promise<boolean> {
+    return this.mutex.runExclusive(async () => {
+      const targetPairing = this.pairings.get(pairingId);
+      if (!targetPairing) return false;
+      if (!targetPairing.stateConsumedAt || targetPairing.connectionId) {
+        return false;
+      }
+      this.connections.set(connection.id, { ...connection });
+      targetPairing.connectionId = connection.id;
+      this.pairings.set(pairingId, targetPairing);
+      return true;
+    });
+  }
+
   async verifyAndAttachConnectionToPairing(
     stateHash: string,
     connectionId: string
@@ -385,6 +422,84 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
     });
   }
 
+  async consumePairingAndCreateGatewaySession(
+    params: ConsumePairingAndCreateSessionParams
+  ): Promise<ConsumePairingAndCreateSessionResult> {
+    return this.mutex.runExclusive(async () => {
+      const pairing = this.pairings.get(params.pairingId);
+
+      if (!pairing) {
+        return { ok: false, error: 'PAIRING_NOT_FOUND' };
+      }
+
+      if (pairing.consumed) {
+        return { ok: false, error: 'PAIRING_ALREADY_CONSUMED' };
+      }
+
+      const now = Date.now();
+      const expiresAt = new Date(pairing.expiresAt).getTime();
+      if (now > expiresAt) {
+        return { ok: false, error: 'PAIRING_EXPIRED' };
+      }
+
+      const currentFailed = pairing.attemptCount ?? pairing.failedAttempts ?? 0;
+      const maxLimit = pairing.maxAttempts ?? 5;
+      if (currentFailed >= maxLimit) {
+        return { ok: false, error: 'PAIRING_MAX_ATTEMPTS_EXCEEDED', remainingAttempts: 0 };
+      }
+
+      const providedHash = hashSecret(params.pairingSecret);
+      const matches = constantTimeCompare(providedHash, pairing.pairingSecretHash);
+
+      if (!matches) {
+        const nextFailed = currentFailed + 1;
+        pairing.failedAttempts = nextFailed;
+        pairing.attemptCount = nextFailed;
+        this.pairings.set(params.pairingId, pairing);
+        return {
+          ok: false,
+          error: 'INVALID_PAIRING_SECRET',
+          remainingAttempts: Math.max(0, maxLimit - nextFailed)
+        };
+      }
+
+      if (!pairing.connectionId) {
+        return { ok: false, error: 'OAUTH_FLOW_NOT_COMPLETED' };
+      }
+
+      if (this.sessions.has(params.sessionId)) {
+        throw new Error(`Sessão ${params.sessionId} já existe.`);
+      }
+      for (const s of this.sessions.values()) {
+        if (s.refreshTokenHash === params.refreshTokenHash) {
+          throw new Error(`refreshTokenHash já registrado.`);
+        }
+      }
+
+      const sessionRecord: GatewaySessionRecord = {
+        id: params.sessionId,
+        connectionId: pairing.connectionId,
+        clientSessionId: pairing.clientSessionId,
+        tokenFamilyId: params.tokenFamilyId,
+        refreshTokenHash: params.refreshTokenHash,
+        expiresAt: params.sessionExpiresAt,
+        createdAt: new Date().toISOString()
+      };
+      this.sessions.set(params.sessionId, sessionRecord);
+
+      pairing.consumed = true;
+      pairing.pairingConsumedAt = new Date().toISOString();
+      this.pairings.set(params.pairingId, pairing);
+
+      return {
+        ok: true,
+        connectionId: pairing.connectionId,
+        clientSessionId: pairing.clientSessionId,
+        pairing: { ...pairing }
+      };
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Sessões do Gateway (Guardrail 2: Rotação e Detecção de Reuse)
   // ---------------------------------------------------------------------------
@@ -399,6 +514,13 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
         }
       }
       this.sessions.set(session.id, { ...session });
+    });
+  }
+
+  async getSession(sessionId: string): Promise<GatewaySessionRecord | undefined> {
+    return this.mutex.runExclusive(async () => {
+      const sess = this.sessions.get(sessionId);
+      return sess ? { ...sess } : undefined;
     });
   }
 
@@ -560,6 +682,19 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
     });
   }
 
+  async extendRefreshLease(
+    connectionId: string,
+    ownerId: string,
+    durationMs: number = 15000
+  ): Promise<boolean> {
+    return this.mutex.runExclusive(async () => {
+      const conn = this.connections.get(connectionId);
+      if (!conn || conn.refreshLeaseOwner !== ownerId) return false;
+      conn.refreshLeaseExpiresAt = new Date(Date.now() + durationMs).toISOString();
+      return true;
+    });
+  }
+
   async releaseRefreshLease(
     connectionId: string,
     ownerId: string,
@@ -575,6 +710,40 @@ export class InMemoryGatewayRepository implements IGatewayRepository {
       }
       return true;
     });
+  }
+
+  async updateTokensWithFencing(
+    connectionId: string,
+    ownerId: string,
+    expectedVersion: number,
+    updateData: RefreshTokensUpdateData
+  ): Promise<{ success: boolean; newTokenVersion?: number }> {
+    return this.mutex.runExclusive(async () => {
+      const conn = this.connections.get(connectionId);
+      if (!conn) return { success: false };
+      if (conn.refreshLeaseOwner !== ownerId || (conn.tokenVersion || 1) !== expectedVersion) {
+        return { success: false };
+      }
+      conn.encryptedAccessToken = updateData.encryptedAccessToken;
+      conn.accessTokenIv = updateData.accessTokenIv;
+      conn.accessTokenTag = updateData.accessTokenTag;
+      conn.encryptedRefreshToken = updateData.encryptedRefreshToken;
+      conn.refreshTokenIv = updateData.refreshTokenIv;
+      conn.refreshTokenTag = updateData.refreshTokenTag;
+      conn.tokenExpiresAt = updateData.tokenExpiresAt;
+      if (updateData.scope) conn.scope = updateData.scope;
+      if (updateData.keyVersion) conn.keyVersion = updateData.keyVersion;
+      conn.tokenVersion = (conn.tokenVersion || 1) + 1;
+      conn.refreshLeaseOwner = null;
+      conn.refreshLeaseExpiresAt = null;
+      conn.lastRefreshAt = new Date().toISOString();
+      conn.updatedAt = new Date().toISOString();
+      return { success: true, newTokenVersion: conn.tokenVersion };
+    });
+  }
+
+  async disconnect(connectionId: string): Promise<void> {
+    return this.deleteConnection(connectionId);
   }
 
   async getRefreshLeaseState(connectionId: string): Promise<{

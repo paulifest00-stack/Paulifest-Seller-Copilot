@@ -124,3 +124,89 @@ export interface SessionHandshakeResponse {
   error?: string;
   remainingAttempts?: number;
 }
+
+export interface RefreshSessionRequest {
+  gatewayRefreshToken: string;
+}
+
+export interface RefreshSessionResponse {
+  ok: boolean;
+  gatewaySessionToken?: string;
+  gatewayRefreshToken?: string;
+  expiresInSeconds?: number;
+  error?: string;
+}
+
+export interface BlingStatusResponse {
+  ok: boolean;
+  connected: boolean;
+  status: ConnectionStatus;
+  requiresReauth: boolean;
+  lastRefreshAt?: string | null;
+}
+
+export interface RemoteRevocationStatus {
+  accessToken: 'success' | 'failed' | 'not_available';
+  refreshToken: 'success' | 'failed' | 'not_available';
+  complete: boolean;
+}
+
+export interface DisconnectResponse {
+  ok: boolean;
+  status: 'disconnected';
+  localDisconnected: boolean;
+  remoteRevocation: RemoteRevocationStatus;
+  message: string;
+}
+
+export interface ConsumePairingAndCreateSessionParams {
+  pairingId: string;
+  pairingSecret: string;
+  sessionId: string;
+  tokenFamilyId: string;
+  refreshTokenHash: string;
+  sessionExpiresAt: string;
+}
+
+export interface ConsumePairingAndCreateSessionResult {
+  ok: boolean;
+  connectionId?: string;
+  clientSessionId?: string;
+  pairing?: OAuthPairingRequestRecord;
+  error?: 'PAIRING_NOT_FOUND' | 'PAIRING_EXPIRED' | 'PAIRING_ALREADY_CONSUMED' | 'PAIRING_MAX_ATTEMPTS_EXCEEDED' | 'INVALID_PAIRING_SECRET' | 'OAUTH_FLOW_NOT_COMPLETED' | 'DATABASE_ERROR';
+  remainingAttempts?: number;
+}
+
+export interface BlingTokenResponse {
+  access_token: string;
+  expires_in: number;
+  token_type: string;
+  scope: string;
+  refresh_token: string;
+}
+
+export interface BlingOAuthErrorData {
+  status?: number;
+  category: 'auth' | 'rate_limit' | 'server_error' | 'network' | 'invalid_payload';
+  code?: string;
+  message: string;
+  retryable: boolean;
+  requiresReauth: boolean;
+}
+
+export interface BlingRevokeResult {
+  success: boolean;
+  error?: string;
+}
+
+export interface RefreshTokensUpdateData {
+  encryptedAccessToken: string;
+  accessTokenIv: string;
+  accessTokenTag: string;
+  encryptedRefreshToken: string;
+  refreshTokenIv: string;
+  refreshTokenTag: string;
+  tokenExpiresAt: string;
+  scope?: string | null;
+  keyVersion?: string;
+}

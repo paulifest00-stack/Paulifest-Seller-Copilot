@@ -4,12 +4,15 @@ export interface GatewayConfig {
   blingClientId: string;
   blingClientSecret: string;
   blingRedirectUri: string;
+  blingBaseUrl: string;            // Default: 'https://api.bling.com.br'
+  blingAuthUrl: string;            // Default: 'https://www.bling.com.br/Api/v3/oauth/authorize'
+  blingTimeoutMs: number;          // Default: 8000ms
   encryptionKey: Buffer;           // Chave de 32 bytes para AES-256
   jwtSecret: string;
   port: number;
   environment: 'development' | 'test' | 'production';
   pairingTtlSeconds: number;       // Default: 300 (5 minutos)
-  gstTtlSeconds: number;           // Default: 7200 (2 horas)
+  gstTtlSeconds: number;           // Default: 900 (15 minutos)
   sessionRefreshTtlDays: number;   // Default: 14 dias
   databaseUrl?: string;            // PostgreSQL connection string (Fase 4C.2)
 }
@@ -18,6 +21,9 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
   const environment = (env.NODE_ENV === 'production' ? 'production' : env.NODE_ENV === 'test' ? 'test' : 'development') as GatewayConfig['environment'];
   const port = parseInt(env.GATEWAY_PORT || '3001', 10);
   const databaseUrl = env.DATABASE_URL?.trim() || undefined;
+  const blingBaseUrl = env.BLING_BASE_URL?.trim() || 'https://api.bling.com.br';
+  const blingAuthUrl = env.BLING_AUTH_URL?.trim() || 'https://www.bling.com.br/Api/v3/oauth/authorize';
+  const blingTimeoutMs = parseInt(env.BLING_TIMEOUT_MS || '8000', 10);
 
   if (environment === 'production') {
     // Validação estrita em Produção: nenhum segredo pode usar fallback fictício
@@ -63,12 +69,15 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       blingClientId,
       blingClientSecret,
       blingRedirectUri,
+      blingBaseUrl,
+      blingAuthUrl,
+      blingTimeoutMs,
       encryptionKey,
       jwtSecret,
       port,
       environment,
       pairingTtlSeconds: 300,        // 5 minutos
-      gstTtlSeconds: 7200,          // 2 horas
+      gstTtlSeconds: 900,           // 15 minutos
       sessionRefreshTtlDays: 14,    // 14 dias
       databaseUrl
     };
@@ -116,12 +125,15 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       blingClientId,
       blingClientSecret,
       blingRedirectUri,
+      blingBaseUrl,
+      blingAuthUrl,
+      blingTimeoutMs,
       encryptionKey,
       jwtSecret,
       port,
       environment,
       pairingTtlSeconds: 300,
-      gstTtlSeconds: 7200,
+      gstTtlSeconds: 900,
       sessionRefreshTtlDays: 14,
       databaseUrl
     };
@@ -152,12 +164,15 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     blingClientId,
     blingClientSecret,
     blingRedirectUri,
+    blingBaseUrl,
+    blingAuthUrl,
+    blingTimeoutMs,
     encryptionKey,
     jwtSecret,
     port,
     environment,
     pairingTtlSeconds: 300,
-    gstTtlSeconds: 7200,
+    gstTtlSeconds: 900,
     sessionRefreshTtlDays: 14,
     databaseUrl
   };

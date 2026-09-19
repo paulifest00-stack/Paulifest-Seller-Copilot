@@ -75,3 +75,6 @@ export function decryptAesGcm(
     throw new Error('Falha na autenticação criptográfica AES-GCM: ciphertext ou auth tag adulterados.');
   }
 }
+
+export const encryptPayload = encryptAesGcm;
+export const decryptPayload = decryptAesGcm;

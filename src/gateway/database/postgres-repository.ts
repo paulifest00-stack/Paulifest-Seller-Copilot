@@ -10,7 +10,10 @@ import type {
   ConsumeOAuthStateResult,
   GatewaySessionRecord,
   RefreshLeaseAcquireResult,
-  RefreshLeaseState
+  RefreshLeaseState,
+  RefreshTokensUpdateData,
+  ConsumePairingAndCreateSessionParams,
+  ConsumePairingAndCreateSessionResult
 } from '../types/contracts.ts';
 
 export class PostgresGatewayRepository implements IGatewayRepository {
@@ -353,6 +356,108 @@ export class PostgresGatewayRepository implements IGatewayRepository {
   }
 
   /**
+   * Fase C Atômica do Callback:
+   * Cria a conexão com os tokens já cifrados e associa ao pairing_id em uma ÚNICA transação SQL.
+   * Se qualquer etapa falhar ou o pairing já tiver connectionId, dá rollback completo e nenhuma conexão órfã é criada.
+   */
+  async createConnectionAndAttachPairing(
+    conn: BlingConnectionRecord,
+    pairingId: string
+  ): Promise<boolean> {
+    const client = await this.acquireClient();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Localiza e bloqueia a linha de pareamento no banco
+      const checkPairing = await client.query(
+        `SELECT * FROM gateway_pairings WHERE pairing_id = $1 FOR UPDATE;`,
+        [pairingId]
+      );
+
+      if (checkPairing.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+
+      const pairingRow = checkPairing.rows[0];
+      // Exige que o state tenha sido consumido na Fase A e que o pairing ainda não possua conexão vinculada
+      if (pairingRow.state_consumed_at === null || pairingRow.connection_id !== null) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+
+      // 2. Insere a conexão com os tokens já cifrados
+      const insertConnText = `
+        INSERT INTO bling_connections (
+          id,
+          status,
+          access_token_cipher,
+          access_token_iv,
+          access_token_tag,
+          refresh_token_cipher,
+          refresh_token_iv,
+          refresh_token_tag,
+          key_version,
+          expires_at,
+          scope,
+          account_identifier,
+          last_refresh_at,
+          refresh_lease_owner,
+          refresh_lease_expires_at,
+          token_version,
+          created_at,
+          updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+        );
+      `;
+
+      await client.query(insertConnText, [
+        conn.id,
+        conn.status,
+        conn.encryptedAccessToken || null,
+        conn.accessTokenIv || null,
+        conn.accessTokenTag || null,
+        conn.encryptedRefreshToken || null,
+        conn.refreshTokenIv || null,
+        conn.refreshTokenTag || null,
+        conn.keyVersion || 'v1',
+        conn.tokenExpiresAt || null,
+        conn.scope || null,
+        conn.accountIdentifier || null,
+        conn.lastRefreshAt || null,
+        conn.refreshLeaseOwner || null,
+        conn.refreshLeaseExpiresAt || null,
+        conn.tokenVersion || 1,
+        conn.createdAt || new Date().toISOString(),
+        conn.updatedAt || new Date().toISOString()
+      ]);
+
+      // 3. Associa a conexão ao pairing de forma estrita
+      const updatePairingText = `
+        UPDATE gateway_pairings
+        SET connection_id = $2
+        WHERE pairing_id = $1 AND connection_id IS NULL
+        RETURNING pairing_id;
+      `;
+      const updateRes = await client.query(updatePairingText, [pairingId, conn.id]);
+
+      if ((updateRes.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+
+      await client.query('COMMIT');
+      return true;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Método composto mantido para compatibilidade: consome state (Fase A) e anexa conexão (Fase C).
    */
   async verifyAndAttachConnectionToPairing(
@@ -480,6 +585,132 @@ export class PostgresGatewayRepository implements IGatewayRepository {
     } catch (err: any) {
       await client.query('ROLLBACK');
       return { ok: false, error: `INTERNAL_ERROR: ${err.message}` };
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Operação atômica que consome o pairing e cria a sessão + primeiro GRT na MESMA transação PostgreSQL:
+   * 1. SELECT gateway_pairings ... FOR UPDATE;
+   * 2. Valida TTL, pairing_consumed_at IS NULL, connection_id IS NOT NULL;
+   * 3. Validação constante de pairingSecret (preservando attempt_count anti-DoS se inválido);
+   * 4. INSERT INTO gateway_sessions;
+   * 5. INSERT INTO gateway_refresh_tokens;
+   * 6. UPDATE gateway_pairings SET pairing_consumed_at = NOW();
+   * 7. COMMIT.
+   * Qualquer falha durante o processo resulta em ROLLBACK completo: pairing continua intacto e não consumido.
+   */
+  async consumePairingAndCreateGatewaySession(
+    params: ConsumePairingAndCreateSessionParams
+  ): Promise<ConsumePairingAndCreateSessionResult> {
+    const client = await this.acquireClient();
+
+    try {
+      await client.query('BEGIN');
+
+      const selectText = `
+        SELECT * FROM gateway_pairings
+        WHERE pairing_id = $1
+        FOR UPDATE;
+      `;
+      const { rows } = await client.query(selectText, [params.pairingId]);
+
+      if (rows.length === 0) {
+        await client.query('COMMIT');
+        return { ok: false, error: 'PAIRING_NOT_FOUND' };
+      }
+
+      const row = rows[0];
+      const now = Date.now();
+      const expiresAtMs = new Date(row.expires_at).getTime();
+
+      if (now > expiresAtMs) {
+        await client.query('COMMIT');
+        return { ok: false, error: 'PAIRING_EXPIRED' };
+      }
+
+      if (row.pairing_consumed_at !== null) {
+        await client.query('COMMIT');
+        return { ok: false, error: 'PAIRING_ALREADY_CONSUMED' };
+      }
+
+      const maxAttempts = 5;
+      if (row.attempt_count >= maxAttempts) {
+        await client.query('COMMIT');
+        return { ok: false, error: 'PAIRING_MAX_ATTEMPTS_EXCEEDED', remainingAttempts: 0 };
+      }
+
+      // Validação em tempo constante do segredo
+      const inputSecretHash = hashSecret(params.pairingSecret);
+      const isSecretValid = constantTimeCompare(inputSecretHash, row.pairing_secret_hash);
+
+      if (!isSecretValid) {
+        const newAttempts = row.attempt_count + 1;
+        await client.query(
+          'UPDATE gateway_pairings SET attempt_count = $2 WHERE pairing_id = $1',
+          [params.pairingId, newAttempts]
+        );
+        await client.query('COMMIT');
+
+        return {
+          ok: false,
+          error: 'INVALID_PAIRING_SECRET',
+          remainingAttempts: Math.max(0, maxAttempts - newAttempts)
+        };
+      }
+
+      // O fluxo OAuth precisou ser concluído no callback previamente
+      if (!row.connection_id) {
+        await client.query('COMMIT');
+        return { ok: false, error: 'OAUTH_FLOW_NOT_COMPLETED' };
+      }
+
+      // 1. Insere gateway_sessions
+      const sessionQuery = `
+        INSERT INTO gateway_sessions (
+          id, connection_id, client_session_id, revoked_at, created_at
+        ) VALUES ($1, $2, $3, NULL, NOW());
+      `;
+      await client.query(sessionQuery, [
+        params.sessionId,
+        row.connection_id,
+        row.client_session_id
+      ]);
+
+      // 2. Insere primeiro gateway_refresh_tokens
+      const tokenQuery = `
+        INSERT INTO gateway_refresh_tokens (
+          id, session_id, family_id, token_hash, used_at, revoked_at, expires_at, created_at
+        ) VALUES ($1, $2, $3, $4, NULL, NULL, $5, NOW());
+      `;
+      await client.query(tokenQuery, [
+        randomUUID(),
+        params.sessionId,
+        params.tokenFamilyId,
+        params.refreshTokenHash,
+        new Date(params.sessionExpiresAt)
+      ]);
+
+      // 3. Marca pairing como consumido atomicamente
+      const updateText = `
+        UPDATE gateway_pairings
+        SET pairing_consumed_at = NOW()
+        WHERE pairing_id = $1
+        RETURNING *;
+      `;
+      const updatedRes = await client.query(updateText, [params.pairingId]);
+      await client.query('COMMIT');
+
+      return {
+        ok: true,
+        connectionId: row.connection_id,
+        clientSessionId: row.client_session_id,
+        pairing: this.mapPairingRow(updatedRes.rows[0])
+      };
+    } catch (err: any) {
+      await client.query('ROLLBACK');
+      throw err;
     } finally {
       client.release();
     }
@@ -700,6 +931,26 @@ export class PostgresGatewayRepository implements IGatewayRepository {
     };
   }
 
+  async getSession(sessionId: string): Promise<GatewaySessionRecord | undefined> {
+    const queryText = `
+      SELECT * FROM gateway_sessions WHERE id = $1;
+    `;
+    const { rows } = await this.pool.query(queryText, [sessionId]);
+    if (rows.length === 0) return undefined;
+
+    const row = rows[0];
+    return {
+      id: row.id,
+      connectionId: row.connection_id,
+      clientSessionId: row.client_session_id,
+      tokenFamilyId: row.token_family_id || '',
+      refreshTokenHash: '',
+      expiresAt: '',
+      revokedAt: row.revoked_at ? new Date(row.revoked_at).toISOString() : undefined,
+      createdAt: new Date(row.created_at).toISOString()
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // 4. Coordenação de Refresh Distribuído Bling (Padrão Lease/Claim)
   // ---------------------------------------------------------------------------
@@ -752,6 +1003,25 @@ export class PostgresGatewayRepository implements IGatewayRepository {
   }
 
   /**
+   * Estende a validade do lease ativo (Heartbeat) antes que ele expire durante operações longas.
+   */
+  async extendRefreshLease(
+    connectionId: string,
+    ownerId: string,
+    durationMs: number = 15000
+  ): Promise<boolean> {
+    const queryText = `
+      UPDATE bling_connections
+      SET refresh_lease_expires_at = NOW() + ($3 || ' milliseconds')::INTERVAL,
+          updated_at = NOW()
+      WHERE id = $1 AND refresh_lease_owner = $2
+      RETURNING id;
+    `;
+    const res = await this.pool.query(queryText, [connectionId, ownerId, durationMs]);
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  /**
    * Libera o lease de refresh adquirido. Opcionalmente incrementa token_version se o refresh foi concluído.
    */
   async releaseRefreshLease(
@@ -770,6 +1040,64 @@ export class PostgresGatewayRepository implements IGatewayRepository {
     `;
     const res = await this.pool.query(queryText, [connectionId, ownerId, increment]);
     return (res.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Atualização final atômica com Fencing Token:
+   * Grava os novos tokens e incrementa token_version APENAS se o worker ainda for o proprietário
+   * do lease e se token_version for o esperado. Descarta gravações obsoletas (stale writes).
+   */
+  async updateTokensWithFencing(
+    connectionId: string,
+    ownerId: string,
+    expectedVersion: number,
+    updateData: RefreshTokensUpdateData
+  ): Promise<{ success: boolean; newTokenVersion?: number }> {
+    const queryText = `
+      UPDATE bling_connections
+      SET access_token_cipher = $1,
+          access_token_iv = $2,
+          access_token_tag = $3,
+          refresh_token_cipher = $4,
+          refresh_token_iv = $5,
+          refresh_token_tag = $6,
+          expires_at = $7,
+          scope = COALESCE($8, scope),
+          key_version = COALESCE($9, key_version),
+          token_version = token_version + 1,
+          refresh_lease_owner = NULL,
+          refresh_lease_expires_at = NULL,
+          last_refresh_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $10
+        AND refresh_lease_owner = $11
+        AND token_version = $12
+      RETURNING token_version;
+    `;
+
+    const res = await this.pool.query(queryText, [
+      updateData.encryptedAccessToken,
+      updateData.accessTokenIv,
+      updateData.accessTokenTag,
+      updateData.encryptedRefreshToken,
+      updateData.refreshTokenIv,
+      updateData.refreshTokenTag,
+      updateData.tokenExpiresAt,
+      updateData.scope || null,
+      updateData.keyVersion || 'v1',
+      connectionId,
+      ownerId,
+      expectedVersion
+    ]);
+
+    if ((res.rowCount ?? 0) > 0) {
+      return { success: true, newTokenVersion: res.rows[0].token_version };
+    }
+    return { success: false };
+  }
+
+  async disconnect(connectionId: string): Promise<void> {
+    return this.deleteConnection(connectionId);
   }
 
   async getRefreshLeaseState(connectionId: string): Promise<RefreshLeaseState> {

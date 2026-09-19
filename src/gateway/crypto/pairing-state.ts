@@ -60,15 +60,16 @@ export function constantTimeCompare(a: string, b: string): boolean {
  * Emite um Gateway Session Token (GST) assinado com HMAC-SHA256 (JWT).
  */
 export function createGatewaySessionToken(
-  claims: { connectionId: string; clientSessionId: string },
+  claims: { connectionId: string; clientSessionId: string; sessionId?: string },
   jwtSecret: string,
-  expiresInSeconds: number = 7200
+  expiresInSeconds: number = 900
 ): string {
   const header = { alg: 'HS256', typ: 'JWT' };
   const now = Math.floor(Date.now() / 1000);
   const payload = {
     sub: claims.connectionId,
     csid: claims.clientSessionId,
+    sid: claims.sessionId,
     iat: now,
     exp: now + expiresInSeconds,
     iss: 'paulifest-integration-gateway'
@@ -89,7 +90,7 @@ export function createGatewaySessionToken(
 export function verifyGatewaySessionToken(
   token: string,
   jwtSecret: string
-): { valid: boolean; claims?: { connectionId: string; clientSessionId: string }; error?: string } {
+): { valid: boolean; claims?: { connectionId: string; clientSessionId: string; sessionId?: string }; error?: string } {
   if (!token || typeof token !== 'string') {
     return { valid: false, error: 'Token ausente ou malformado.' };
   }
@@ -157,7 +158,8 @@ export function verifyGatewaySessionToken(
       valid: true,
       claims: {
         connectionId: payload.sub,
-        clientSessionId: payload.csid
+        clientSessionId: payload.csid,
+        sessionId: payload.sid
       }
     };
   } catch {
