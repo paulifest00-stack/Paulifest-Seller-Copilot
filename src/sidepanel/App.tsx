@@ -273,7 +273,7 @@ export const App: React.FC = () => {
             </span>
           </div>
           <span className="text-[9px] font-bold text-emerald-800 uppercase tracking-wider bg-emerald-200/60 px-2 py-0.5 rounded border border-emerald-300/60">
-            Simulação 4B
+            {tabContext?.uiState?.isSimulatedMock ? 'Simulação 4B' : 'Real 4C.3'}
           </span>
         </div>
       )}
@@ -367,6 +367,11 @@ export const App: React.FC = () => {
                   <span className="text-xs font-semibold text-[#1d1d1f] truncate max-w-[180px]">
                     {sheet.title.value || sheet.sku.value || 'Produto em Andamento'}
                   </span>
+                  {sheet.hasUnresolvedConflicts && (
+                    <span className="text-[9px] font-bold text-amber-700 bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded">
+                      Divergência
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={handleReset}

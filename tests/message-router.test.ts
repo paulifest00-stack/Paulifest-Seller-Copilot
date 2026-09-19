@@ -21,8 +21,10 @@ export async function runMessageRouterTests() {
   console.log('   SUÍTE DE TESTES: MESSAGE ROUTER & MOCK 4A (FASE 4B)');
   console.log('================================================================\n');
 
-  await tabContextManager.clearAll();
-  await clearActiveSheet();
+  messageRouter.setMockMode(true);
+  try {
+    await tabContextManager.clearAll();
+    await clearActiveSheet();
 
   // 1. Rejeição de Mensagem sem sender.tab.id confiável
   await runTest('1. Segurança de Aba: rejeita mensagens de content script sem sender.tab.id verificado', async () => {
@@ -548,5 +550,8 @@ export async function runMessageRouterTests() {
     const tabState = await tabContextManager.getTabState(tabId);
     assert.strictEqual(tabState?.activeSheetId, newSidebarSheet.id, 'Aba deve estar vinculada à nova ficha criada na Sidebar');
   });
+  } finally {
+    messageRouter.setMockMode(false);
+  }
 }
 

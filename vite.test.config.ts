@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 
 export default defineConfig({
+  mode: 'test',
   build: {
     outDir: 'dist-test',
     emptyOutDir: true,

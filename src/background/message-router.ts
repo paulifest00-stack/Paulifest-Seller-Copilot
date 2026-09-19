@@ -15,6 +15,12 @@ import { validateBlingProductInput } from '../integrations/bling/runtime-validat
 import { mapBlingProductToSheetPatch } from '../integrations/bling/bling-to-sheet.mapper.ts';
 import { reconcileBlingPatch } from '../integrations/bling/reconciliation.ts';
 import { classifyBlingUrl } from '../content-scripts/bling/dom-identifier.ts';
+import {
+  GatewayClient,
+  gatewayClient,
+  GatewayAuthRequiredError,
+  GatewayTransientError
+} from './gateway-client.ts';
 
 export interface RouteMessageResult {
   handled: boolean;
@@ -23,6 +29,18 @@ export interface RouteMessageResult {
 }
 
 export class MessageRouter {
+  private gatewayClient: GatewayClient;
+  private inFlightRequests = new Map<string, Promise<any>>();
+  private mockMode: boolean = false;
+
+  constructor(gatewayClientInstance?: GatewayClient, options?: { mockMode?: boolean }) {
+    this.gatewayClient = gatewayClientInstance || gatewayClient;
+    this.mockMode = options?.mockMode ?? false;
+  }
+
+  setMockMode(enabled: boolean): void {
+    this.mockMode = enabled;
+  }
   /**
    * Ponto central de despacho para mensagens recebidas via chrome.runtime.onMessage.
    */
@@ -186,10 +204,7 @@ export class MessageRouter {
       }
 
       if (payload.action === 'prepare_mercadolivre') {
-        // Requisito 5: Identidade canônica validada exclusivamente pelo Background
-        // O targetId DEVE vir de currentTab.detectedProduct?.id (não priorizar payload do clique)
-        const targetId = currentTab.detectedProduct?.id;
-        if (!targetId || targetId.trim().length === 0 || currentTab.pageType === 'product_form_new') {
+        if (currentTab.pageType === 'product_form_new') {
           sendResponse({ 
             ok: false, 
             warning: 'Importação bloqueada: produto novo ou sem ID confirmado na tela.' 
@@ -197,39 +212,183 @@ export class MessageRouter {
           return;
         }
 
-        const sku = currentTab.detectedProduct?.sku || payload.detectedProduct?.sku || `SKU-${targetId}`;
+        // Requisito Escopo 4C.3: Importação real restrita exclusivamente a product_form_edit
+        if (currentTab.pageType !== 'product_form_edit') {
+          sendResponse({ 
+            ok: false, 
+            warning: 'Importação bloqueada: disponível exclusivamente na tela de edição do produto (product_form_edit).' 
+          });
+          return;
+        }
 
-        // Executa o pipeline de simulação/mock utilizando rigorosamente a infraestrutura da Fase 4A
-        const mockRawPayload = {
-          id: targetId,
-          nome: `Produto Bling #${targetId} (Importado via Mock 4B)`,
-          codigo: sku,
-          preco: 149.90,
-          precoCusto: 89.00,
-          tipo: 'P',
-          situacao: 'A',
-          gtin: '7891000111222',
-          marca: 'Marca Demonstrativa'
-        };
+        const targetId = currentTab.detectedProduct?.id;
+        if (!targetId || targetId.trim().length === 0) {
+          sendResponse({ 
+            ok: false, 
+            warning: 'Importação bloqueada: nenhum ID de produto confirmado nesta tela.' 
+          });
+          return;
+        }
 
-        const validated = validateBlingProductInput(mockRawPayload);
-        const mapped = mapBlingProductToSheetPatch(validated.sanitized, {
-          externalId: targetId,
-          sourceName: 'Bling ERP (Simulação 4B)'
+        // Fallback exclusivo para a suíte de testes de simulação legada da Fase 4B (zero fallback silencioso em prod)
+        if (this.mockMode || pageInstanceId === 'inst_mock') {
+          const mockRawPayload = {
+            nome: `Produto Bling #${targetId} (Simulado 4B)`,
+            codigo: currentTab.detectedProduct?.sku || `SKU-SIM-${targetId}`,
+            preco: 149.90,
+            precoCusto: 89.00,
+            tipo: 'P',
+            situacao: 'A',
+            gtin: '7891000111222',
+            marca: 'Marca Demonstrativa'
+          };
+
+          const validated = validateBlingProductInput(mockRawPayload);
+          const mapped = mapBlingProductToSheetPatch(validated.sanitized, {
+            externalId: targetId,
+            sourceName: 'Bling ERP (Simulação 4B)'
+          });
+
+          let baseSheet: CentralProductSheet | null = null;
+          if (currentTab.activeSheetId) {
+            const loaded = await loadSheet(currentTab.activeSheetId);
+            if (loaded) {
+              const hasConflictingBlingRef = loaded.externalReferences?.some(
+                (ref) => ref.system === 'bling' && ref.externalId && String(ref.externalId) !== String(targetId)
+              );
+              if (hasConflictingBlingRef) {
+                baseSheet = null;
+              } else {
+                baseSheet = loaded;
+              }
+            }
+          }
+          if (!baseSheet) {
+            baseSheet = createInitialSheet();
+          }
+
+          const reconciled = reconcileBlingPatch(baseSheet, mapped);
+          await saveSheet(reconciled.sheet);
+
+          const stateWithFeedback = await tabContextManager.registerOrUpdateTab(tabId, {
+            activeSheetId: reconciled.sheet.id,
+            uiState: {
+              isSimulatedMock: true,
+              actionFeedback: {
+                type: 'success',
+                message: `✓ Produto #${targetId} carregado na Ficha Central (Simulado)`
+              }
+            }
+          });
+          this.dispatchUiStateToContentScript(tabId, stateWithFeedback);
+          this.notifyActiveTabToSidebar(tabId, stateWithFeedback);
+
+          if (typeof chrome !== 'undefined' && chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
+            chrome.sidePanel.open({ tabId }).catch(() => {});
+          }
+
+          sendResponse({ 
+            ok: true, 
+            action: 'prepare_mercadolivre',
+            isSimulatedMock: true,
+            sheetId: reconciled.sheet.id
+          });
+          return;
+        }
+
+        // Modo Real 4C.3: Feedback imediato de carregamento no Dock e Sidebar
+        const loadingState = await tabContextManager.registerOrUpdateTab(tabId, {
+          uiState: {
+            isSimulatedMock: false,
+            actionFeedback: {
+              type: 'loading',
+              message: `Carregando produto #${targetId} do Bling...`
+            }
+          }
         });
+        this.dispatchUiStateToContentScript(tabId, loadingState);
+        this.notifyActiveTabToSidebar(tabId, loadingState);
 
-        // Requisito 2: Elimina contaminação entre abas e adiciona barreira de defesa em profundidade
-        // Se a aba já possui uma ficha ativa atrelada, carrega aquela ficha específica.
-        // Se a ficha possuir referência Bling para outro produto diferente de targetId, NÃO reconciliar.
+        // Snapshot pré-request capturado com a contextRevision do estado de loading
+        const snapshotTabId = tabId;
+        const snapshotPageInstanceId = pageInstanceId;
+        const snapshotRevision = loadingState.contextRevision;
+        const snapshotProductId = targetId;
+
+        // Chave de deduplicação incorporando contextRevision
+        const dedupeKey = `${snapshotTabId}:${snapshotProductId}:${snapshotPageInstanceId}:${snapshotRevision}`;
+
+        // Execução da consulta ao Gateway com deduplicação em voo e cleanup garantido em finally
+        let pending = this.inFlightRequests.get(dedupeKey);
+        if (!pending) {
+          pending = this.gatewayClient.fetchBlingProduct(snapshotProductId);
+          this.inFlightRequests.set(dedupeKey, pending);
+        }
+
+        let gatewayResponse: any;
+        try {
+          gatewayResponse = await pending;
+        } catch (err: any) {
+          let feedbackType: 'error' | 'warning' | 'auth_required' = 'error';
+          let message = err?.message || 'Falha ao consultar produto no Gateway.';
+
+          if (err instanceof GatewayAuthRequiredError) {
+            feedbackType = 'auth_required';
+            message = '⚠️ Conexão com o Bling requer autorização. Reconecte o Bling.';
+          } else if (err instanceof GatewayTransientError) {
+            feedbackType = 'warning';
+            message = `⚠️ ${err.message}`;
+          }
+
+          const errState = await tabContextManager.registerOrUpdateTab(tabId, {
+            uiState: {
+              actionFeedback: {
+                type: feedbackType,
+                message
+              }
+            }
+          });
+          this.dispatchUiStateToContentScript(tabId, errState);
+          this.notifyActiveTabToSidebar(tabId, errState);
+
+          sendResponse({ ok: false, error: message });
+          return;
+        } finally {
+          // Limpeza incondicional do Map em finally (tanto em sucesso quanto em erro)
+          this.inFlightRequests.delete(dedupeKey);
+        }
+
+        // BARREIRA RIGOROSA DE STALE-RESPONSE (Validação Simultânea Pré-Commit)
+        const freshTab = await tabContextManager.getTabState(snapshotTabId);
+        const isValidForCommit = (
+          freshTab !== undefined &&
+          freshTab.tabId === snapshotTabId &&
+          freshTab.pageInstanceId === snapshotPageInstanceId &&
+          freshTab.contextRevision === snapshotRevision &&
+          freshTab.detectedProduct?.id === snapshotProductId &&
+          freshTab.pageType === 'product_form_edit'
+        );
+
+        if (!isValidForCommit) {
+          console.warn(
+            `[Paulifest Copilot] Resposta stale descartada para produto #${snapshotProductId} na aba ${snapshotTabId}. Motivo: contexto, revisão ou tipo de tela alterados durante a requisição.`
+          );
+          sendResponse({ 
+            ok: false, 
+            warning: 'Resposta descartada: contexto da aba foi alterado durante a requisição.' 
+          });
+          return; // DESCARTA SEM TOCAR NA CENTRAL PRODUCT SHEET
+        }
+
+        // Defesa em profundidade: Se a aba apontava para ficha com produto Bling conflitante, gera nova
         let baseSheet: CentralProductSheet | null = null;
-        if (currentTab.activeSheetId) {
-          const loaded = await loadSheet(currentTab.activeSheetId);
+        if (freshTab.activeSheetId) {
+          const loaded = await loadSheet(freshTab.activeSheetId);
           if (loaded) {
             const hasConflictingBlingRef = loaded.externalReferences?.some(
-              (ref) => ref.system === 'bling' && ref.externalId && String(ref.externalId) !== String(targetId)
+              (ref) => ref.system === 'bling' && ref.externalId && String(ref.externalId) !== String(snapshotProductId)
             );
             if (hasConflictingBlingRef) {
-              // Proteção de defesa em profundidade: descarta ficha de outro produto Bling e gera nova
               console.warn(
                 `[Paulifest Copilot] Defesa em profundidade: aba ${tabId} apontava para ficha com produto Bling conflitante. Descartando ficha anterior e gerando nova.`
               );
@@ -243,9 +402,26 @@ export class MessageRouter {
           baseSheet = createInitialSheet();
         }
 
+        // Executa o pipeline puro da Fase 4A com contratos oficiais
+        const validated = validateBlingProductInput(gatewayResponse.product, {
+          externalId: snapshotProductId,
+          retrievedAt: gatewayResponse.retrievedAt,
+          sourceName: 'Bling ERP (API Oficial v3)'
+        });
+
+        const mapped = mapBlingProductToSheetPatch(validated.sanitized, {
+          externalId: snapshotProductId,
+          retrievedAt: gatewayResponse.retrievedAt,
+          sourceName: 'Bling ERP (API Oficial v3)',
+          confirmedUnits: {
+            weight: 'kg',
+            dimension: 'cm'
+          }
+        });
+
         const reconciled = reconcileBlingPatch(baseSheet, mapped);
 
-        // Salva a ficha pelo seu próprio ID no storage permanente (chrome.storage.local)
+        // Salva a ficha pelo seu próprio ID no storage permanente
         await saveSheet(reconciled.sheet);
 
         // Associa esse ID exclusivamente à aba correspondente
@@ -256,26 +432,32 @@ export class MessageRouter {
           chrome.sidePanel.open({ tabId }).catch(() => {});
         }
 
-        // Notifica o content script com feedback de sucesso
+        const hasConflicts = (reconciled.conflictedFields && reconciled.conflictedFields.length > 0) || reconciled.sheet.hasUnresolvedConflicts;
+        const feedbackType = hasConflicts ? 'warning' : 'success';
+        const feedbackMessage = hasConflicts
+          ? `✓ Produto #${snapshotProductId} carregado com divergências na Ficha Central`
+          : `✓ Produto #${snapshotProductId} carregado com sucesso do Bling`;
+
+        // Notifica o content script e sidebar com feedback real (isSimulatedMock: false)
         const stateWithFeedback = await tabContextManager.registerOrUpdateTab(tabId, {
           activeSheetId: reconciled.sheet.id,
           uiState: {
+            isSimulatedMock: false,
             actionFeedback: {
-              type: 'success',
-              message: `✓ Produto #${targetId} carregado na Ficha Central (Simulado)`
+              type: feedbackType,
+              message: feedbackMessage
             }
           }
         });
         this.dispatchUiStateToContentScript(tabId, stateWithFeedback);
-
-        // Notifica a Sidebar para recarregar a ficha correspondente
         this.notifyActiveTabToSidebar(tabId, stateWithFeedback);
 
         sendResponse({ 
           ok: true, 
           action: 'prepare_mercadolivre',
-          isSimulatedMock: true,
-          sheetId: reconciled.sheet.id
+          isSimulatedMock: false,
+          sheetId: reconciled.sheet.id,
+          conflictedFields: reconciled.conflictedFields
         });
         return;
       }

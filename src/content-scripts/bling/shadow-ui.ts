@@ -245,6 +245,18 @@ export class BlingShadowUi {
             background: rgba(245, 158, 11, 0.9);
             color: #fff;
           }
+          .feedback-error {
+            background: rgba(239, 68, 68, 0.9);
+            color: #fff;
+          }
+          .feedback-loading {
+            background: rgba(79, 70, 229, 0.9);
+            color: #fff;
+          }
+          .feedback-auth_required {
+            background: rgba(220, 38, 38, 0.95);
+            color: #fff;
+          }
         </style>
 
         <div id="dock-root" class="dock-container">
@@ -254,7 +266,7 @@ export class BlingShadowUi {
               <div class="dock-title">
                 <span>✦ Paulifest Copilot</span>
               </div>
-              <div class="dock-badge">SIMULAÇÃO 4B</div>
+              <div id="dock-badge" class="dock-badge">${this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4C.3'}</div>
             </div>
 
             <div id="product-info-container" class="product-info"></div>
@@ -289,6 +301,12 @@ export class BlingShadowUi {
           }
         });
       }
+    }
+
+    // Atualiza badge de modo se a estrutura já foi montada
+    const dockBadge = this.shadow.getElementById('dock-badge') || (typeof this.shadow.querySelector === 'function' ? this.shadow.querySelector('.dock-badge') : null);
+    if (dockBadge) {
+      dockBadge.textContent = this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4C.3';
     }
 
     // 1. Renderiza Feedback com textContent (anti-XSS)

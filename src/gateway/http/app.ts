@@ -1,5 +1,5 @@
 // Aplicação HTTP do Integration Gateway (Fase 4C.1 e Fase 4C.2B)
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { loadGatewayConfig, type GatewayConfig } from '../config.ts';
@@ -14,10 +14,11 @@ import {
 } from '../crypto/pairing-state.ts';
 import { encryptPayload, decryptPayload } from '../crypto/aes-gcm.ts';
 import { gatewayRepository, type IGatewayRepository } from '../database/repository.ts';
-import { sessionHandshakeLimiter, startAuthLimiter } from '../security/rate-limiter.ts';
+import { sessionHandshakeLimiter, startAuthLimiter, productReadLimiter } from '../security/rate-limiter.ts';
 import { gatewayLogger } from '../security/logger.ts';
 import { BlingOAuthClient } from '../integrations/bling/bling-oauth-client.ts';
-import { BlingTokenManager } from '../integrations/bling/bling-token-manager.ts';
+import { BlingTokenManager, BlingReauthRequiredError } from '../integrations/bling/bling-token-manager.ts';
+import { BlingProductClient, BlingProductError } from '../integrations/bling/bling-product-client.ts';
 import type {
   OAuthPairingRequestRecord,
   BlingConnectionRecord,
@@ -31,6 +32,7 @@ export interface GatewayAppOptions {
   repository?: IGatewayRepository;
   oauthClient?: BlingOAuthClient;
   tokenManager?: BlingTokenManager;
+  productClient?: BlingProductClient;
 }
 
 export class GatewayApp {
@@ -38,6 +40,8 @@ export class GatewayApp {
   private repository: IGatewayRepository;
   private oauthClient: BlingOAuthClient;
   private tokenManager: BlingTokenManager;
+  private productClient: BlingProductClient;
+  private server?: Server;
 
   constructor(options: GatewayAppOptions = {}) {
     this.config = options.config || loadGatewayConfig();
@@ -55,6 +59,10 @@ export class GatewayApp {
       oauthClient: this.oauthClient,
       encryptionKey: this.config.encryptionKey
     });
+    this.productClient = options.productClient || new BlingProductClient({
+      baseUrl: this.config.blingBaseUrl,
+      timeoutMs: this.config.blingTimeoutMs
+    });
   }
 
   getBlingTokenManager(): BlingTokenManager {
@@ -63,6 +71,10 @@ export class GatewayApp {
 
   getBlingOAuthClient(): BlingOAuthClient {
     return this.oauthClient;
+  }
+
+  getBlingProductClient(): BlingProductClient {
+    return this.productClient;
   }
 
   /**
@@ -134,6 +146,14 @@ export class GatewayApp {
       // 7. DELETE /integrations/bling (Desconexão com revogação remota e purga local)
       if (method === 'DELETE' && pathname === '/integrations/bling') {
         await this.handleBlingDisconnect(req, res);
+        return;
+      }
+
+      // 8. GET /integrations/bling/products/:id (Leitura de produto autenticada por GST)
+      const productMatch = pathname.match(/^\/integrations\/bling\/products\/([^\/]+)$/);
+      if (method === 'GET' && productMatch) {
+        const productId = decodeURIComponent(productMatch[1]);
+        await this.handleGetBlingProduct(req, res, clientIp, productId);
         return;
       }
 
@@ -600,6 +620,162 @@ export class GatewayApp {
     this.sendJson(res, 200, disconnectData);
   }
 
+  private async handleGetBlingProduct(
+    req: IncomingMessage,
+    res: ServerResponse,
+    clientIp: string,
+    productId: string
+  ): Promise<void> {
+    // 1. Rate Limiting defensivo por IP
+    const rateCheck = productReadLimiter.check(clientIp);
+    if (!rateCheck.allowed) {
+      this.sendJson(res, 429, {
+        ok: false,
+        error: 'BLING_RATE_LIMITED',
+        message: 'Muitas consultas de produto. Aguarde antes de tentar novamente.',
+        retryAfterMs: rateCheck.resetInMs
+      });
+      return;
+    }
+
+    // 2. Autenticação estrita via GST (JWT + validação de sessão no PostgreSQL)
+    const auth = await this.authenticateWithGst(req, res);
+    if (!auth) return;
+
+    // 2b. Rate Limiting adicional por identidade autenticada (connectionId)
+    // Previne que uma mesma conexão abuse da API do Bling rotacionando múltiplos IPs/proxies
+    const connRateCheck = productReadLimiter.check(`conn:${auth.connectionId}`);
+    if (!connRateCheck.allowed) {
+      this.sendJson(res, 429, {
+        ok: false,
+        error: 'BLING_RATE_LIMITED',
+        message: 'Muitas consultas de produto para esta conexão. Aguarde antes de tentar novamente.',
+        retryAfterMs: connRateCheck.resetInMs
+      });
+      return;
+    }
+
+    // 3. Validação do estado da conexão
+    const conn = await this.repository.getConnection(auth.connectionId);
+    if (!conn) {
+      this.sendJson(res, 404, {
+        ok: false,
+        error: 'CONNECTION_NOT_FOUND',
+        message: 'Conexão não encontrada.'
+      });
+      return;
+    }
+
+    if (conn.status === 'disconnected') {
+      this.sendJson(res, 401, {
+        ok: false,
+        error: 'CONNECTION_DISCONNECTED',
+        message: 'A conexão com o Bling está desconectada.'
+      });
+      return;
+    }
+
+    if (conn.status === 'requires_reauth') {
+      this.sendJson(res, 401, {
+        ok: false,
+        error: 'REQUIRES_REAUTH',
+        message: 'A conexão com o Bling requer reautenticação.'
+      });
+      return;
+    }
+
+    // 4. Execução autenticada via BlingTokenManager (com auto-refresh se 401 do Bling)
+    try {
+      const productResult = await this.tokenManager.executeWithBlingAuth(
+        auth.connectionId,
+        async (accessToken) => {
+          return await this.productClient.fetchProduct(productId, accessToken);
+        }
+      );
+
+      this.sendJson(res, 200, {
+        ok: true,
+        product: productResult.product,
+        warnings: productResult.warnings,
+        unknownFields: productResult.unknownFields,
+        retrievedAt: productResult.retrievedAt
+      });
+    } catch (err: any) {
+      if (err instanceof BlingReauthRequiredError) {
+        this.sendJson(res, 401, {
+          ok: false,
+          error: 'REQUIRES_REAUTH',
+          message: err.message || 'A conexão com o Bling requer reautenticação.'
+        });
+        return;
+      }
+
+      if (err instanceof BlingProductError) {
+        if (err.status === 404) {
+          this.sendJson(res, 404, {
+            ok: false,
+            error: 'BLING_PRODUCT_NOT_FOUND',
+            message: err.message
+          });
+          return;
+        }
+
+        if (err.status === 429) {
+          this.sendJson(res, 429, {
+            ok: false,
+            error: 'BLING_RATE_LIMITED',
+            message: err.message,
+            retryAfterMs: err.retryAfterMs
+          });
+          return;
+        }
+
+        if (err.status === 403) {
+          this.sendJson(res, 403, {
+            ok: false,
+            error: 'BLING_FORBIDDEN',
+            message: err.message
+          });
+          return;
+        }
+
+        if (err.status === 422) {
+          this.sendJson(res, 422, {
+            ok: false,
+            error: 'INVALID_BLING_PAYLOAD',
+            message: err.message
+          });
+          return;
+        }
+
+        if (err.status === 504) {
+          this.sendJson(res, 504, {
+            ok: false,
+            error: 'BLING_TIMEOUT',
+            message: err.message
+          });
+          return;
+        }
+
+        if (err.status >= 500) {
+          this.sendJson(res, 502, {
+            ok: false,
+            error: 'BLING_SERVER_ERROR',
+            message: err.message
+          });
+          return;
+        }
+      }
+
+      gatewayLogger.error(`[GatewayHttpApp] Erro na consulta do produto #${productId}:`, err?.message || err);
+      this.sendJson(res, 500, {
+        ok: false,
+        error: 'INTERNAL_ERROR',
+        message: 'Erro interno ao consultar produto no Bling.'
+      });
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Utilitários Internos de Autenticação e Resposta
   // ---------------------------------------------------------------------------
@@ -631,16 +807,23 @@ export class GatewayApp {
     }
 
     // Validação estrita no banco: JWT válido sozinho não basta se a sessão já foi revogada
-    if (verifyRes.claims.sessionId) {
-      const session = await this.repository.getSession(verifyRes.claims.sessionId);
-      if (!session || session.revokedAt) {
-        this.sendJson(res, 401, {
-          ok: false,
-          error: 'SESSION_REVOKED',
-          message: 'A sessão do Gateway foi revogada.'
-        });
-        return null;
-      }
+    if (!verifyRes.claims.sessionId) {
+      this.sendJson(res, 401, {
+        ok: false,
+        error: 'UNAUTHORIZED',
+        message: 'Token GST malformado: identificador de sessão ausente.'
+      });
+      return null;
+    }
+
+    const session = await this.repository.getSession(verifyRes.claims.sessionId);
+    if (!session || session.revokedAt || (session.connectionId && session.connectionId !== verifyRes.claims.connectionId)) {
+      this.sendJson(res, 401, {
+        ok: false,
+        error: 'SESSION_REVOKED',
+        message: 'A sessão do Gateway é inválida, revogada ou não pertence a esta conexão.'
+      });
+      return null;
     }
 
     return verifyRes.claims;
@@ -711,15 +894,28 @@ export class GatewayApp {
    */
   listen(port?: number): Promise<number> {
     const listenPort = port ?? this.config.port;
-    const server = createServer((req, res) => this.handleRequest(req, res));
+    this.server = createServer((req, res) => this.handleRequest(req, res));
     return new Promise((resolve, reject) => {
-      server.listen(listenPort, () => {
-        const addr = server.address();
+      this.server!.listen(listenPort, () => {
+        const addr = this.server!.address();
         const actualPort = typeof addr === 'object' && addr ? addr.port : listenPort;
         gatewayLogger.info(`Gateway Server rodando na porta ${actualPort} [${this.config.environment}]`);
         resolve(actualPort);
       });
-      server.on('error', reject);
+      this.server!.on('error', reject);
+    });
+  }
+
+  /**
+   * Encerra o servidor HTTP nativo.
+   */
+  close(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.server) {
+        this.server.close(() => resolve());
+      } else {
+        resolve();
+      }
     });
   }
 }

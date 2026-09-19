@@ -160,7 +160,13 @@ export class TabContextManager {
       }
 
       if (update.uiState) {
-        initial.uiState = { ...initial.uiState, ...update.uiState, isSimulatedMock: true };
+        initial.uiState = { 
+          ...initial.uiState, 
+          ...update.uiState, 
+          isSimulatedMock: update.uiState.isSimulatedMock !== undefined 
+            ? update.uiState.isSimulatedMock 
+            : initial.uiState.isSimulatedMock 
+        };
       }
 
       this.tabStates.set(tabId, initial);
@@ -288,7 +294,9 @@ export class TabContextManager {
       dockVisible: targetDockVisible,
       canImport: targetCanImport,
       actionFeedback: targetFeedback,
-      isSimulatedMock: true
+      isSimulatedMock: update.uiState?.isSimulatedMock !== undefined 
+        ? update.uiState.isSimulatedMock 
+        : current.uiState.isSimulatedMock
     };
 
     const updatedState: TabContextState = {

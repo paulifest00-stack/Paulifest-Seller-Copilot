@@ -10,6 +10,8 @@ import { runMessageRouterTests } from './message-router.test.ts';
 import { runGatewaySecurityTests } from './gateway-security.test.ts';
 import { runGatewayPostgresTests } from './gateway-postgres.test.ts';
 import { runGatewayOAuthRealTests } from './gateway-oauth-real.test.ts';
+import { runGatewayProductReadTests } from './gateway-product-read.test.ts';
+import { runExtensionProductIntegrationTests } from './extension-product-integration.test.ts';
 
 interface SuiteDefinition {
   name: string;
@@ -28,7 +30,9 @@ const SUITES: SuiteDefinition[] = [
   { name: 'MessageRouter & Mock 4A', phase: 'Fase 4B', fn: runMessageRouterTests },
   { name: 'Gateway Security Foundation', phase: 'Fase 4C.1', fn: runGatewaySecurityTests },
   { name: 'Gateway PostgreSQL Durable Persistence', phase: 'Fase 4C.2A', fn: runGatewayPostgresTests },
-  { name: 'Gateway Bling Real OAuth2 Integration', phase: 'Fase 4C.2B', fn: runGatewayOAuthRealTests }
+  { name: 'Gateway Bling Real OAuth2 Integration', phase: 'Fase 4C.2B', fn: runGatewayOAuthRealTests },
+  { name: 'Gateway Bling Product Read Endpoint', phase: 'Fase 4C.3', fn: runGatewayProductReadTests },
+  { name: 'Extension Real Product Integration & SSOT', phase: 'Fase 4C.3', fn: runExtensionProductIntegrationTests }
 ];
 
 async function main() {
@@ -94,6 +98,7 @@ async function main() {
     process.exit(1);
   } else {
     console.log('🎉 TODAS AS SUÍTES PASSARAM COM ÊXITO!');
+    process.exit(0);
   }
 }
 

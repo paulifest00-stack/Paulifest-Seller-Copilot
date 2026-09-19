@@ -11,12 +11,13 @@ export type ContextualActionType = 'open_in_copilot' | 'prepare_mercadolivre';
 export interface TabContextUiState {
   dockVisible: boolean;
   canImport: boolean;           // false se for product_form_new sem ID
-  isSimulatedMock: boolean;     // flag obrigatória de transparência
+  isSimulatedMock: boolean;     // flag obrigatória de transparência (false quando conectado ao Gateway real)
   actionFeedback?: {
-    type: 'info' | 'success' | 'warning';
+    type: 'info' | 'success' | 'warning' | 'error' | 'loading' | 'auth_required';
     message: string;
   };
 }
+
 
 export interface TabContextState {
   tabId: number;

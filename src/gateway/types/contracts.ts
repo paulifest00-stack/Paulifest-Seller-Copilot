@@ -129,14 +129,6 @@ export interface RefreshSessionRequest {
   gatewayRefreshToken: string;
 }
 
-export interface RefreshSessionResponse {
-  ok: boolean;
-  gatewaySessionToken?: string;
-  gatewayRefreshToken?: string;
-  expiresInSeconds?: number;
-  error?: string;
-}
-
 export interface BlingStatusResponse {
   ok: boolean;
   connected: boolean;
@@ -210,3 +202,15 @@ export interface RefreshTokensUpdateData {
   scope?: string | null;
   keyVersion?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Re-exportação da FONTE ÚNICA DE VERDADE dos contratos compartilhados Gateway <-> Extensão
+export type {
+  BlingProductDto,
+  GatewayBlingProductDTO,
+  GetBlingProductResponse,
+  GatewayProductErrorCode,
+  GatewayProductErrorResponse,
+  RefreshSessionResponse
+} from '../../shared/gateway-contracts.ts';
+

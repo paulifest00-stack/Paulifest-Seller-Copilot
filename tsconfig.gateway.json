@@ -7,7 +7,7 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "outDir": "dist-gateway",
-    "rootDir": "src/gateway",
+    "rootDir": "src",
     "noEmit": false,
     "declaration": true,
     "strict": true,
@@ -17,5 +17,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/gateway/**/*"]
+  "include": ["src/gateway/**/*", "src/shared/**/*"]
 }

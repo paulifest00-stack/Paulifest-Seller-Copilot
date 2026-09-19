@@ -76,3 +76,7 @@ export const sessionHandshakeLimiter = new MemoryRateLimiter(10, 60);
 
 // Limitador para início de autorização (15 requisições por minuto por IP)
 export const startAuthLimiter = new MemoryRateLimiter(15, 60);
+
+// Limitador para leitura de produtos do Bling (30 requisições por minuto por IP/conexão)
+export const productReadLimiter = new MemoryRateLimiter(30, 60);
+
