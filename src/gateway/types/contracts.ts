@@ -1,6 +1,4 @@
-// Contratos e Tipos da Fundação de Segurança do Integration Gateway (Fase 4C.1)
-
-export type ConnectionStatus = 'connected' | 'disconnected' | 'requires_reauth' | 'rate_limited';
+import type { ConnectionStatus } from '../../shared/gateway-contracts.ts';
 
 export interface EncryptedPayload {
   ciphertext: string;       // Base64
@@ -98,59 +96,6 @@ export interface RefreshLeaseState {
   tokenVersion: number;
 }
 
-export interface StartAuthRequest {
-  clientSessionId: string;
-}
-
-export interface StartAuthResponse {
-  ok: boolean;
-  authorizationUrl: string;
-  pairingId: string;
-  pairingSecret: string;
-  expiresInSeconds: number;
-}
-
-export interface SessionHandshakeRequest {
-  pairingId: string;
-  pairingSecret: string;
-}
-
-export interface SessionHandshakeResponse {
-  ok: boolean;
-  status: ConnectionStatus;
-  gatewaySessionToken?: string;
-  gatewayRefreshToken?: string;
-  expiresInSeconds?: number;
-  error?: string;
-  remainingAttempts?: number;
-}
-
-export interface RefreshSessionRequest {
-  gatewayRefreshToken: string;
-}
-
-export interface BlingStatusResponse {
-  ok: boolean;
-  connected: boolean;
-  status: ConnectionStatus;
-  requiresReauth: boolean;
-  lastRefreshAt?: string | null;
-}
-
-export interface RemoteRevocationStatus {
-  accessToken: 'success' | 'failed' | 'not_available';
-  refreshToken: 'success' | 'failed' | 'not_available';
-  complete: boolean;
-}
-
-export interface DisconnectResponse {
-  ok: boolean;
-  status: 'disconnected';
-  localDisconnected: boolean;
-  remoteRevocation: RemoteRevocationStatus;
-  message: string;
-}
-
 export interface ConsumePairingAndCreateSessionParams {
   pairingId: string;
   pairingSecret: string;
@@ -211,6 +156,17 @@ export type {
   GetBlingProductResponse,
   GatewayProductErrorCode,
   GatewayProductErrorResponse,
-  RefreshSessionResponse
+  RefreshSessionResponse,
+  ConnectionStatus,
+  BlingConnectionStatus,
+  StartAuthRequest,
+  StartAuthResponse,
+  SessionHandshakeRequest,
+  SessionHandshakeResponse,
+  RefreshSessionRequest,
+  BlingStatusResponse,
+  RemoteRevocationStatus,
+  DisconnectResponse
 } from '../../shared/gateway-contracts.ts';
+
 

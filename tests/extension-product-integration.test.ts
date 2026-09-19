@@ -7,6 +7,7 @@ import {
   GatewayAuthRequiredError,
   GatewayTransientError,
   GatewayProductError,
+  STORAGE_KEYS,
   type ExtensionGatewaySession
 } from '../src/background/gateway-client.ts';
 import { loadSheet, saveSheet, clearActiveSheet } from '../src/core/storage/storage.ts';
@@ -124,10 +125,8 @@ export async function runExtensionProductIntegrationTests() {
   await runTest('2. Single-flight de GRT: 5 chamadas concorrentes com GST expirado disparam exatamente 1 POST /auth/session/refresh', async () => {
     const mockStorage = createMockSessionStorage();
     const initialGrt = 'grt_initial_single_flight';
-    await mockStorage.set('paulifest_gateway_session_v1', {
-      gatewaySessionToken: 'old_gst_expired',
+    await mockStorage.set(STORAGE_KEYS.LOCAL_REFRESH_SESSION, {
       gatewayRefreshToken: initialGrt,
-      gstExpiresAt: new Date(Date.now() - 10000).toISOString(), // expirado
       sessionGeneration: 1,
       updatedAt: new Date().toISOString()
     });
@@ -175,7 +174,7 @@ export async function runExtensionProductIntegrationTests() {
       }
 
       // Novo GRT persistido
-      const savedSession: ExtensionGatewaySession = await mockStorage.get('paulifest_gateway_session_v1');
+      const savedSession: any = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
       assert.strictEqual(savedSession.gatewayRefreshToken, 'new_grt_rotated');
       assert.strictEqual(savedSession.sessionGeneration, 2);
     } finally {
@@ -187,10 +186,8 @@ export async function runExtensionProductIntegrationTests() {
   await runTest('3. Falha de refresh transitória (500) PRESERVA o GRT atual e libera mutex em finally', async () => {
     const mockStorage = createMockSessionStorage();
     const grt = 'grt_survives_500';
-    await mockStorage.set('paulifest_gateway_session_v1', {
-      gatewaySessionToken: 'expired_gst',
+    await mockStorage.set(STORAGE_KEYS.LOCAL_REFRESH_SESSION, {
       gatewayRefreshToken: grt,
-      gstExpiresAt: new Date(Date.now() - 1000).toISOString(),
       sessionGeneration: 1,
       updatedAt: new Date().toISOString()
     });
@@ -208,7 +205,7 @@ export async function runExtensionProductIntegrationTests() {
       }, GatewayTransientError);
 
       // Confere que o GRT NÃO foi apagado!
-      const sessionAfter = await mockStorage.get('paulifest_gateway_session_v1');
+      const sessionAfter: any = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
       assert.ok(sessionAfter);
       assert.strictEqual(sessionAfter.gatewayRefreshToken, grt);
       // Confere que mutex foi liberado
@@ -222,10 +219,8 @@ export async function runExtensionProductIntegrationTests() {
   await runTest('4. Falha de refresh por Timeout/rede PRESERVA o GRT atual', async () => {
     const mockStorage = createMockSessionStorage();
     const grt = 'grt_survives_timeout';
-    await mockStorage.set('paulifest_gateway_session_v1', {
-      gatewaySessionToken: 'expired_gst',
+    await mockStorage.set(STORAGE_KEYS.LOCAL_REFRESH_SESSION, {
       gatewayRefreshToken: grt,
-      gstExpiresAt: new Date(Date.now() - 1000).toISOString(),
       sessionGeneration: 1,
       updatedAt: new Date().toISOString()
     });
@@ -242,7 +237,7 @@ export async function runExtensionProductIntegrationTests() {
         await client.getValidGst();
       }, GatewayTransientError);
 
-      const sessionAfter = await mockStorage.get('paulifest_gateway_session_v1');
+      const sessionAfter: any = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
       assert.ok(sessionAfter);
       assert.strictEqual(sessionAfter.gatewayRefreshToken, grt);
     } finally {
@@ -254,10 +249,8 @@ export async function runExtensionProductIntegrationTests() {
   await runTest('5. Falha de refresh por HTTP 429 PRESERVA o GRT atual', async () => {
     const mockStorage = createMockSessionStorage();
     const grt = 'grt_survives_429';
-    await mockStorage.set('paulifest_gateway_session_v1', {
-      gatewaySessionToken: 'expired_gst',
+    await mockStorage.set(STORAGE_KEYS.LOCAL_REFRESH_SESSION, {
       gatewayRefreshToken: grt,
-      gstExpiresAt: new Date(Date.now() - 1000).toISOString(),
       sessionGeneration: 1,
       updatedAt: new Date().toISOString()
     });
@@ -274,7 +267,7 @@ export async function runExtensionProductIntegrationTests() {
         await client.getValidGst();
       }, GatewayTransientError);
 
-      const sessionAfter = await mockStorage.get('paulifest_gateway_session_v1');
+      const sessionAfter: any = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
       assert.ok(sessionAfter);
       assert.strictEqual(sessionAfter.gatewayRefreshToken, grt);
     } finally {
@@ -285,10 +278,8 @@ export async function runExtensionProductIntegrationTests() {
   // 6. Falha terminal 401 (SESSION_REVOKED / TOKEN_REUSE_DETECTED) LIMPA credenciais
   await runTest('6. Falha de refresh terminal (401 SESSION_REVOKED) LIMPA as credenciais locais', async () => {
     const mockStorage = createMockSessionStorage();
-    await mockStorage.set('paulifest_gateway_session_v1', {
-      gatewaySessionToken: 'expired_gst',
+    await mockStorage.set(STORAGE_KEYS.LOCAL_REFRESH_SESSION, {
       gatewayRefreshToken: 'grt_doomed',
-      gstExpiresAt: new Date(Date.now() - 1000).toISOString(),
       sessionGeneration: 1,
       updatedAt: new Date().toISOString()
     });
@@ -305,7 +296,7 @@ export async function runExtensionProductIntegrationTests() {
         await client.getValidGst();
       }, GatewayAuthRequiredError);
 
-      const sessionAfter = await mockStorage.get('paulifest_gateway_session_v1');
+      const sessionAfter = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
       assert.strictEqual(sessionAfter, null); // LIMPA!
     } finally {
       globalThis.fetch = originalFetch;
@@ -318,8 +309,7 @@ export async function runExtensionProductIntegrationTests() {
     const grtA = 'grt_session_A';
     const grtB = 'grt_session_B';
 
-    await mockStorage.set('paulifest_gateway_session_v1', {
-      gatewaySessionToken: 'gst_A',
+    await mockStorage.set(STORAGE_KEYS.LOCAL_REFRESH_SESSION, {
       gatewayRefreshToken: grtA,
       sessionGeneration: 1,
       updatedAt: new Date().toISOString()
@@ -348,8 +338,7 @@ export async function runExtensionProductIntegrationTests() {
       const promiseA = client.executeSingleFlightRefresh(grtA);
 
       // Enquanto A está em voo, usuário reconecta gerando Sessão B no storage
-      await mockStorage.set('paulifest_gateway_session_v1', {
-        gatewaySessionToken: 'gst_B_fresh',
+      await mockStorage.set(STORAGE_KEYS.LOCAL_REFRESH_SESSION, {
         gatewayRefreshToken: grtB,
         sessionGeneration: 10,
         updatedAt: new Date().toISOString()
@@ -360,10 +349,9 @@ export async function runExtensionProductIntegrationTests() {
       await promiseA;
 
       // Confere que a Sessão B PERMANECEU INTACTA no storage e não foi corrompida por A!
-      const currentSession = await mockStorage.get('paulifest_gateway_session_v1');
+      const currentSession: any = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
       assert.strictEqual(currentSession.gatewayRefreshToken, grtB);
       assert.strictEqual(currentSession.sessionGeneration, 10);
-      assert.strictEqual(currentSession.gatewaySessionToken, 'gst_B_fresh');
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -374,8 +362,7 @@ export async function runExtensionProductIntegrationTests() {
     const mockStorage = createMockSessionStorage();
     const grtA = 'grt_session_to_disconnect';
 
-    await mockStorage.set('paulifest_gateway_session_v1', {
-      gatewaySessionToken: 'gst_A',
+    await mockStorage.set(STORAGE_KEYS.LOCAL_REFRESH_SESSION, {
       gatewayRefreshToken: grtA,
       sessionGeneration: 1,
       updatedAt: new Date().toISOString()
@@ -403,13 +390,13 @@ export async function runExtensionProductIntegrationTests() {
       const promiseA = client.executeSingleFlightRefresh(grtA);
 
       // Usuário desconecta durante o voo
-      await mockStorage.remove('paulifest_gateway_session_v1');
+      await mockStorage.remove(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
 
       resolveRefreshA();
       await promiseA;
 
       // Confere que a sessão CONTINUA NULA (não foi ressuscitada)
-      const currentSession = await mockStorage.get('paulifest_gateway_session_v1');
+      const currentSession = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
       assert.strictEqual(currentSession, null);
     } finally {
       globalThis.fetch = originalFetch;

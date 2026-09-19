@@ -21,6 +21,10 @@ import {
   GatewayAuthRequiredError,
   GatewayTransientError
 } from './gateway-client.ts';
+import {
+  BlingAuthOrchestrator,
+  blingAuthOrchestrator
+} from './bling-auth-orchestrator.ts';
 
 export interface RouteMessageResult {
   handled: boolean;
@@ -30,12 +34,21 @@ export interface RouteMessageResult {
 
 export class MessageRouter {
   private gatewayClient: GatewayClient;
+  private authOrchestrator: BlingAuthOrchestrator;
   private inFlightRequests = new Map<string, Promise<any>>();
   private mockMode: boolean = false;
 
-  constructor(gatewayClientInstance?: GatewayClient, options?: { mockMode?: boolean }) {
+  constructor(
+    gatewayClientInstance?: GatewayClient,
+    options?: { mockMode?: boolean; authOrchestrator?: BlingAuthOrchestrator }
+  ) {
     this.gatewayClient = gatewayClientInstance || gatewayClient;
+    this.authOrchestrator = options?.authOrchestrator || (gatewayClientInstance ? new BlingAuthOrchestrator(this.gatewayClient) : blingAuthOrchestrator);
     this.mockMode = options?.mockMode ?? false;
+  }
+
+  getAuthOrchestrator(): BlingAuthOrchestrator {
+    return this.authOrchestrator;
   }
 
   setMockMode(enabled: boolean): void {
@@ -51,6 +64,37 @@ export class MessageRouter {
   ): Promise<boolean> {
     if (!message || typeof message !== 'object') {
       return false;
+    }
+
+    // 0. Mensagens de Autenticação / Conexão Bling (Fase 4C.4A)
+    if (message.type === 'BLING_START_CONNECT') {
+      try {
+        const res = await this.authOrchestrator.startConnect();
+        sendResponse(res);
+      } catch (err: any) {
+        sendResponse({ ok: false, status: 'disconnected', error: err?.message || 'Falha ao iniciar conexão.' });
+      }
+      return true;
+    }
+
+    if (message.type === 'BLING_GET_CONNECTION_STATUS') {
+      try {
+        const res = await this.authOrchestrator.getConnectionStatus();
+        sendResponse(res);
+      } catch (err: any) {
+        sendResponse({ ok: false, status: 'disconnected', error: err?.message || 'Falha ao obter status.' });
+      }
+      return true;
+    }
+
+    if (message.type === 'BLING_DISCONNECT') {
+      try {
+        const res = await this.authOrchestrator.disconnect();
+        sendResponse(res);
+      } catch (err: any) {
+        sendResponse({ ok: false, error: err?.message || 'Falha ao desconectar.' });
+      }
+      return true;
     }
 
     // 1. Mensagens da Sidebar pedindo contexto da aba ativa

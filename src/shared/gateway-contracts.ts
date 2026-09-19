@@ -89,3 +89,129 @@ export interface RefreshSessionResponse {
   expiresInSeconds?: number;
   error?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Contratos de Conexão e Autenticação Gateway ↔ Extensão (Fase 4C.4A)
+// ---------------------------------------------------------------------------
+
+export type ConnectionStatus = 'connected' | 'disconnected' | 'requires_reauth' | 'rate_limited';
+
+export type BlingConnectionStatus =
+  | 'disconnected'
+  | 'connecting'
+  | 'awaiting_oauth'
+  | 'connected'
+  | 'refreshing'
+  | 'requires_reauth'
+  | 'session_expired'
+  | 'gateway_unreachable'
+  | 'configuration_error';
+
+export interface StartAuthRequest {
+  clientSessionId: string;
+}
+
+export interface StartAuthResponse {
+  ok: boolean;
+  authorizationUrl?: string;
+  pairingId?: string;
+  pairingSecret?: string;
+  expiresInSeconds?: number;
+  error?: string;
+  message?: string;
+  retryAfterMs?: number;
+}
+
+export interface SessionHandshakeRequest {
+  pairingId: string;
+  pairingSecret: string;
+}
+
+export interface SessionHandshakeResponse {
+  ok: boolean;
+  status?: ConnectionStatus;
+  gatewaySessionToken?: string;
+  gatewayRefreshToken?: string;
+  expiresInSeconds?: number;
+  error?: string;
+  message?: string;
+  remainingAttempts?: number;
+}
+
+export interface RefreshSessionRequest {
+  gatewayRefreshToken: string;
+}
+
+export interface BlingStatusResponse {
+  ok: boolean;
+  connected?: boolean;
+  status?: ConnectionStatus;
+  requiresReauth?: boolean;
+  lastRefreshAt?: string | null;
+  error?: string;
+  message?: string;
+}
+
+export interface RemoteRevocationStatus {
+  accessToken: 'success' | 'failed' | 'not_available';
+  refreshToken: 'success' | 'failed' | 'not_available';
+  complete: boolean;
+}
+
+export interface DisconnectResponse {
+  ok: boolean;
+  status: 'disconnected';
+  localDisconnected: boolean;
+  remoteRevocation: RemoteRevocationStatus;
+  message: string;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Mensagens Internas da Extensão (Sidebar / Content Script <-> Background)
+// ---------------------------------------------------------------------------
+
+export interface BlingStartConnectMessage {
+  type: 'BLING_START_CONNECT';
+}
+
+export interface BlingStartConnectResponse {
+  ok: boolean;
+  status: BlingConnectionStatus;
+  authorizationUrl?: string;
+  pairingId?: string;
+  error?: string;
+  message?: string;
+}
+
+export interface BlingGetConnectionStatusMessage {
+  type: 'BLING_GET_CONNECTION_STATUS';
+}
+
+export interface BlingGetConnectionStatusResponse {
+  ok: boolean;
+  status: BlingConnectionStatus;
+  lastRefreshAt?: string | null;
+  error?: string;
+  message?: string;
+}
+
+export interface BlingDisconnectMessage {
+  type: 'BLING_DISCONNECT';
+}
+
+export interface BlingDisconnectResponseMessage {
+  ok: boolean;
+  status: 'disconnected';
+  error?: string;
+  message?: string;
+}
+
+export interface BlingConnectionStatusChangedMessage {
+  type: 'BLING_CONNECTION_STATUS_CHANGED';
+  status: BlingConnectionStatus;
+  lastRefreshAt?: string | null;
+  timestamp: string;
+}
+
+

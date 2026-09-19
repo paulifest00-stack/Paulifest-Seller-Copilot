@@ -1,5 +1,6 @@
 import { tabContextManager } from './tab-context-manager.ts';
 import { messageRouter } from './message-router.ts';
+import { blingAuthOrchestrator } from './bling-auth-orchestrator.ts';
 import { classifyBlingUrl } from '../content-scripts/bling/dom-identifier.ts';
 import { isBlingDomain } from '../shared/tab-context-contracts.ts';
 
@@ -107,6 +108,9 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabContextManager.removeTab(tabId).catch((err) => {
     console.debug('[Paulifest Copilot] Erro ao remover aba do manager:', err);
+  });
+  blingAuthOrchestrator.handleTabRemoved(tabId).catch((err) => {
+    console.debug('[Paulifest Copilot] Erro ao processar fechamento de aba no auth orchestrator:', err);
   });
 });
 
