@@ -107,6 +107,48 @@ export type BlingConnectionStatus =
   | 'gateway_unreachable'
   | 'configuration_error';
 
+export const OFFICIAL_BLING_AUTH_URL = 'https://www.bling.com.br/Api/v3/oauth/authorize';
+export const OFFICIAL_BLING_OAUTH_HOST = 'www.bling.com.br';
+
+export type GatewayEnvironment = 'development' | 'test' | 'production';
+
+/**
+ * Validação estrita da URL de autorização OAuth do Bling (Fase 4C.4A).
+ * Em produção: aceita SOMENTE https://www.bling.com.br/...
+ * Rejeita HTTP, subdomínios arbitrários, lookalike domains (ex: evilbling.com.br), localhost e 127.0.0.1.
+ * Em development/test: permite explicitamente localhost e 127.0.0.1 quando configurado para testes locais.
+ */
+export function isValidBlingAuthorizationUrl(
+  urlStr: string | undefined | null,
+  env: GatewayEnvironment = 'production'
+): boolean {
+  if (!urlStr || typeof urlStr !== 'string') {
+    return false;
+  }
+  try {
+    const parsed = new URL(urlStr.trim());
+    const host = parsed.hostname.toLowerCase();
+
+    // Em development e test, localhost e 127.0.0.1 podem ser permitidos explicitamente
+    if (env === 'development' || env === 'test') {
+      if (host === 'localhost' || host === '127.0.0.1') {
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      }
+    }
+
+    // Em production (e para hosts remotos em dev/test):
+    // Aceita SOMENTE o hostname oficial esperado do Bling (www.bling.com.br)
+    // e SOMENTE protocolo HTTPS estrito
+    if (host !== OFFICIAL_BLING_OAUTH_HOST) {
+      return false;
+    }
+
+    return parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export interface StartAuthRequest {
   clientSessionId: string;
 }

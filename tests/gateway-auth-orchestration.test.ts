@@ -11,6 +11,7 @@ import {
   BlingAuthOrchestrator 
 } from '../src/background/bling-auth-orchestrator.ts';
 import { MessageRouter } from '../src/background/message-router.ts';
+import { isValidBlingAuthorizationUrl } from '../src/shared/gateway-contracts.ts';
 
 async function runTest(name: string, fn: () => Promise<void> | void) {
   try {
@@ -66,7 +67,7 @@ class FakeGatewayAuthServer {
             status: 200,
             body: {
               ok: true,
-              authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=test_state',
+              authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=test_state',
               pairingId: 'pair_123',
               pairingSecret: 'secret_abc123',
               expiresInSeconds: 300
@@ -250,7 +251,7 @@ export async function runGatewayAuthOrchestrationTests(): Promise<void> {
         status: 200,
         body: {
           ok: true,
-          authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=test',
+          authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=test',
           pairingId: 'pair_ttl_test',
           pairingSecret: 'secret_ttl',
           expiresInSeconds: 300
@@ -736,6 +737,120 @@ export async function runGatewayAuthOrchestrationTests(): Promise<void> {
       );
       assert.strictEqual(disconnectRes.ok, true);
       assert.strictEqual(disconnectRes.status, 'disconnected');
+    });
+
+    // 23. Validação estrita de authorizationUrl (Fase 4C.4A Patch)
+    await runTest('23. Validação estrita de authorizationUrl: apenas https://www.bling.com.br aceito em produção; localhost/127.0.0.1 apenas em dev/test', () => {
+      // 1. https://www.bling.com.br/... → aceito
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('https://www.bling.com.br/Api/v3/oauth/authorize?client_id=123', 'production'),
+        true,
+        'https://www.bling.com.br em produção deve ser aceito'
+      );
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('https://www.bling.com.br/Api/v3/oauth/authorize?client_id=123', 'development'),
+        true,
+        'https://www.bling.com.br em dev deve ser aceito'
+      );
+
+      // 2. http://www.bling.com.br/... → rejeitado
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('http://www.bling.com.br/Api/v3/oauth/authorize?client_id=123', 'production'),
+        false,
+        'http://www.bling.com.br (sem TLS) deve ser rejeitado em produção'
+      );
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('http://www.bling.com.br/Api/v3/oauth/authorize?client_id=123', 'development'),
+        false,
+        'http://www.bling.com.br (sem TLS) deve ser rejeitado em development'
+      );
+
+      // 3. https://evilbling.com.br/... → rejeitado
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('https://evilbling.com.br/Api/v3/oauth/authorize?client_id=123', 'production'),
+        false,
+        'evilbling.com.br deve ser rejeitado'
+      );
+
+      // 4. https://fakebling.com.br/... → rejeitado
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('https://fakebling.com.br/Api/v3/oauth/authorize?client_id=123', 'production'),
+        false,
+        'fakebling.com.br deve ser rejeitado'
+      );
+
+      // 5. https://bling.com.br.evil.example/... → rejeitado
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('https://bling.com.br.evil.example/oauth/authorize', 'production'),
+        false,
+        'bling.com.br.evil.example deve ser rejeitado'
+      );
+
+      // 6. http://localhost:... em development → permitido quando configurado
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('http://localhost:3001/oauth/authorize', 'development'),
+        true,
+        'http://localhost:... em development deve ser permitido'
+      );
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('http://localhost:8080/oauth/authorize', 'test'),
+        true,
+        'http://localhost:... em test deve ser permitido'
+      );
+
+      // 7. localhost em production → rejeitado
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('http://localhost:3001/oauth/authorize', 'production'),
+        false,
+        'http://localhost em production deve ser rejeitado'
+      );
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('https://localhost:3001/oauth/authorize', 'production'),
+        false,
+        'https://localhost em production deve ser rejeitado'
+      );
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('localhost', 'production'),
+        false,
+        'localhost em production deve ser rejeitado'
+      );
+
+      // 8. 127.0.0.1 em production → rejeitado
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('http://127.0.0.1:3001/oauth/authorize', 'production'),
+        false,
+        'http://127.0.0.1 em production deve ser rejeitado'
+      );
+      assert.strictEqual(
+        isValidBlingAuthorizationUrl('https://127.0.0.1:3001/oauth/authorize', 'production'),
+        false,
+        'https://127.0.0.1 em production deve ser rejeitado'
+      );
+    });
+
+    // 24. Orchestrator startConnect: rejeita authorizationUrl maliciosa (ex: evilbling.com.br) e transiciona para disconnected
+    await runTest('24. Orchestrator startConnect: rejeita authorizationUrl maliciosa (ex: evilbling.com.br) e transiciona para disconnected', async () => {
+      fakeGateway.startHandler = () => ({
+        status: 200,
+        body: {
+          ok: true,
+          authorizationUrl: 'https://evilbling.com.br/Api/v3/oauth/authorize?client_id=123',
+          pairingId: 'pair_evil',
+          pairingSecret: 'secret_evil',
+          expiresInSeconds: 300
+        }
+      });
+
+      const client = new GatewayClient({ baseUrl: gatewayUrl });
+      const orchestrator = new BlingAuthOrchestrator(client);
+
+      const res = await orchestrator.startConnect();
+      assert.strictEqual(res.ok, false);
+      assert.strictEqual(res.status, 'disconnected');
+      assert.strictEqual(res.error, 'INVALID_AUTH_URL');
+      assert.strictEqual(orchestrator.getCachedStatus(), 'disconnected');
+      assert.strictEqual(orchestrator.getActiveFlow(), null);
+      fakeGateway.startHandler = undefined;
     });
 
   } finally {

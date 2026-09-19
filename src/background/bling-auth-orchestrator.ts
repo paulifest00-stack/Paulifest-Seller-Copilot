@@ -1,10 +1,11 @@
 // Orquestrador de Autenticação e Conexão do Bling no Background (Fase 4C.4A)
-import type {
-  BlingConnectionStatus,
-  BlingStartConnectResponse,
-  BlingGetConnectionStatusResponse,
-  BlingDisconnectResponseMessage,
-  BlingConnectionStatusChangedMessage
+import {
+  type BlingConnectionStatus,
+  type BlingStartConnectResponse,
+  type BlingGetConnectionStatusResponse,
+  type BlingDisconnectResponseMessage,
+  type BlingConnectionStatusChangedMessage,
+  isValidBlingAuthorizationUrl
 } from '../shared/gateway-contracts.ts';
 import { 
   GatewayClient, 
@@ -85,14 +86,9 @@ export class BlingAuthOrchestrator {
       const expiresAtMs = Date.now() + Math.max(10000, (ttlSeconds * 1000) - 5000);
       const flowId = `flow_${Math.random().toString(36).substring(2)}_${Date.now()}`;
 
-      // Validação Mínima da URL (Requisito 6)
-      try {
-        const parsedUrl = new URL(startRes.authorizationUrl);
-        const isLocal = parsedUrl.hostname === 'localhost' || parsedUrl.hostname === '127.0.0.1';
-        const isBling = parsedUrl.hostname.endsWith('bling.com.br');
-        if (!isBling && !isLocal) throw new Error('Hostname inválido.');
-        if (parsedUrl.protocol !== 'https:' && !isLocal) throw new Error('Protocolo inválido. HTTPS exigido.');
-      } catch (err) {
+      // Validação Estrita da URL de Autorização OAuth (Fase 4C.4A Patch)
+      const env = this.gatewayClient.getEnvironment();
+      if (!isValidBlingAuthorizationUrl(startRes.authorizationUrl, env)) {
         this.cachedStatus = 'disconnected';
         this.broadcastStatus('disconnected');
         return {

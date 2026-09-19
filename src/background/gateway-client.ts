@@ -88,7 +88,7 @@ export interface GatewayClientOptions {
   storage?: IStorageArea; // backward-compatibility: se passado sozinho, atua como localStorage
 }
 
-function detectEnvironment(): GatewayEnvironment {
+export function detectEnvironment(): GatewayEnvironment {
   // 1. Prioridade para ambiente de teste (Node / Vite test runner)
   try {
     if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'test') {

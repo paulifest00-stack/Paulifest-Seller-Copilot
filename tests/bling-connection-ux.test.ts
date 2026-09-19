@@ -50,7 +50,7 @@ class FakeGatewayServer {
   public startCode: number = 200;
   public startBody: any = {
     ok: true,
-    authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=test',
+    authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=test',
     pairingId: 'pair_test',
     pairingSecret: 'secret_test',
     expiresInSeconds: 300
@@ -170,7 +170,7 @@ async function runSidebarTests(fakeServer: FakeGatewayServer) {
     const { orchestrator } = createOrchestratorWithFakeServer(fakeServer.port);
     fakeServer.startBody = {
       ok: true,
-      authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=test',
+      authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=test',
       pairingId: 'pair_01',
       pairingSecret: 'sec_01',
       expiresInSeconds: 300
@@ -187,7 +187,7 @@ async function runSidebarTests(fakeServer: FakeGatewayServer) {
     const { orchestrator } = createOrchestratorWithFakeServer(fakeServer.port);
     fakeServer.startBody = {
       ok: true,
-      authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=x',
+      authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=x',
       pairingId: 'pair_sf',
       pairingSecret: 'sec_sf',
       expiresInSeconds: 300
@@ -206,7 +206,7 @@ async function runSidebarTests(fakeServer: FakeGatewayServer) {
     const { orchestrator } = createOrchestratorWithFakeServer(fakeServer.port);
     fakeServer.startBody = {
       ok: true,
-      authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=y',
+      authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=y',
       pairingId: 'pair_02',
       pairingSecret: 'sec_02',
       expiresInSeconds: 300
@@ -243,7 +243,7 @@ async function runSidebarTests(fakeServer: FakeGatewayServer) {
     orchestrator.broadcastStatus('requires_reauth'); // simula estado de requires_reauth
     fakeServer.startBody = {
       ok: true,
-      authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=reauth',
+      authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=reauth',
       pairingId: 'pair_ra',
       pairingSecret: 'sec_ra',
       expiresInSeconds: 300
@@ -259,7 +259,7 @@ async function runSidebarTests(fakeServer: FakeGatewayServer) {
     orchestrator.broadcastStatus('session_expired');
     fakeServer.startBody = {
       ok: true,
-      authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=exp',
+      authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=exp',
       pairingId: 'pair_exp',
       pairingSecret: 'sec_exp',
       expiresInSeconds: 300
@@ -619,7 +619,7 @@ async function runArchitectureTests(fakeServer: FakeGatewayServer) {
     const { orchestrator } = createOrchestratorWithFakeServer(fakeServer.port);
     fakeServer.startBody = {
       ok: true,
-      authorizationUrl: 'https://auth.bling.com.br/oauth/authorize?state=test32',
+      authorizationUrl: 'https://www.bling.com.br/Api/v3/oauth/authorize?state=test32',
       pairingId: 'pair_32',
       pairingSecret: 'sec_32_must_not_appear',
       expiresInSeconds: 300

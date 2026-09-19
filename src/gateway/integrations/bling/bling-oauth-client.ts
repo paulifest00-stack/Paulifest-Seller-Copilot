@@ -1,10 +1,13 @@
 // Cliente HTTP OAuth2 Oficial para API v3 do Bling (Fase 4C.2B)
 import { gatewayLogger } from '../../security/logger.ts';
+import { OFFICIAL_BLING_AUTH_URL } from '../../../shared/gateway-contracts.ts';
 import type {
   BlingTokenResponse,
   BlingOAuthErrorData,
   BlingRevokeResult
 } from '../../types/contracts.ts';
+
+export const DEFAULT_BLING_AUTH_URL = OFFICIAL_BLING_AUTH_URL;
 
 export interface BlingOAuthClientOptions {
   clientId: string;
@@ -49,7 +52,7 @@ export class BlingOAuthClient {
     this.clientSecret = options.clientSecret;
     this.redirectUri = options.redirectUri;
     this.baseUrl = (options.baseUrl || 'https://api.bling.com.br').replace(/\/+$/, '');
-    this.authUrl = options.authUrl || 'https://www.bling.com.br/Api/v3/oauth/authorize';
+    this.authUrl = options.authUrl || DEFAULT_BLING_AUTH_URL;
     this.timeoutMs = options.timeoutMs || 8000;
     this.fetchFn = options.fetchFn || globalThis.fetch;
   }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { OFFICIAL_BLING_AUTH_URL } from '../shared/gateway-contracts.ts';
 
 export interface GatewayConfig {
   blingClientId: string;
@@ -25,7 +26,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
   const port = parseInt(env.GATEWAY_PORT || '3001', 10);
   const databaseUrl = env.DATABASE_URL?.trim() || undefined;
   const blingBaseUrl = env.BLING_BASE_URL?.trim() || 'https://api.bling.com.br';
-  const blingAuthUrl = env.BLING_AUTH_URL?.trim() || 'https://www.bling.com.br/Api/v3/oauth/authorize';
+  const blingAuthUrl = env.BLING_AUTH_URL?.trim() || OFFICIAL_BLING_AUTH_URL;
   const blingTimeoutMs = parseInt(env.BLING_TIMEOUT_MS || '8000', 10);
   const allowedExtensionOrigins = env.GATEWAY_ALLOWED_EXTENSION_ORIGINS
     ? env.GATEWAY_ALLOWED_EXTENSION_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
