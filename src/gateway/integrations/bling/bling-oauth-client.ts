@@ -198,29 +198,57 @@ export class BlingOAuthClient {
         });
       }
 
+      // Validação estrita de access_token e refresh_token (strings não vazias)
       if (
         typeof parsedData.access_token !== 'string' ||
-        !parsedData.access_token ||
+        parsedData.access_token.trim().length === 0 ||
         typeof parsedData.refresh_token !== 'string' ||
-        !parsedData.refresh_token
+        parsedData.refresh_token.trim().length === 0
       ) {
         throw new BlingOAuthError({
           status: response.status,
           category: 'invalid_payload',
-          message: 'Resposta da API do Bling ausente de tokens obrigatórios.',
+          message: 'Resposta da API do Bling ausente de tokens obrigatórios ou com tokens vazios.',
           retryable: true,
           requiresReauth: false
         });
       }
 
-      const expiresIn = typeof parsedData.expires_in === 'number'
-        ? parsedData.expires_in
-        : parseInt(parsedData.expires_in || '21600', 10);
+      // Validação estrita de expires_in: deve ser numérico, finito e estritamente > 0 (sem fallback mascarado)
+      let expiresInNum: number | null = null;
+      if (typeof parsedData.expires_in === 'number') {
+        expiresInNum = parsedData.expires_in;
+      } else if (typeof parsedData.expires_in === 'string' && /^\s*-?\d+\s*$/.test(parsedData.expires_in)) {
+        expiresInNum = parseInt(parsedData.expires_in.trim(), 10);
+      }
+
+      if (expiresInNum === null || !Number.isFinite(expiresInNum) || expiresInNum <= 0) {
+        throw new BlingOAuthError({
+          status: response.status,
+          category: 'invalid_payload',
+          message: 'Resposta da API do Bling com expires_in inválido, não-numérico, não-positivo ou ausente.',
+          retryable: true,
+          requiresReauth: false
+        });
+      }
+
+      // Validação de token_type: se presente, deve ser compatível com Bearer (case-insensitive)
+      if (parsedData.token_type !== undefined && parsedData.token_type !== null) {
+        if (typeof parsedData.token_type !== 'string' || parsedData.token_type.trim().toLowerCase() !== 'bearer') {
+          throw new BlingOAuthError({
+            status: response.status,
+            category: 'invalid_payload',
+            message: `Resposta da API do Bling com token_type incompatível: ${parsedData.token_type}.`,
+            retryable: true,
+            requiresReauth: false
+          });
+        }
+      }
 
       return {
-        access_token: parsedData.access_token,
-        refresh_token: parsedData.refresh_token,
-        expires_in: isNaN(expiresIn) ? 21600 : expiresIn,
+        access_token: parsedData.access_token.trim(),
+        refresh_token: parsedData.refresh_token.trim(),
+        expires_in: expiresInNum,
         token_type: parsedData.token_type || 'Bearer',
         scope: parsedData.scope || ''
       };

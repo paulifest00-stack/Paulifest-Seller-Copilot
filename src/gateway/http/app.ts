@@ -78,25 +78,104 @@ export class GatewayApp {
   }
 
   /**
+   * Avalia rigorosamente se a origem (Origin header) está autorizada a se comunicar com o Gateway.
+   * Em produção:
+   * - Aceita apenas origens de extensão explicitamente configuradas na allowlist (ex: chrome-extension://<ID_REAL>).
+   * - Proíbe terminantemente localhost / 127.0.0.1.
+   * - Não permite curingas ou prefixos genéricos.
+   * Em desenvolvimento / teste:
+   * - Aceita origens de extensão configuradas na allowlist.
+   * - Aceita localhost se allowLocalhostCors estiver ativo (padrão em dev).
+   * - Se nenhuma allowlist foi explicitamente configurada em dev/teste, permite chrome-extension:// para conveniência.
+   */
+  isOriginAllowed(origin: string): boolean {
+    if (!origin || typeof origin !== 'string') return false;
+
+    // 1. Em produção, localhost / 127.0.0.1 é estritamente proibido
+    if (this.config.environment === 'production') {
+      if (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
+        return false;
+      }
+    } else {
+      // Em desenvolvimento e teste, permite localhost caso habilitado
+      if (this.config.allowLocalhostCors !== false) {
+        if (
+          origin.startsWith('http://localhost:') ||
+          origin.startsWith('http://127.0.0.1:') ||
+          origin === 'http://localhost' ||
+          origin === 'http://127.0.0.1'
+        ) {
+          return true;
+        }
+      }
+    }
+
+    // 2. Verificação exata contra allowlist explícita
+    const allowed = this.config.allowedExtensionOrigins || [];
+    if (allowed.includes(origin)) {
+      return true;
+    }
+
+    // 3. Em desenvolvimento e teste, caso nenhuma allowlist explícita tenha sido configurada,
+    // tolera chrome-extension:// genérico para facilidade de testes, mas NUNCA em produção.
+    if (this.config.environment !== 'production' && allowed.length === 0) {
+      if (origin.startsWith('chrome-extension://')) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Extração segura de IP do cliente para mitigação de spoofing de X-Forwarded-For no rate limiting.
+   * - Se trustProxy for falso (padrão seguro), NUNCA confia em X-Forwarded-For e usa o socket direto.
+   * - Se trustProxy for verdadeiro (Gateway atrás de reverse proxy corporativo), extrai o IP de entrada confiável.
+   */
+  extractClientIp(req: IncomingMessage): string {
+    const directIp = req.socket?.remoteAddress || '127.0.0.1';
+
+    if (!this.config.trustProxy) {
+      return directIp;
+    }
+
+    const xForwardedFor = req.headers['x-forwarded-for'];
+    if (typeof xForwardedFor === 'string' && xForwardedFor.trim()) {
+      const firstIp = xForwardedFor.split(',')[0].trim();
+      if (firstIp) {
+        return firstIp;
+      }
+    }
+
+    return directIp;
+  }
+
+  /**
    * Ponto de entrada para processamento de requisições HTTP do Node.js.
    */
   async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const pathname = parsedUrl.pathname;
     const method = req.method?.toUpperCase() || 'GET';
-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket?.remoteAddress || '127.0.0.1';
+    const clientIp = this.extractClientIp(req);
 
-    // CORS defensivo (permite apenas extensões e localhost em desenvolvimento)
+    // CORS com allowlist explícita e tratamento rigoroso de preflight
     const origin = req.headers.origin;
-    if (origin) {
-      if (origin.startsWith('chrome-extension://') || origin.startsWith('http://localhost:')) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, enable-jwt');
-      }
+    const isAllowed = origin ? this.isOriginAllowed(origin) : false;
+
+    if (origin && isAllowed) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, enable-jwt');
+      res.setHeader('Vary', 'Origin');
     }
 
     if (method === 'OPTIONS') {
+      if (origin && !isAllowed) {
+        res.writeHead(403);
+        res.end();
+        return;
+      }
       res.writeHead(204);
       res.end();
       return;

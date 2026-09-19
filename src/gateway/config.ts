@@ -15,6 +15,9 @@ export interface GatewayConfig {
   gstTtlSeconds: number;           // Default: 900 (15 minutos)
   sessionRefreshTtlDays: number;   // Default: 14 dias
   databaseUrl?: string;            // PostgreSQL connection string (Fase 4C.2)
+  allowedExtensionOrigins?: string[]; // Allowlist explícita de origens de extensão
+  trustProxy?: boolean;               // Habilita confiança em reverse proxy (X-Forwarded-For)
+  allowLocalhostCors?: boolean;       // Permite localhost apenas em desenvolvimento/testes
 }
 
 export function loadGatewayConfig(env: Record<string, string | undefined> = process.env): GatewayConfig {
@@ -24,6 +27,10 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
   const blingBaseUrl = env.BLING_BASE_URL?.trim() || 'https://api.bling.com.br';
   const blingAuthUrl = env.BLING_AUTH_URL?.trim() || 'https://www.bling.com.br/Api/v3/oauth/authorize';
   const blingTimeoutMs = parseInt(env.BLING_TIMEOUT_MS || '8000', 10);
+  const allowedExtensionOrigins = env.GATEWAY_ALLOWED_EXTENSION_ORIGINS
+    ? env.GATEWAY_ALLOWED_EXTENSION_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+  const trustProxy = env.GATEWAY_TRUST_PROXY === 'true';
 
   if (environment === 'production') {
     // Validação estrita em Produção: nenhum segredo pode usar fallback fictício
@@ -79,7 +86,10 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       pairingTtlSeconds: 300,        // 5 minutos
       gstTtlSeconds: 900,           // 15 minutos
       sessionRefreshTtlDays: 14,    // 14 dias
-      databaseUrl
+      databaseUrl,
+      allowedExtensionOrigins,
+      trustProxy,
+      allowLocalhostCors: false
     };
   }
 
@@ -135,7 +145,10 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       pairingTtlSeconds: 300,
       gstTtlSeconds: 900,
       sessionRefreshTtlDays: 14,
-      databaseUrl
+      databaseUrl,
+      allowedExtensionOrigins,
+      trustProxy,
+      allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false'
     };
   }
 
@@ -174,6 +187,9 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     pairingTtlSeconds: 300,
     gstTtlSeconds: 900,
     sessionRefreshTtlDays: 14,
-    databaseUrl
+    databaseUrl,
+    allowedExtensionOrigins,
+    trustProxy,
+    allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false'
   };
 }

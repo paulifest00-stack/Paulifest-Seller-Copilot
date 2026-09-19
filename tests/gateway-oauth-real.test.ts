@@ -1664,6 +1664,450 @@ export async function runGatewayOAuthRealTests() {
       assert.strictEqual(conn?.status, 'requires_reauth', 'Segundo 401 deve marcar conexão como requires_reauth');
     });
 
+    // -------------------------------------------------------------------------
+    // 7. Auditoria de Segurança: CORS com Allowlist Estrita (AJUSTE FASE 4C.2B)
+    // -------------------------------------------------------------------------
+
+    await runTest('28. CORS: Extensão autorizada em allowlist recebe Access-Control-Allow-Origin e preflight 204', async () => {
+      const allowedExt = 'chrome-extension://knldjmfmopnppmplflldamadogfkgikb';
+      const corsApp = new GatewayApp({
+        config: {
+          ...testConfig,
+          environment: 'production',
+          allowedExtensionOrigins: [allowedExt]
+        },
+        repository: repo,
+        oauthClient,
+        tokenManager
+      });
+
+      // 1. Preflight OPTIONS
+      let preflightStatus = 0;
+      const headersSet: Record<string, string> = {};
+      const fakeResOptions: any = {
+        writeHead: (code: number) => { preflightStatus = code; },
+        setHeader: (k: string, v: string) => { headersSet[k.toLowerCase()] = v; },
+        end: () => {}
+      };
+      await corsApp.handleRequest({
+        method: 'OPTIONS',
+        url: '/health',
+        headers: { host: 'localhost', origin: allowedExt }
+      } as any, fakeResOptions);
+
+      assert.strictEqual(preflightStatus, 204);
+      assert.strictEqual(headersSet['access-control-allow-origin'], allowedExt);
+      assert.ok(headersSet['access-control-allow-methods'].includes('GET'));
+
+      // 2. GET normal
+      let getStatus = 0;
+      const getHeaders: Record<string, string> = {};
+      const fakeResGet: any = {
+        writeHead: (code: number) => { getStatus = code; },
+        setHeader: (k: string, v: string) => { getHeaders[k.toLowerCase()] = v; },
+        end: () => {}
+      };
+      await corsApp.handleRequest({
+        method: 'GET',
+        url: '/health',
+        headers: { host: 'localhost', origin: allowedExt }
+      } as any, fakeResGet);
+
+      assert.strictEqual(getStatus, 200);
+      assert.strictEqual(getHeaders['access-control-allow-origin'], allowedExt);
+    });
+
+    await runTest('29. CORS: Extensão não autorizada é rejeitada (sem header e preflight 403)', async () => {
+      const allowedExt = 'chrome-extension://knldjmfmopnppmplflldamadogfkgikb';
+      const rogueExt = 'chrome-extension://unauthorizedextensionid12345';
+      const corsApp = new GatewayApp({
+        config: {
+          ...testConfig,
+          environment: 'production',
+          allowedExtensionOrigins: [allowedExt]
+        },
+        repository: repo,
+        oauthClient,
+        tokenManager
+      });
+
+      // 1. Preflight OPTIONS com extensão não autorizada
+      let preflightStatus = 0;
+      const headersSet: Record<string, string> = {};
+      const fakeResOptions: any = {
+        writeHead: (code: number) => { preflightStatus = code; },
+        setHeader: (k: string, v: string) => { headersSet[k.toLowerCase()] = v; },
+        end: () => {}
+      };
+      await corsApp.handleRequest({
+        method: 'OPTIONS',
+        url: '/health',
+        headers: { host: 'localhost', origin: rogueExt }
+      } as any, fakeResOptions);
+
+      assert.strictEqual(preflightStatus, 403, 'Preflight de extensão desconhecida deve retornar 403');
+      assert.strictEqual(headersSet['access-control-allow-origin'], undefined, 'Não deve emitir Allow-Origin');
+
+      // 2. Requisição GET com origem não autorizada
+      let getStatus = 0;
+      const getHeaders: Record<string, string> = {};
+      const fakeResGet: any = {
+        writeHead: (code: number) => { getStatus = code; },
+        setHeader: (k: string, v: string) => { getHeaders[k.toLowerCase()] = v; },
+        end: () => {}
+      };
+      await corsApp.handleRequest({
+        method: 'GET',
+        url: '/health',
+        headers: { host: 'localhost', origin: rogueExt }
+      } as any, fakeResGet);
+
+      assert.strictEqual(getStatus, 200);
+      assert.strictEqual(getHeaders['access-control-allow-origin'], undefined, 'GET não deve emitir Allow-Origin');
+    });
+
+    await runTest('30. CORS: Localhost é permitido em ambiente de development', async () => {
+      const devApp = new GatewayApp({
+        config: {
+          ...testConfig,
+          environment: 'development',
+          allowLocalhostCors: true,
+          allowedExtensionOrigins: []
+        },
+        repository: repo,
+        oauthClient,
+        tokenManager
+      });
+
+      const localOrigin = 'http://localhost:5173';
+      const headersSet: Record<string, string> = {};
+      let statusCode = 0;
+      const fakeRes: any = {
+        writeHead: (code: number) => { statusCode = code; },
+        setHeader: (k: string, v: string) => { headersSet[k.toLowerCase()] = v; },
+        end: () => {}
+      };
+
+      await devApp.handleRequest({
+        method: 'GET',
+        url: '/health',
+        headers: { host: 'localhost', origin: localOrigin }
+      } as any, fakeRes);
+
+      assert.strictEqual(statusCode, 200);
+      assert.strictEqual(headersSet['access-control-allow-origin'], localOrigin);
+    });
+
+    await runTest('31. CORS: Localhost é estritamente rejeitado em ambiente de production', async () => {
+      const prodApp = new GatewayApp({
+        config: {
+          ...testConfig,
+          environment: 'production',
+          allowedExtensionOrigins: ['chrome-extension://valid_id_prod']
+        },
+        repository: repo,
+        oauthClient,
+        tokenManager
+      });
+
+      const localOrigin = 'http://localhost:5173';
+      const headersSet: Record<string, string> = {};
+      let preflightStatus = 0;
+      const fakeRes: any = {
+        writeHead: (code: number) => { preflightStatus = code; },
+        setHeader: (k: string, v: string) => { headersSet[k.toLowerCase()] = v; },
+        end: () => {}
+      };
+
+      await prodApp.handleRequest({
+        method: 'OPTIONS',
+        url: '/health',
+        headers: { host: 'localhost', origin: localOrigin }
+      } as any, fakeRes);
+
+      assert.strictEqual(preflightStatus, 403, 'Produção deve rejeitar preflight de localhost');
+      assert.strictEqual(headersSet['access-control-allow-origin'], undefined);
+    });
+
+    await runTest('32. CORS: Origem maliciosa com prefixo similar ao ID permitido é bloqueada (sem header)', async () => {
+      const validId = 'chrome-extension://allowed_id_abc';
+      const maliciousOrigin = 'chrome-extension://allowed_id_abc_attacker_controlled';
+      const corsApp = new GatewayApp({
+        config: {
+          ...testConfig,
+          environment: 'production',
+          allowedExtensionOrigins: [validId]
+        },
+        repository: repo,
+        oauthClient,
+        tokenManager
+      });
+
+      const headersSet: Record<string, string> = {};
+      let preflightStatus = 0;
+      const fakeRes: any = {
+        writeHead: (code: number) => { preflightStatus = code; },
+        setHeader: (k: string, v: string) => { headersSet[k.toLowerCase()] = v; },
+        end: () => {}
+      };
+
+      await corsApp.handleRequest({
+        method: 'OPTIONS',
+        url: '/health',
+        headers: { host: 'localhost', origin: maliciousOrigin }
+      } as any, fakeRes);
+
+      assert.strictEqual(preflightStatus, 403);
+      assert.strictEqual(headersSet['access-control-allow-origin'], undefined);
+    });
+
+    // -------------------------------------------------------------------------
+    // 8. Auditoria de Segurança: X-Forwarded-For e Trusted Proxy (AJUSTE FASE 4C.2B)
+    // -------------------------------------------------------------------------
+
+    await runTest('33. X-Forwarded-For: Com trustProxy=false, tentativa de spoofing é ignorada e socket IP é usado', () => {
+      const directApp = new GatewayApp({
+        config: {
+          ...testConfig,
+          trustProxy: false
+        },
+        repository: repo,
+        oauthClient,
+        tokenManager
+      });
+
+      const fakeReq: any = {
+        headers: { 'x-forwarded-for': '203.0.113.195, 10.0.0.1' },
+        socket: { remoteAddress: '192.168.1.55' }
+      };
+
+      const extractedIp = directApp.extractClientIp(fakeReq);
+      assert.strictEqual(extractedIp, '192.168.1.55', 'Deve ignorar o header forjado e utilizar o remoteAddress do socket');
+    });
+
+    await runTest('34. X-Forwarded-For: Com trustProxy=true, IP do cliente fornecido pelo reverse proxy é utilizado', () => {
+      const proxyApp = new GatewayApp({
+        config: {
+          ...testConfig,
+          trustProxy: true
+        },
+        repository: repo,
+        oauthClient,
+        tokenManager
+      });
+
+      const fakeReq: any = {
+        headers: { 'x-forwarded-for': '203.0.113.195, 10.0.0.1' },
+        socket: { remoteAddress: '10.0.0.1' }
+      };
+
+      const extractedIp = proxyApp.extractClientIp(fakeReq);
+      assert.strictEqual(extractedIp, '203.0.113.195', 'Com trustProxy ativo, extrai o primeiro IP da cadeia');
+    });
+
+    // -------------------------------------------------------------------------
+    // 9. Validação Estrita de Resposta do Token Endpoint (AJUSTE FASE 4C.2B)
+    // -------------------------------------------------------------------------
+
+    await runTest('35. Validação de Token: expires_in ausente lança invalid_payload', async () => {
+      fakeBling.tokenHandler = () => ({
+        status: 200,
+        body: { access_token: 'acc_123', refresh_token: 'ref_123' } // sem expires_in
+      });
+      let caught: any;
+      try {
+        await oauthClient.exchangeCodeForTokens('code_no_expires');
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof BlingOAuthError);
+      assert.strictEqual(caught.category, 'invalid_payload');
+    });
+
+    await runTest('36. Validação de Token: expires_in = 0 lança invalid_payload', async () => {
+      fakeBling.tokenHandler = () => ({
+        status: 200,
+        body: { access_token: 'acc_123', refresh_token: 'ref_123', expires_in: 0 }
+      });
+      let caught: any;
+      try {
+        await oauthClient.exchangeCodeForTokens('code_zero_expires');
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof BlingOAuthError);
+      assert.strictEqual(caught.category, 'invalid_payload');
+    });
+
+    await runTest('37. Validação de Token: expires_in negativo lança invalid_payload', async () => {
+      fakeBling.tokenHandler = () => ({
+        status: 200,
+        body: { access_token: 'acc_123', refresh_token: 'ref_123', expires_in: -3600 }
+      });
+      let caught: any;
+      try {
+        await oauthClient.exchangeCodeForTokens('code_negative_expires');
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof BlingOAuthError);
+      assert.strictEqual(caught.category, 'invalid_payload');
+    });
+
+    await runTest('38. Validação de Token: expires_in não numérico lança invalid_payload', async () => {
+      fakeBling.tokenHandler = () => ({
+        status: 200,
+        body: { access_token: 'acc_123', refresh_token: 'ref_123', expires_in: 'duas_horas' }
+      });
+      let caught: any;
+      try {
+        await oauthClient.exchangeCodeForTokens('code_nan_expires');
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof BlingOAuthError);
+      assert.strictEqual(caught.category, 'invalid_payload');
+    });
+
+    await runTest('39. Validação de Token: access_token vazio lança invalid_payload', async () => {
+      fakeBling.tokenHandler = () => ({
+        status: 200,
+        body: { access_token: '   ', refresh_token: 'ref_123', expires_in: 21600 }
+      });
+      let caught: any;
+      try {
+        await oauthClient.exchangeCodeForTokens('code_empty_access');
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof BlingOAuthError);
+      assert.strictEqual(caught.category, 'invalid_payload');
+    });
+
+    await runTest('40. Validação de Token: refresh_token vazio lança invalid_payload', async () => {
+      fakeBling.tokenHandler = () => ({
+        status: 200,
+        body: { access_token: 'acc_123', refresh_token: '', expires_in: 21600 }
+      });
+      let caught: any;
+      try {
+        await oauthClient.exchangeCodeForTokens('code_empty_refresh');
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof BlingOAuthError);
+      assert.strictEqual(caught.category, 'invalid_payload');
+    });
+
+    await runTest('41. Validação de Token: token_type incompatível ("Basic") lança invalid_payload', async () => {
+      fakeBling.tokenHandler = () => ({
+        status: 200,
+        body: { access_token: 'acc_123', refresh_token: 'ref_123', expires_in: 21600, token_type: 'Basic' }
+      });
+      let caught: any;
+      try {
+        await oauthClient.exchangeCodeForTokens('code_wrong_token_type');
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof BlingOAuthError);
+      assert.strictEqual(caught.category, 'invalid_payload');
+    });
+
+    // -------------------------------------------------------------------------
+    // 10. Auditoria de Claims Canônicos e Proteção de Segredos no Disconnect
+    // -------------------------------------------------------------------------
+
+    await runTest('42. GST Claims Canônicos: validação estrita de sub=connectionId, csid=clientSessionId, sid=sessionId, iss=paulifest-integration-gateway', () => {
+      const connectionId = 'conn_test_claims_123';
+      const clientSessionId = 'csid_test_claims_456';
+      const sessionId = 'sid_test_claims_789';
+
+      const token = createGatewaySessionToken(
+        { connectionId, clientSessionId, sessionId },
+        jwtSecret,
+        900
+      );
+
+      const parts = token.split('.');
+      assert.strictEqual(parts.length, 3);
+
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      assert.strictEqual(payload.sub, connectionId, 'sub deve ser exatamente connectionId');
+      assert.strictEqual(payload.csid, clientSessionId, 'csid deve ser exatamente clientSessionId');
+      assert.strictEqual(payload.sid, sessionId, 'sid deve ser exatamente sessionId');
+      assert.strictEqual(payload.iss, 'paulifest-integration-gateway', 'iss deve ser paulifest-integration-gateway');
+      assert.ok(typeof payload.iat === 'number');
+      assert.ok(typeof payload.exp === 'number');
+      assert.strictEqual(payload.exp - payload.iat, 900, 'Duração do GST deve ser estritamente 900 segundos');
+    });
+
+    await runTest('43. Disconnect Sanitization: confirma que remoteRevocation expõe apenas status e zero credenciais/tokens brutos', async () => {
+      fakeBling.revokeHandler = undefined;
+      const connId = `conn_${randomUUID()}`;
+      const sessionId = randomUUID();
+      const rawAccessToken = 'secret_access_token_raw_do_not_leak';
+      const rawRefreshToken = 'secret_refresh_token_raw_do_not_leak';
+
+      const encAccess = encryptAesGcm(rawAccessToken, encryptionKey);
+      const encRefresh = encryptAesGcm(rawRefreshToken, encryptionKey);
+
+      await repo.saveConnection({
+        id: connId,
+        status: 'connected',
+        encryptedAccessToken: encAccess.ciphertext,
+        accessTokenIv: encAccess.iv,
+        accessTokenTag: encAccess.authTag,
+        encryptedRefreshToken: encRefresh.ciphertext,
+        refreshTokenIv: encRefresh.iv,
+        refreshTokenTag: encRefresh.authTag,
+        tokenExpiresAt: new Date(Date.now() + 21600000).toISOString(),
+        tokenVersion: 1,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+
+      await repo.createGatewaySession({
+        id: sessionId,
+        connectionId: connId,
+        clientSessionId: 'cli_leak_check',
+        tokenFamilyId: randomUUID(),
+        refreshTokenHash: hashSecret(generateGatewayRefreshToken()),
+        expiresAt: new Date(Date.now() + 86400000).toISOString(),
+        createdAt: new Date().toISOString()
+      });
+
+      const gst = createGatewaySessionToken(
+        { connectionId: connId, clientSessionId: 'cli_leak_check', sessionId },
+        jwtSecret,
+        900
+      );
+
+      let responsePayload = '';
+      let resStatus = 0;
+      const fakeRes: any = {
+        writeHead: (code: number) => { resStatus = code; },
+        setHeader: () => {},
+        end: (body: string) => { responsePayload = body; }
+      };
+
+      await app.handleRequest({
+        method: 'DELETE',
+        url: '/integrations/bling',
+        headers: { host: 'localhost', authorization: `Bearer ${gst}` }
+      } as any, fakeRes);
+
+      assert.strictEqual(resStatus, 200);
+      assert.ok(!responsePayload.includes(rawAccessToken), 'A resposta NUNCA deve conter o access token bruto');
+      assert.ok(!responsePayload.includes(rawRefreshToken), 'A resposta NUNCA deve conter o refresh token bruto');
+      assert.ok(!responsePayload.includes(encAccess.ciphertext), 'A resposta NUNCA deve conter o ciphertext do access token');
+
+      const parsed = JSON.parse(responsePayload);
+      assert.strictEqual(parsed.remoteRevocation.accessToken, 'success');
+      assert.strictEqual(parsed.remoteRevocation.refreshToken, 'success');
+      assert.strictEqual(parsed.remoteRevocation.complete, true);
+    });
+
   } finally {
     await fakeBling.stop();
     await testPool.end();
