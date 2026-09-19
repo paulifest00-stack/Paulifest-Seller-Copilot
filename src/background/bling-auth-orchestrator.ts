@@ -174,11 +174,14 @@ export class BlingAuthOrchestrator {
       }
 
       try {
-        // Trick para estender o tempo de vida do Service Worker MV3 a cada poll
-        if (typeof chrome !== 'undefined' && chrome.runtime?.getPlatformInfo) {
-          chrome.runtime.getPlatformInfo();
-        }
-
+        // DECISÃO ARQUITETURAL MV3 (Fase 4C.4B):
+        // NÃO usamos nenhum hack de keep-alive de runtime nem APIs artificiais para extensão de lifetime.
+        // MV3 Service Workers são intencionalmente efêmeros — comportamentos incidentais de
+        // extensão de lifetime não são garantidos e são mascarados pelo DevTools aberto.
+        // O OAuth polling é best-effort: se o worker morrer, pairingSecret se perde (correto
+        // por design — era exclusivamente na memória volátil), o pairing expira no Gateway,
+        // e o usuário inicia um novo fluxo de conexão. Conexões JÁ estabelecidas sobrevivem
+        // normalmente via GRT em chrome.storage.local → refresh → novo GST.
         const handshakeRes = await this.gatewayClient.completeSessionHandshake(flow.pairingId, flow.pairingSecret);
 
         // Proteção contra race/stale: se outro fluxo assumiu, descarta

@@ -1,9 +1,11 @@
 // Componente de UI Contextual Injetada no Bling ERP via Shadow DOM (Fase 4B)
-import type { 
-  BlingPageType, 
-  TabContextUiState, 
-  ContextualActionType 
+// Atualizado na Fase 4C.4B: auth-awareness mínima no Dock (feedback de estado de conexão).
+import type {
+  BlingPageType,
+  TabContextUiState,
+  ContextualActionType
 } from '../../shared/tab-context-contracts.ts';
+import type { BlingConnectionStatus } from '../../shared/gateway-contracts.ts';
 
 const HOST_ID = 'paulifest-seller-copilot-host';
 
@@ -22,6 +24,8 @@ export class BlingShadowUi {
   };
   private currentPageType: BlingPageType = 'other';
   private currentDetectedProduct?: { id?: string; sku?: string };
+  // Fase 4C.4B: Estado de conexão Bling — não persistido, hidratado via query/broadcast
+  private blingConnectionStatus: BlingConnectionStatus = 'disconnected';
 
   constructor(options: ShadowUiOptions) {
     this.onAction = options.onAction;
@@ -72,6 +76,19 @@ export class BlingShadowUi {
     }
   }
 
+  /**
+   * Fase 4C.4B: Atualiza o estado de conexão Bling no Dock.
+   * Chamado pelo Content Script ao receber BLING_CONNECTION_STATUS_CHANGED do Background
+   * ou ao hidratar com BLING_GET_CONNECTION_STATUS na inicialização.
+   * Não persiste nada — estado é exclusivamente em memória do Content Script.
+   */
+  updateConnectionStatus(status: BlingConnectionStatus): void {
+    this.blingConnectionStatus = status;
+    if (this.shadow) {
+      this.render();
+    }
+  }
+
   private render(): void {
     if (!this.shadow) return;
 
@@ -82,7 +99,21 @@ export class BlingShadowUi {
 
     const hasId = Boolean(this.currentDetectedProduct?.id);
     const isNew = this.currentPageType === 'product_form_new';
-    const canImport = this.currentUiState.canImport && hasId;
+
+    // Fase 4C.4B: Auth-awareness — o Dock bloqueia importação se sessão não estiver ready.
+    // AJUSTE OBRIGATÓRIO 3 e 4: semântica distinta por estado (não unificar gateway_unreachable com disconnected).
+    const isConnected = this.blingConnectionStatus === 'connected';
+    const isTransitoryBlocked = this.blingConnectionStatus === 'gateway_unreachable' ||
+                                this.blingConnectionStatus === 'refreshing';
+    const isPermBlocked = this.blingConnectionStatus === 'disconnected' ||
+                          this.blingConnectionStatus === 'requires_reauth' ||
+                          this.blingConnectionStatus === 'session_expired' ||
+                          this.blingConnectionStatus === 'configuration_error' ||
+                          this.blingConnectionStatus === 'connecting' ||
+                          this.blingConnectionStatus === 'awaiting_oauth';
+
+    // canImport só é true se Bling connected + uiState.canImport + produto com ID
+    const canImport = isConnected && this.currentUiState.canImport && hasId;
 
     // Se o esqueleto ainda não foi criado no shadow root, inicializa a estrutura estática
     let dockRoot = this.shadow.getElementById('dock-root');
@@ -351,11 +382,34 @@ export class BlingShadowUi {
       btnPrepare.disabled = !canImport;
     }
 
-    // 4. Renderiza tooltip com textContent
+    // 4. Renderiza tooltip/notice com textContent (anti-XSS)
     const tooltipContainer = this.shadow.getElementById('tooltip-container');
     if (tooltipContainer) {
       tooltipContainer.replaceChildren();
-      if (isNew) {
+
+      // AJUSTE OBRIGATÓRIO 3: gateway_unreachable é transitório (não é disconnected).
+      // AJUSTE OBRIGATÓRIO 4: refreshing bloqueia temporariamente sem parecer logout.
+      if (isTransitoryBlocked) {
+        const notice = document.createElement('div');
+        notice.className = 'tooltip-notice';
+        if (this.blingConnectionStatus === 'gateway_unreachable') {
+          notice.textContent = '⚠️ Gateway temporariamente indisponível. Tente novamente em instantes.';
+        } else {
+          // refreshing
+          notice.textContent = '⏳ Renovando sessão com o Bling… aguarde.';
+        }
+        tooltipContainer.appendChild(notice);
+      } else if (isPermBlocked && !isConnected) {
+        // Conectar/Reconectar — orienta o usuário sem fornecer detalhes internos
+        const notice = document.createElement('div');
+        notice.className = 'tooltip-notice';
+        if (this.blingConnectionStatus === 'connecting' || this.blingConnectionStatus === 'awaiting_oauth') {
+          notice.textContent = '⏳ Aguardando conexão com o Bling…';
+        } else {
+          notice.textContent = '🔗 Conecte o Bling pelo Copilot para continuar.';
+        }
+        tooltipContainer.appendChild(notice);
+      } else if (isNew) {
         const notice = document.createElement('div');
         notice.className = 'tooltip-notice';
         notice.textContent = '⚠️ Importação bloqueada: produto novo ainda não possui ID no Bling.';

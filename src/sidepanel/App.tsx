@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { 
-  ShoppingBag, 
-  Layers, 
-  Compass, 
-  Plus, 
-  Sparkles, 
+import {
+  ShoppingBag,
+  Layers,
+  Compass,
+  Plus,
+  Sparkles,
   RefreshCw,
   ExternalLink,
   RotateCcw,
@@ -13,9 +13,9 @@ import {
 import type { ExtensionMessage, PageContextState } from '../shared/types';
 import type { CentralProductSheet } from '../core/schema/product.ts';
 import { createInitialSheet } from '../core/schema/product.ts';
-import { 
-  loadActiveSheet, 
-  saveActiveSheet, 
+import {
+  loadActiveSheet,
+  saveActiveSheet,
   clearActiveSheet,
   loadSheet,
   saveSheet
@@ -23,6 +23,8 @@ import {
 import { StepInput } from './components/steps/StepInput.tsx';
 import { StepSheet } from './components/steps/StepSheet.tsx';
 import { StepPricing } from './components/steps/StepPricing.tsx';
+import { BlingConnectionCard } from './components/BlingConnectionCard.tsx';
+import type { BlingConnectionStatus } from '../shared/gateway-contracts.ts';
 
 export const App: React.FC = () => {
   // 1. Contexto da Aba do Chrome
@@ -46,6 +48,13 @@ export const App: React.FC = () => {
 
   // 4. Estado da Aba Conectada (Fase 4B)
   const [tabContext, setTabContext] = useState<any>(null);
+
+  // 5. Estado de Conexão Bling (Fase 4C.4B)
+  // AJUSTE OBRIGATÓRIO 5: blingStatusLoaded=false evita flash enganoso antes da hidratação
+  const [blingStatus, setBlingStatus] = useState<BlingConnectionStatus>('disconnected');
+  const [blingLastRefreshAt, setBlingLastRefreshAt] = useState<string | null>(null);
+  const [blingStatusLoaded, setBlingStatusLoaded] = useState<boolean>(false);
+  const [blingDisconnecting, setBlingDisconnecting] = useState<boolean>(false);
 
   // Carrega a ficha persistida e escuta o contexto do Service Worker
   useEffect(() => {
@@ -111,8 +120,20 @@ export const App: React.FC = () => {
           reloadSheet();
         }
       });
+
+      // AJUSTE OBRIGATÓRIO 5: Consulta estado de conexão Bling na abertura/reabertura da Sidebar.
+      // Não depende exclusivamente de evento passado — sempre busca estado atual do Background.
+      chrome.runtime.sendMessage({ type: 'BLING_GET_CONNECTION_STATUS' }, (res) => {
+        if (res && res.status) {
+          setBlingStatus(res.status);
+          setBlingLastRefreshAt(res.lastRefreshAt ?? null);
+        }
+        // Marca hidratação concluída independente de sucesso/erro
+        setBlingStatusLoaded(true);
+      });
     } else {
       reloadSheet();
+      setBlingStatusLoaded(true); // Ambiente sem chrome.runtime — marca como carregado
     }
 
     // Listener para eventos em tempo real
@@ -129,6 +150,13 @@ export const App: React.FC = () => {
           summaryLabel: message.state.platform === 'bling' ? `Bling ERP • ${message.state.pageType}` : prev.summaryLabel
         }));
         reloadSheet(message.state.activeSheetId, message.state.platform);
+      }
+      // Atualiza estado de conexão Bling em tempo real via broadcast do Background
+      if (message.type === 'BLING_CONNECTION_STATUS_CHANGED') {
+        setBlingStatus(message.status);
+        setBlingLastRefreshAt(message.lastRefreshAt ?? null);
+        // Garante que hidratação seja marcada mesmo se evento chegar antes da query inicial
+        setBlingStatusLoaded(true);
       }
     };
 
@@ -186,6 +214,61 @@ export const App: React.FC = () => {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Handlers de Conexão Bling (Fase 4C.4B)
+  // Background é autoridade — UI apenas envia mensagens e reflete estado.
+  // ---------------------------------------------------------------------------
+
+  const handleBlingConnect = () => {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'BLING_START_CONNECT' }, (res) => {
+        if (res?.status) {
+          setBlingStatus(res.status);
+          setBlingLastRefreshAt(res.lastRefreshAt ?? null);
+        }
+      });
+    }
+  };
+
+  const handleBlingDisconnect = () => {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      setBlingDisconnecting(true);
+      chrome.runtime.sendMessage({ type: 'BLING_DISCONNECT' }, (res) => {
+        setBlingDisconnecting(false);
+        if (res?.ok && res?.status === 'disconnected') {
+          setBlingStatus('disconnected');
+          setBlingLastRefreshAt(null);
+        } else {
+          // Falha transitória: preserva estado coerente de erro, não declara falsamente desconectado.
+          // Background broadcast deve ter emitido BLING_CONNECTION_STATUS_CHANGED com estado correto.
+          setBlingStatus((prev) =>
+            prev === 'connected' ? 'gateway_unreachable' : prev
+          );
+        }
+      });
+    }
+  };
+
+  const handleBlingFocusOAuthTab = () => {
+    // Background foca aba OAuth sem expor oauthTabId, pairingId ou pairingSecret
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'BLING_FOCUS_OAUTH_TAB' });
+    }
+  };
+
+  // AJUSTE OBRIGATÓRIO 1: Retry de gateway_unreachable usa BLING_RETRY_CONNECTION
+  // Background reavalia sessão (refresh se necessário) — NUNCA inicia novo OAuth.
+  const handleBlingRetry = () => {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'BLING_RETRY_CONNECTION' }, (res) => {
+        if (res?.status) {
+          setBlingStatus(res.status);
+          setBlingLastRefreshAt(res.lastRefreshAt ?? null);
+        }
+      });
+    }
+  };
+
   // Cores e Ícones dinâmicos de Contexto
   const getContextTheme = () => {
     switch (context.platform) {
@@ -231,14 +314,14 @@ export const App: React.FC = () => {
               Paulifest Copilot
             </h1>
             <p className="text-[10px] text-[#86868b] font-medium tracking-normal">
-              Fase 2 • SSOT & Precificação
+              Fase 4C.4B • Conexão Bling
             </p>
           </div>
         </div>
 
         {/* Badge Dinâmico de Contexto */}
         <div className="flex items-center gap-1.5">
-          <div 
+          <div
             className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border ${theme.badgeBg} transition-all duration-300`}
             title={`Aba detectada: ${context.url || 'Nenhuma'}`}
           >
@@ -280,6 +363,19 @@ export const App: React.FC = () => {
 
       {/* 2. Conteúdo Principal */}
       <main className="flex-1 p-4 space-y-4 max-w-lg mx-auto w-full">
+        {/* Card de Conexão Bling — sempre visível em todos os estados (AJUSTE OBRIGATÓRIO 2) */}
+        {/* Ordem: 1. BlingConnectionCard | 2. contexto da aba | 3. fluxo de produto */}
+        <BlingConnectionCard
+          status={blingStatus}
+          lastRefreshAt={blingLastRefreshAt}
+          isHydrating={!blingStatusLoaded}
+          isDisconnecting={blingDisconnecting}
+          onConnect={handleBlingConnect}
+          onDisconnect={handleBlingDisconnect}
+          onFocusOAuthTab={handleBlingFocusOAuthTab}
+          onRetry={handleBlingRetry}
+        />
+
         {/* Card de Contexto Atual da Página */}
         <section className="apple-glass-card rounded-2xl p-3 space-y-1.5 animate-fade-in">
           <div className="flex items-center justify-between">
@@ -388,11 +484,10 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(1)}
-                  className={`py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all apple-press-spring ${
-                    currentStep === 1
+                  className={`py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all apple-press-spring ${currentStep === 1
                       ? 'bg-white text-[#0071e3] font-bold shadow-sm'
                       : 'text-[#86868b] hover:text-[#1d1d1f]'
-                  }`}
+                    }`}
                 >
                   <span className="text-[10px] w-4 h-4 rounded-full bg-black/5 flex items-center justify-center font-mono">1</span>
                   <span>Entrada</span>
@@ -401,11 +496,10 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(2)}
-                  className={`py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all apple-press-spring ${
-                    currentStep === 2
+                  className={`py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all apple-press-spring ${currentStep === 2
                       ? 'bg-white text-[#0071e3] font-bold shadow-sm'
                       : 'text-[#86868b] hover:text-[#1d1d1f]'
-                  }`}
+                    }`}
                 >
                   <span className="text-[10px] w-4 h-4 rounded-full bg-black/5 flex items-center justify-center font-mono">2</span>
                   <span>Ficha</span>
@@ -414,11 +508,10 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(3)}
-                  className={`py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all apple-press-spring ${
-                    currentStep === 3
+                  className={`py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all apple-press-spring ${currentStep === 3
                       ? 'bg-white text-[#0071e3] font-bold shadow-sm'
                       : 'text-[#86868b] hover:text-[#1d1d1f]'
-                  }`}
+                    }`}
                 >
                   <span className="text-[10px] w-4 h-4 rounded-full bg-black/5 flex items-center justify-center font-mono">3</span>
                   <span>Preço</span>
@@ -460,11 +553,11 @@ export const App: React.FC = () => {
         {/* 3. Dica Contextual Proativa */}
         <section className="p-3 rounded-xl bg-black/[0.03] border border-black/[0.04] text-[11px] text-[#6e6e73] leading-relaxed">
           <span className="font-semibold text-[#1d1d1f]">Dica do Copilot: </span>
-          {context.platform === 'mercadolivre' 
+          {context.platform === 'mercadolivre'
             ? 'Ao navegar no Mercado Livre, use a aba "Ficha" para comparar atributos com os anúncios de topo e alinhar com a categoria oficial.'
             : context.platform === 'bling'
-            ? 'No Bling, os dados da Ficha Central serão sincronizados de ponta a ponta sem redigitação de campos fiscais ou dimensões.'
-            : 'O motor de precificação calcula impostos, comissões e custos logísticos de forma determinística via MarketplaceFeeProvider.'}
+              ? 'No Bling, os dados da Ficha Central serão sincronizados de ponta a ponta sem redigitação de campos fiscais ou dimensões.'
+              : 'O motor de precificação calcula impostos, comissões e custos logísticos de forma determinística via MarketplaceFeeProvider.'}
         </section>
       </main>
 

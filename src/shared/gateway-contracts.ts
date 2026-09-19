@@ -214,4 +214,41 @@ export interface BlingConnectionStatusChangedMessage {
   timestamp: string;
 }
 
+// ---------------------------------------------------------------------------
+// Mensagens Adicionais de UI (Fase 4C.4B)
+// ---------------------------------------------------------------------------
+
+/**
+ * Solicita ao Background que foque a aba OAuth em andamento (se existir).
+ * A UI NÃO recebe oauthTabId, pairingId nem pairingSecret — Background é autoridade.
+ */
+export interface BlingFocusOAuthTabMessage {
+  type: 'BLING_FOCUS_OAUTH_TAB';
+}
+
+export interface BlingFocusOAuthTabResponse {
+  ok: boolean;
+  focused: boolean; // false se não houver aba OAuth ativa (resposta segura, sem detalhes internos)
+}
+
+/**
+ * Solicita ao Background que reavalie o estado de sessão atual, sem iniciar novo OAuth.
+ * Usado no botão "Tentar novamente" de gateway_unreachable.
+ * Ordem de tentativa:
+ *   1. Se GST válido → consulta /integrations/bling/status
+ *   2. Se GST ausente/expirado + GRT disponível → tenta refresh
+ *   3. Se não recuperável → retorna estado terminal (requires_reauth | session_expired | disconnected)
+ * NUNCA inicia novo fluxo OAuth automaticamente.
+ */
+export interface BlingRetryConnectionMessage {
+  type: 'BLING_RETRY_CONNECTION';
+}
+
+export interface BlingRetryConnectionResponse {
+  ok: boolean;
+  status: BlingConnectionStatus;
+  lastRefreshAt?: string | null;
+  error?: string;
+  message?: string;
+}
 

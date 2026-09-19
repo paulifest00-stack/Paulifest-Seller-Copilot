@@ -5,7 +5,6 @@ import type {
   ContentToBackgroundEnvelope, 
   BlingDomContextPayload,
   BlingActionTriggeredPayload,
-  BackgroundToContentEnvelope,
   ContextualActionType
 } from '../shared/tab-context-contracts.ts';
 
@@ -40,6 +39,27 @@ import type {
 
     shadowUi.mount();
 
+    // AJUSTE OBRIGATÓRIO 2: Hidratação do Dock com status inicial de conexão Bling.
+    // Broadcast (BLING_CONNECTION_STATUS_CHANGED) serve para mudanças futuras.
+    // Query inicial serve para hidratação do estado já estabelecido.
+    // Proteção de race: revision local garante que query antiga não sobrescreva broadcast mais novo.
+    let lastConnectionRevision = 0;
+
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      const queryRevision = ++lastConnectionRevision;
+      chrome.runtime.sendMessage({ type: 'BLING_GET_CONNECTION_STATUS' }, (res) => {
+        // AJUSTE OBRIGATÓRIO 2 — Race protection:
+        // Se um broadcast chegou após esta query ser iniciada, queryRevision < lastConnectionRevision,
+        // e descartamos a resposta da query (o broadcast já aplicou estado mais recente).
+        if (queryRevision < lastConnectionRevision) {
+          return; // broadcast mais recente chegou — ignorar resposta da query antiga
+        }
+        if (res && res.status) {
+          shadowUi.updateConnectionStatus(res.status);
+        }
+      });
+    }
+
     // Inicializa o observador de rotas e DOM SPA
     const spaObserver = new BlingSpaObserver({
       debounceMs: 300,
@@ -64,13 +84,19 @@ import type {
     spaObserver.start();
 
     // Escuta comandos de atualização de UI vindos do Background
-    chrome.runtime.onMessage.addListener((message: BackgroundToContentEnvelope) => {
+    chrome.runtime.onMessage.addListener((message: any) => {
       if (message && message.type === 'APPLY_UI_STATE') {
         // Regra de Ouro: Descarte se a revisão for menor que a última aceita
         if (message.contextRevision >= lastAcceptedRevision) {
           lastAcceptedRevision = message.contextRevision;
           shadowUi.update(message.uiState, message.pageType, message.detectedProduct);
         }
+      }
+
+      // AJUSTE OBRIGATÓRIO 2: Broadcast de status de conexão — incrementa revision para proteção de race
+      if (message && message.type === 'BLING_CONNECTION_STATUS_CHANGED') {
+        lastConnectionRevision++; // broadcast sempre ganha sobre query com revision menor
+        shadowUi.updateConnectionStatus(message.status);
       }
     });
   }

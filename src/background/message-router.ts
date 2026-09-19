@@ -97,6 +97,35 @@ export class MessageRouter {
       return true;
     }
 
+    // BLING_FOCUS_OAUTH_TAB: foca aba OAuth em andamento sem expor dados de pareamento (Fase 4C.4B)
+    if (message.type === 'BLING_FOCUS_OAUTH_TAB') {
+      const flow = this.authOrchestrator.getActiveFlow();
+      if (flow && !flow.resolved && flow.oauthTabId && typeof chrome !== 'undefined' && chrome.tabs?.update) {
+        chrome.tabs.update(flow.oauthTabId, { active: true }).catch(() => {});
+        sendResponse({ ok: true, focused: true });
+      } else {
+        // Sem aba OAuth ativa: resposta segura sem expor detalhes internos
+        sendResponse({ ok: true, focused: false });
+      }
+      return true;
+    }
+
+    // BLING_RETRY_CONNECTION: reavalia estado de sessão sem iniciar novo OAuth (Fase 4C.4B)
+    // Semântica: getConnectionStatus() já tenta refresh via GRT se GST inválido.
+    // NUNCA abre nova aba de autorização automaticamente.
+    if (message.type === 'BLING_RETRY_CONNECTION') {
+      try {
+        const res = await this.authOrchestrator.getConnectionStatus();
+        // getConnectionStatus() já atualiza cachedStatus internamente.
+        // Broadcast para manter todos os listeners (Sidebar + Dock) sincronizados.
+        this.authOrchestrator.broadcastStatus(res.status, res.lastRefreshAt);
+        sendResponse({ ok: res.ok, status: res.status, lastRefreshAt: res.lastRefreshAt, error: res.error, message: res.message });
+      } catch (err: any) {
+        sendResponse({ ok: false, status: 'gateway_unreachable' as const, error: err?.message || 'Falha ao reavaliar status.' });
+      }
+      return true;
+    }
+
     // 1. Mensagens da Sidebar pedindo contexto da aba ativa
     if (message.type === 'GET_ACTIVE_TAB_CONTEXT' || message.type === 'GET_CONTEXT') {
       await this.handleGetActiveTabContext(sendResponse);
