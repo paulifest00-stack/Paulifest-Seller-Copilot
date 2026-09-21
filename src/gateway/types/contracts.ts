@@ -166,7 +166,11 @@ export type {
   RefreshSessionRequest,
   BlingStatusResponse,
   RemoteRevocationStatus,
-  DisconnectResponse
+  DisconnectResponse,
+  BlingDepositBalance,
+  ProductStockInfo,
+  BlingProductQuickView,
+  GetBlingProductQuickViewResponse
 } from '../../shared/gateway-contracts.ts';
 
 

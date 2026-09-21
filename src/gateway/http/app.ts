@@ -19,6 +19,7 @@ import { gatewayLogger } from '../security/logger.ts';
 import { BlingOAuthClient } from '../integrations/bling/bling-oauth-client.ts';
 import { BlingTokenManager, BlingReauthRequiredError } from '../integrations/bling/bling-token-manager.ts';
 import { BlingProductClient, BlingProductError } from '../integrations/bling/bling-product-client.ts';
+import { QuickViewCache } from '../cache/quick-view-cache.ts';
 import type {
   OAuthPairingRequestRecord,
   BlingConnectionRecord,
@@ -33,6 +34,7 @@ export interface GatewayAppOptions {
   oauthClient?: BlingOAuthClient;
   tokenManager?: BlingTokenManager;
   productClient?: BlingProductClient;
+  quickViewCache?: QuickViewCache;
 }
 
 export class GatewayApp {
@@ -41,6 +43,7 @@ export class GatewayApp {
   private oauthClient: BlingOAuthClient;
   private tokenManager: BlingTokenManager;
   private productClient: BlingProductClient;
+  private quickViewCache: QuickViewCache;
   private server?: Server;
 
   constructor(options: GatewayAppOptions = {}) {
@@ -63,6 +66,7 @@ export class GatewayApp {
       baseUrl: this.config.blingBaseUrl,
       timeoutMs: this.config.blingTimeoutMs
     });
+    this.quickViewCache = options.quickViewCache || new QuickViewCache(this.config.quickViewCacheTtlMs);
   }
 
   getBlingTokenManager(): BlingTokenManager {
@@ -75,6 +79,10 @@ export class GatewayApp {
 
   getBlingProductClient(): BlingProductClient {
     return this.productClient;
+  }
+
+  getQuickViewCache(): QuickViewCache {
+    return this.quickViewCache;
   }
 
   /**
@@ -228,7 +236,15 @@ export class GatewayApp {
         return;
       }
 
-      // 8. GET /integrations/bling/products/:id (Leitura de produto autenticada por GST)
+      // 8. GET /integrations/bling/products/:id/quick-view (Leitura rápida de custo e estoque com cache volátil)
+      const quickViewMatch = pathname.match(/^\/integrations\/bling\/products\/([^\/]+)\/quick-view$/);
+      if (method === 'GET' && quickViewMatch) {
+        const productId = decodeURIComponent(quickViewMatch[1]);
+        await this.handleGetBlingProductQuickView(req, res, clientIp, productId);
+        return;
+      }
+
+      // 9. GET /integrations/bling/products/:id (Leitura de produto autenticada por GST)
       const productMatch = pathname.match(/^\/integrations\/bling\/products\/([^\/]+)$/);
       if (method === 'GET' && productMatch) {
         const productId = decodeURIComponent(productMatch[1]);
@@ -681,6 +697,9 @@ export class GatewayApp {
     // Desconexão e purga LOCAL obrigatória e irrevogável no PostgreSQL SEMPRE
     await this.repository.disconnect(auth.connectionId);
 
+    // Purga do cache volátil em memória para a conexão desconectada (isolamento multi-tenant)
+    this.quickViewCache.clearForConnection(auth.connectionId);
+
     const availableTokens = [accessStatus, refreshStatus].filter(s => s !== 'not_available');
     const complete = availableTokens.length > 0 && availableTokens.every(s => s === 'success');
 
@@ -851,6 +870,185 @@ export class GatewayApp {
         ok: false,
         error: 'INTERNAL_ERROR',
         message: 'Erro interno ao consultar produto no Bling.'
+      });
+    }
+  }
+
+  private async handleGetBlingProductQuickView(
+    req: IncomingMessage,
+    res: ServerResponse,
+    clientIp: string,
+    productId: string
+  ): Promise<void> {
+    const trimmedId = productId.trim();
+    if (!trimmedId) {
+      this.sendJson(res, 400, {
+        ok: false,
+        error: 'INVALID_PRODUCT_ID',
+        message: 'ID do produto não pode ser vazio.'
+      });
+      return;
+    }
+
+    // 1. Rate Limiting defensivo por IP
+    const rateCheck = productReadLimiter.check(clientIp);
+    if (!rateCheck.allowed) {
+      this.sendJson(res, 429, {
+        ok: false,
+        error: 'BLING_RATE_LIMITED',
+        message: 'Muitas consultas de produto. Aguarde antes de tentar novamente.',
+        retryAfterMs: rateCheck.resetInMs
+      });
+      return;
+    }
+
+    // 2. Autenticação estrita via GST (JWT + validação de sessão no PostgreSQL)
+    const auth = await this.authenticateWithGst(req, res);
+    if (!auth) return;
+
+    // 2b. Rate Limiting adicional por identidade autenticada (connectionId derivado exclusivamente da sessão)
+    const connRateCheck = productReadLimiter.check(`conn:${auth.connectionId}`);
+    if (!connRateCheck.allowed) {
+      this.sendJson(res, 429, {
+        ok: false,
+        error: 'BLING_RATE_LIMITED',
+        message: 'Muitas consultas de produto para esta conexão. Aguarde antes de tentar novamente.',
+        retryAfterMs: connRateCheck.resetInMs
+      });
+      return;
+    }
+
+    // 3. Validação do estado da conexão no banco
+    const conn = await this.repository.getConnection(auth.connectionId);
+    if (!conn) {
+      this.sendJson(res, 404, {
+        ok: false,
+        error: 'CONNECTION_NOT_FOUND',
+        message: 'Conexão não encontrada.'
+      });
+      return;
+    }
+
+    if (conn.status === 'disconnected') {
+      this.sendJson(res, 401, {
+        ok: false,
+        error: 'CONNECTION_DISCONNECTED',
+        message: 'A conexão com o Bling está desconectada.'
+      });
+      return;
+    }
+
+    if (conn.status === 'requires_reauth') {
+      this.sendJson(res, 401, {
+        ok: false,
+        error: 'REQUIRES_REAUTH',
+        message: 'A conexão com o Bling requer reautenticação.'
+      });
+      return;
+    }
+
+    // 4. Verificação no cache volátil em memória (isolamento multi-tenant por connectionId autenticado)
+    const cached = this.quickViewCache.get(auth.connectionId, trimmedId);
+    if (cached) {
+      this.sendJson(res, 200, {
+        ok: true,
+        quickView: cached,
+        cached: true,
+        retrievedAt: cached.retrievedAt
+      });
+      return;
+    }
+
+    // 5. Execução autenticada via BlingTokenManager (com auto-refresh se 401 do Bling)
+    try {
+      const quickViewResult = await this.tokenManager.executeWithBlingAuth(
+        auth.connectionId,
+        async (accessToken) => {
+          return await this.productClient.fetchQuickView(trimmedId, accessToken);
+        }
+      );
+
+      // Salva no cache volátil com TTL configurável
+      this.quickViewCache.set(auth.connectionId, trimmedId, quickViewResult, this.config.quickViewCacheTtlMs);
+
+      this.sendJson(res, 200, {
+        ok: true,
+        quickView: quickViewResult,
+        cached: false,
+        retrievedAt: quickViewResult.retrievedAt
+      });
+    } catch (err: any) {
+      if (err instanceof BlingReauthRequiredError) {
+        this.sendJson(res, 401, {
+          ok: false,
+          error: 'REQUIRES_REAUTH',
+          message: err.message || 'A conexão com o Bling requer reautenticação.'
+        });
+        return;
+      }
+
+      if (err instanceof BlingProductError) {
+        if (err.status === 404) {
+          this.sendJson(res, 404, {
+            ok: false,
+            error: 'BLING_PRODUCT_NOT_FOUND',
+            message: err.message
+          });
+          return;
+        }
+
+        if (err.status === 429) {
+          this.sendJson(res, 429, {
+            ok: false,
+            error: 'BLING_RATE_LIMITED',
+            message: err.message,
+            retryAfterMs: err.retryAfterMs
+          });
+          return;
+        }
+
+        if (err.status === 403) {
+          this.sendJson(res, 403, {
+            ok: false,
+            error: 'BLING_FORBIDDEN',
+            message: err.message
+          });
+          return;
+        }
+
+        if (err.status === 422) {
+          this.sendJson(res, 422, {
+            ok: false,
+            error: 'INVALID_BLING_PAYLOAD',
+            message: err.message
+          });
+          return;
+        }
+
+        if (err.status === 504) {
+          this.sendJson(res, 504, {
+            ok: false,
+            error: 'BLING_TIMEOUT',
+            message: err.message
+          });
+          return;
+        }
+
+        if (err.status >= 500) {
+          this.sendJson(res, 502, {
+            ok: false,
+            error: 'BLING_SERVER_ERROR',
+            message: err.message
+          });
+          return;
+        }
+      }
+
+      gatewayLogger.error(`[GatewayHttpApp] Erro na consulta de Quick View do produto #${trimmedId}:`, err?.message || err);
+      this.sendJson(res, 500, {
+        ok: false,
+        error: 'INTERNAL_ERROR',
+        message: 'Erro interno ao consultar Quick View do produto no Bling.'
       });
     }
   }

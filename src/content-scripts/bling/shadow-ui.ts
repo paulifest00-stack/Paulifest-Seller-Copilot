@@ -5,7 +5,44 @@ import type {
   TabContextUiState,
   ContextualActionType
 } from '../../shared/tab-context-contracts.ts';
-import type { BlingConnectionStatus } from '../../shared/gateway-contracts.ts';
+import type { BlingConnectionStatus, BlingProductQuickView } from '../../shared/gateway-contracts.ts';
+
+export interface FormattedQuickViewDisplay {
+  stockText: string;
+  costText: string;
+  hasStock: boolean;
+  hasCost: boolean;
+}
+
+export function formatQuickViewDisplay(quickView: BlingProductQuickView | null | undefined): FormattedQuickViewDisplay {
+  if (!quickView) {
+    return {
+      stockText: 'Estoque: Não informado',
+      costText: 'Custo: Não informado',
+      hasStock: false,
+      hasCost: false
+    };
+  }
+
+  const stock = quickView.stockInfo ?? quickView.stock;
+  let stockText = 'Estoque: Não informado';
+  let hasStock = false;
+
+  if (stock !== null && stock !== undefined) {
+    hasStock = true;
+    stockText = `Estoque: ${stock.virtualTotal} disp. (${stock.physicalTotal} físico)`;
+  }
+
+  let costText = 'Custo: Não informado';
+  let hasCost = false;
+
+  if (quickView.costPrice !== null && quickView.costPrice !== undefined) {
+    hasCost = true;
+    costText = `Custo: R$ ${quickView.costPrice.toFixed(2).replace('.', ',')}`;
+  }
+
+  return { stockText, costText, hasStock, hasCost };
+}
 
 const HOST_ID = 'paulifest-seller-copilot-host';
 
@@ -201,6 +238,26 @@ export class BlingShadowUi {
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
           }
 
+          .quick-view-info {
+            font-size: 11px;
+            color: #a1a1aa;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            padding-top: 4px;
+            border-top: 1px dashed rgba(255, 255, 255, 0.12);
+          }
+
+          .quick-view-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+          }
+
+          .quick-view-item {
+            color: #e4e4e7;
+          }
+
           .dock-actions {
             display: flex;
             gap: 6px;
@@ -297,10 +354,11 @@ export class BlingShadowUi {
               <div class="dock-title">
                 <span>✦ Paulifest Copilot</span>
               </div>
-              <div id="dock-badge" class="dock-badge">${this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4C.3'}</div>
+              <div id="dock-badge" class="dock-badge">${this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4D.2'}</div>
             </div>
 
             <div id="product-info-container" class="product-info"></div>
+            <div id="quick-view-container" class="quick-view-info"></div>
 
             <div class="dock-actions">
               <button id="btn-open-copilot" class="btn btn-secondary">
@@ -337,7 +395,7 @@ export class BlingShadowUi {
     // Atualiza badge de modo se a estrutura já foi montada
     const dockBadge = this.shadow.getElementById('dock-badge') || (typeof this.shadow.querySelector === 'function' ? this.shadow.querySelector('.dock-badge') : null);
     if (dockBadge) {
-      dockBadge.textContent = this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4C.3';
+      dockBadge.textContent = this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4D.2';
     }
 
     // 1. Renderiza Feedback com textContent (anti-XSS)
@@ -373,6 +431,52 @@ export class BlingShadowUi {
         const span = document.createElement('span');
         span.textContent = 'Listagem de Produtos Bling';
         infoContainer.appendChild(span);
+      }
+    }
+
+    // 2b. Renderiza Quick View (Estoque e Custo) com textContent estrito (anti-XSS)
+    const quickViewContainer = this.shadow.getElementById('quick-view-container');
+    if (quickViewContainer) {
+      quickViewContainer.replaceChildren();
+
+      if (hasId && !isNew) {
+        if (this.currentUiState.quickViewLoading) {
+          const loadingDiv = document.createElement('div');
+          loadingDiv.className = 'quick-view-row';
+          const span = document.createElement('span');
+          span.style.color = '#a1a1aa';
+          span.textContent = '⏳ Carregando estoque e custo...';
+          loadingDiv.appendChild(span);
+          quickViewContainer.appendChild(loadingDiv);
+        } else if (this.currentUiState.quickViewError) {
+          const errDiv = document.createElement('div');
+          errDiv.className = 'quick-view-row';
+          const span = document.createElement('span');
+          span.style.color = '#f87171';
+          span.textContent = '⚠️ Estoque/Custo indisponível';
+          errDiv.appendChild(span);
+          quickViewContainer.appendChild(errDiv);
+        } else if (this.currentUiState.quickView) {
+          const { stockText, costText } = formatQuickViewDisplay(this.currentUiState.quickView);
+
+          // 1. Linha de Estoque
+          const stockRow = document.createElement('div');
+          stockRow.className = 'quick-view-row';
+          const stockSpan = document.createElement('span');
+          stockSpan.className = 'quick-view-item';
+          stockSpan.textContent = stockText;
+          stockRow.appendChild(stockSpan);
+          quickViewContainer.appendChild(stockRow);
+
+          // 2. Linha de Custo
+          const costRow = document.createElement('div');
+          costRow.className = 'quick-view-row';
+          const costSpan = document.createElement('span');
+          costSpan.className = 'quick-view-item';
+          costSpan.textContent = costText;
+          costRow.appendChild(costSpan);
+          quickViewContainer.appendChild(costRow);
+        }
       }
     }
 

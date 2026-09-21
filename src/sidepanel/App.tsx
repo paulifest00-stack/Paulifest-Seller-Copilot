@@ -8,7 +8,8 @@ import {
   RefreshCw,
   ExternalLink,
   RotateCcw,
-  Tag
+  Tag,
+  AlertCircle
 } from 'lucide-react';
 import type { ExtensionMessage, PageContextState } from '../shared/types';
 import type { CentralProductSheet } from '../core/schema/product.ts';
@@ -405,6 +406,75 @@ export const App: React.FC = () => {
             </div>
           )}
         </section>
+
+        {/* Quick View Bling ERP (Fase 4D.2) */}
+        {tabContext?.platform === 'bling' && (tabContext?.uiState?.quickView || tabContext?.uiState?.quickViewLoading || tabContext?.uiState?.quickViewError) && (
+          <section className="apple-glass-card rounded-2xl p-3.5 space-y-2 animate-fade-in border border-[#0071e3]/20 bg-gradient-to-br from-white/95 to-blue-50/30">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold tracking-wider text-[#0071e3] uppercase flex items-center gap-1.5">
+                <Tag className="w-3 h-3 text-[#0071e3]" /> Quick View • Bling ERP
+              </span>
+              <span className="text-[9px] font-semibold text-[#86868b] bg-black/[0.04] px-1.5 py-0.5 rounded">
+                Somente Leitura
+              </span>
+            </div>
+
+            {tabContext.uiState.quickViewLoading && (
+              <div className="text-[11px] text-[#86868b] py-1 flex items-center gap-2">
+                <RefreshCw className="w-3 h-3 animate-spin text-[#0071e3]" />
+                <span>Carregando dados de estoque e custo...</span>
+              </div>
+            )}
+
+            {tabContext.uiState.quickViewError && (
+              <div className="text-[11px] text-red-600 bg-red-50 border border-red-200/60 rounded-lg p-2 flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                <span>{tabContext.uiState.quickViewError}</span>
+              </div>
+            )}
+
+            {tabContext.uiState.quickView && (
+              <div className="space-y-1.5 pt-0.5">
+                {tabContext.uiState.quickView.name && (
+                  <p className="text-xs font-semibold text-[#1d1d1f] line-clamp-1">
+                    {tabContext.uiState.quickView.name}
+                  </p>
+                )}
+
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div className="bg-white/80 rounded-xl p-2 border border-black/[0.04] space-y-0.5">
+                    <span className="text-[9.5px] text-[#86868b] block font-medium">Estoque Disponível</span>
+                    <span className="text-xs font-bold text-[#1d1d1f]">
+                      {(tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock) !== null &&
+                       (tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock) !== undefined
+                        ? `${(tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock)!.virtualTotal} un.`
+                        : 'Não informado'}
+                    </span>
+                    {(tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock) && (
+                      <span className="text-[9px] text-[#86868b] block">
+                        Físico: {(tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock)!.physicalTotal} un.
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="bg-white/80 rounded-xl p-2 border border-black/[0.04] space-y-0.5">
+                    <span className="text-[9.5px] text-[#86868b] block font-medium">Preço de Custo (CMV)</span>
+                    <span className="text-xs font-bold text-[#1d1d1f]">
+                      {tabContext.uiState.quickView.costPrice !== null && tabContext.uiState.quickView.costPrice !== undefined
+                        ? `R$ ${tabContext.uiState.quickView.costPrice.toFixed(2).replace('.', ',')}`
+                        : 'Não informado'}
+                    </span>
+                    {tabContext.uiState.quickView.sku && (
+                      <span className="text-[9px] text-[#86868b] block font-mono truncate">
+                        SKU: {tabContext.uiState.quickView.sku}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
 
         {/* Card Principal: Botão "Novo Produto" ou Fluxo Ativo */}
         {!activeFlow ? (

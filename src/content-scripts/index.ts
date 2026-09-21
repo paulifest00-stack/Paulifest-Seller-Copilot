@@ -78,6 +78,19 @@ import type {
         chrome.runtime.sendMessage(domPayload).catch((err) => {
           console.debug('[Paulifest Copilot] Erro ao emitir contexto detectado:', err);
         });
+
+        // Solicitação explícita de Quick View (Fase 4D.2)
+        if (context.pageType === 'product_form_edit' && context.detectedProduct?.id) {
+          const qvPayload: ContentToBackgroundEnvelope<{ productId: string }> = {
+            type: 'BLING_GET_QUICK_VIEW',
+            pageInstanceId,
+            payload: { productId: context.detectedProduct.id },
+            clientTimestamp: new Date().toISOString()
+          };
+          chrome.runtime.sendMessage(qvPayload).catch((err) => {
+            console.debug('[Paulifest Copilot] Erro ao solicitar Quick View:', err);
+          });
+        }
       }
     });
 

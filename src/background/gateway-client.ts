@@ -4,7 +4,9 @@ import type {
   StartAuthResponse,
   SessionHandshakeResponse,
   BlingStatusResponse,
-  DisconnectResponse
+  DisconnectResponse,
+  BlingProductQuickView,
+  GetBlingProductQuickViewResponse
 } from '../shared/gateway-contracts.ts';
 
 export const DEFAULT_GATEWAY_DEV_URL = 'http://localhost:3001';
@@ -206,6 +208,8 @@ export class GatewayClient {
   private sessionStorage: IStorageArea;
   // Mutex single-flight indexado pelo token de refresh de origem (protege contra race de sessões)
   private activeRefreshPromises = new Map<string, Promise<string>>();
+  // Cache volátil local em memória para Quick View (chave: sessionGeneration:productId)
+  private quickViewLocalCache = new Map<string, { data: BlingProductQuickView; expiresAt: number }>();
 
   constructor(options: GatewayClientOptions = {}) {
     this.environment = options.environment || detectEnvironment();
@@ -326,6 +330,14 @@ export class GatewayClient {
     await this.localStorage.remove(STORAGE_KEYS.LEGACY_SESSION);
     await this.sessionStorage.remove(STORAGE_KEYS.SESSION_GST);
     this.activeRefreshPromises.clear();
+    this.quickViewLocalCache.clear();
+  }
+
+  /**
+   * Limpa explicitamente o cache local de Quick View.
+   */
+  clearQuickViewLocalCache(): void {
+    this.quickViewLocalCache.clear();
   }
 
   /**
@@ -780,6 +792,81 @@ export class GatewayClient {
     return res.json();
   }
 
+  /**
+   * Consulta Quick View de produto (custo + estoque) no Gateway:
+   * 1. Verifica cache volátil local (chave: sessionGeneration:productId);
+   * 2. Obtém GST válido;
+   * 3. Executa GET /integrations/bling/products/:id/quick-view;
+   * 4. Trata 401 autoritativo do Gateway com 1 tentativa de refresh;
+   * 5. Segundo 401 dispara GatewayAuthRequiredError;
+   * 6. Armazena no cache volátil local (30s).
+   */
+  async fetchBlingProductQuickView(productId: string): Promise<BlingProductQuickView> {
+    const trimmedId = productId.trim();
+    if (!trimmedId) {
+      throw new GatewayProductError('INVALID_PRODUCT_ID', 'ID do produto não pode ser vazio.', 400);
+    }
+
+    const currentStored = await this.loadSession();
+    const sessionGen = currentStored?.sessionGeneration ?? 0;
+    const cacheKey = `${sessionGen}:${trimmedId}`;
+
+    const cached = this.quickViewLocalCache.get(cacheKey);
+    if (cached && Date.now() <= cached.expiresAt) {
+      return cached.data;
+    }
+
+    let gst: string;
+    try {
+      gst = await this.getValidGst();
+    } catch (err) {
+      throw err;
+    }
+
+    let res = await this.rawFetchQuickView(trimmedId, gst);
+
+    if (res.status === 401) {
+      if (!currentStored?.gatewayRefreshToken) {
+        throw new GatewayAuthRequiredError('Sessão inexistente no Gateway.');
+      }
+
+      gst = await this.executeSingleFlightRefresh(currentStored.gatewayRefreshToken);
+      res = await this.rawFetchQuickView(trimmedId, gst);
+      if (res.status === 401) {
+        throw new GatewayAuthRequiredError('Sessão definitivamente rejeitada pelo Gateway após renovação.');
+      }
+    }
+
+    if (!res.ok) {
+      let body: any = {};
+      try {
+        body = await res.json();
+      } catch {}
+
+      const retryAfterHeader = res.headers.get('retry-after');
+      const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+      const retryAfterMs = (retryAfterSeconds && !isNaN(retryAfterSeconds)) ? retryAfterSeconds * 1000 : body.retryAfterMs;
+
+      throw new GatewayProductError(
+        body.error || 'GATEWAY_ERROR',
+        body.message || `Falha na requisição de Quick View ao Gateway (HTTP ${res.status}).`,
+        res.status,
+        retryAfterMs
+      );
+    }
+
+    const data: GetBlingProductQuickViewResponse = await res.json();
+    const quickView = data.quickView;
+
+    // Atualiza cache volátil local (otimização efêmera, não autoridade)
+    this.quickViewLocalCache.set(cacheKey, {
+      data: quickView,
+      expiresAt: Date.now() + 30_000
+    });
+
+    return quickView;
+  }
+
   private async rawFetchProduct(productId: string, gst: string): Promise<Response> {
     try {
       return await fetch(`${this.baseUrl}/integrations/bling/products/${encodeURIComponent(productId)}`, {
@@ -793,6 +880,24 @@ export class GatewayClient {
     } catch (netErr: any) {
       throw new GatewayTransientError(
         `Erro de conexão com Gateway ao consultar produto: ${netErr?.message || netErr}`,
+        0
+      );
+    }
+  }
+
+  private async rawFetchQuickView(productId: string, gst: string): Promise<Response> {
+    try {
+      return await fetch(`${this.baseUrl}/integrations/bling/products/${encodeURIComponent(productId)}/quick-view`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${gst}`,
+          'Accept': 'application/json'
+        },
+        signal: AbortSignal.timeout(10000)
+      });
+    } catch (netErr: any) {
+      throw new GatewayTransientError(
+        `Erro de conexão com Gateway ao consultar Quick View: ${netErr?.message || netErr}`,
         0
       );
     }

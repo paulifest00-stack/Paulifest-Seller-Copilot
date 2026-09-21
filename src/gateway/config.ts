@@ -19,6 +19,7 @@ export interface GatewayConfig {
   allowedExtensionOrigins?: string[]; // Allowlist explícita de origens de extensão
   trustProxy?: boolean;               // Habilita confiança em reverse proxy (X-Forwarded-For)
   allowLocalhostCors?: boolean;       // Permite localhost apenas em desenvolvimento/testes
+  quickViewCacheTtlMs: number;        // Default: 60000 (60s)
 }
 
 export function loadGatewayConfig(env: Record<string, string | undefined> = process.env): GatewayConfig {
@@ -32,6 +33,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     ? env.GATEWAY_ALLOWED_EXTENSION_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
     : [];
   const trustProxy = env.GATEWAY_TRUST_PROXY === 'true';
+  const quickViewCacheTtlMs = parseInt(env.GATEWAY_QUICK_VIEW_CACHE_TTL_MS || '60000', 10);
 
   if (environment === 'production') {
     // Validação estrita em Produção: nenhum segredo pode usar fallback fictício
@@ -90,7 +92,8 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       databaseUrl,
       allowedExtensionOrigins,
       trustProxy,
-      allowLocalhostCors: false
+      allowLocalhostCors: false,
+      quickViewCacheTtlMs
     };
   }
 
@@ -149,7 +152,8 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       databaseUrl,
       allowedExtensionOrigins,
       trustProxy,
-      allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false'
+      allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false',
+      quickViewCacheTtlMs
     };
   }
 
@@ -191,6 +195,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     databaseUrl,
     allowedExtensionOrigins,
     trustProxy,
-    allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false'
+    allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false',
+    quickViewCacheTtlMs
   };
 }

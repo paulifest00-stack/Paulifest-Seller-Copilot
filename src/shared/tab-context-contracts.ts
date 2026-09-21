@@ -8,10 +8,15 @@ export type BlingPageType =
 
 export type ContextualActionType = 'open_in_copilot' | 'prepare_mercadolivre';
 
+import type { BlingProductQuickView } from './gateway-contracts.ts';
+
 export interface TabContextUiState {
   dockVisible: boolean;
   canImport: boolean;           // false se for product_form_new sem ID
   isSimulatedMock: boolean;     // flag obrigatória de transparência (false quando conectado ao Gateway real)
+  quickView?: BlingProductQuickView | null;
+  quickViewLoading?: boolean;
+  quickViewError?: string | null;
   actionFeedback?: {
     type: 'info' | 'success' | 'warning' | 'error' | 'loading' | 'auth_required';
     message: string;
@@ -43,6 +48,7 @@ export interface ContentToBackgroundEnvelope<T = unknown> {
   type: 
     | 'BLING_DOM_CONTEXT_DETECTED'
     | 'BLING_ACTION_TRIGGERED'
+    | 'BLING_GET_QUICK_VIEW'
     | 'CONTENT_SCRIPT_PING';
   pageInstanceId: string;
   payload: T;

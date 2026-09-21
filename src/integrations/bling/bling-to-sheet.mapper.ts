@@ -1,9 +1,9 @@
-// Mapper Puro: Bling API v3 DTO -> CentralProductSheet Patch Auditado
 import type { 
   AuditedField, 
   FieldEvidence, 
   ProductImage, 
-  ExternalProductReference 
+  ExternalProductReference,
+  ProductStockInfo
 } from '../../core/schema/product.ts';
 import { createAuditedField } from '../../core/schema/product.ts';
 import type { BlingMappingContext } from './contracts.ts';
@@ -29,6 +29,7 @@ export interface BlingSheetPatch {
   costPrice?: AuditedField<number>;
   currentSalePrice?: AuditedField<number>;
   descriptionPlain?: AuditedField<string>;
+  stockInfo?: AuditedField<ProductStockInfo>;
   images?: ProductImage[];
   externalReference?: ExternalProductReference;
 }
@@ -294,6 +295,23 @@ export function mapBlingProductToSheetPatch(
       0.85,
       'pending_review',
       createBlingEvidence(externalId, 'descricaoCurta', timestamp, context?.sourceName, rawDesc.trim().substring(0, 100))
+    );
+  }
+
+  // 10b. Estoque estruturado (se fornecido no contexto de importação)
+  if (context?.stockInfo) {
+    patch.stockInfo = createAuditedField(
+      context.stockInfo,
+      'bling_erp',
+      0.95,
+      'pending_review',
+      createBlingEvidence(
+        externalId,
+        'estoques/saldos',
+        timestamp,
+        context?.sourceName,
+        `Saldos Bling: ${context.stockInfo.virtualTotal} disp / ${context.stockInfo.physicalTotal} físico`
+      )
     );
   }
 

@@ -1,6 +1,7 @@
 import { 
   extractVerifiedSenderTabId,
   isBlingDomain,
+  isValidProductId,
   type ContentToBackgroundEnvelope,
   type BlingDomContextPayload,
   type BlingActionTriggeredPayload,
@@ -8,6 +9,7 @@ import {
   type TabContextSyncMessage,
   type TabContextState
 } from '../shared/tab-context-contracts.ts';
+import type { BlingProductQuickView } from '../shared/gateway-contracts.ts';
 import { tabContextManager } from './tab-context-manager.ts';
 import { loadSheet, saveSheet } from '../core/storage/storage.ts';
 import { createInitialSheet, type CentralProductSheet } from '../core/schema/product.ts';
@@ -155,6 +157,27 @@ export class MessageRouter {
       return true;
     }
 
+    // Operação de Quick View (leitura de custo e estoque)
+    if (message.type === 'BLING_GET_QUICK_VIEW') {
+      let targetTabId = extractVerifiedSenderTabId(sender);
+      if (!targetTabId && typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
+        try {
+          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          targetTabId = activeTab?.id ?? null;
+        } catch {}
+      }
+
+      if (!targetTabId) {
+        sendResponse({ ok: false, error: 'Remetente sem tabId confiável da plataforma.' });
+        return true;
+      }
+
+      const envelope = message as ContentToBackgroundEnvelope<any>;
+      const payload = envelope.payload || message;
+      await this.handleBlingGetQuickView(targetTabId, envelope.pageInstanceId, payload, sendResponse);
+      return true;
+    }
+
     // 2. Mensagens provenientes de Content Scripts
     const verifiedTabId = extractVerifiedSenderTabId(sender);
     if (!verifiedTabId) {
@@ -228,6 +251,11 @@ export class MessageRouter {
 
       // Notifica a Sidebar sobre a mudança de contexto
       this.notifyActiveTabToSidebar(tabId, updatedState);
+
+      if (acceptedPageType === 'product_form_edit' && acceptedDetectedProduct?.id) {
+        // Dispara busca assíncrona de Quick View para o produto detectado
+        this.handleBlingGetQuickView(tabId, pageInstanceId, { productId: acceptedDetectedProduct.id }, () => {}).catch(() => {});
+      }
 
       sendResponse({ ok: true, contextRevision: updatedState.contextRevision });
     } catch (err: any) {
@@ -489,7 +517,8 @@ export class MessageRouter {
           confirmedUnits: {
             weight: 'kg',
             dimension: 'cm'
-          }
+          },
+          stockInfo: freshTab.uiState?.quickView?.stockInfo || freshTab.uiState?.quickView?.stock || null
         });
 
         const reconciled = reconcileBlingPatch(baseSheet, mapped);
@@ -565,6 +594,169 @@ export class MessageRouter {
   }
 
   /**
+   * Processa a consulta de Quick View (custo e estoque) com proteção contra resposta stale.
+   * Regra de autoridade:
+   * - O Content Script/Sidebar fornece apenas productId;
+   * - tabId é extraído exclusivamente de sender.tab.id no handleMessage (ou activeTab no fallback);
+   * - Snapshot valida pageInstanceId, contextRevision e produto atual antes de commitar na aba.
+   */
+  private async handleBlingGetQuickView(
+    tabId: number,
+    pageInstanceId: string | undefined,
+    payload: any,
+    sendResponse: (res: any) => void
+  ): Promise<void> {
+    try {
+      const rawProductId = payload?.productId;
+      if (!isValidProductId(rawProductId)) {
+        sendResponse({ ok: false, error: 'ID do produto inválido ou não informado.' });
+        return;
+      }
+      const productId = rawProductId.trim();
+
+      const currentTab = await tabContextManager.getTabState(tabId);
+      if (!currentTab) {
+        sendResponse({ ok: false, error: 'Aba não encontrada no gerenciador de contexto.' });
+        return;
+      }
+
+      if (pageInstanceId && currentTab.pageInstanceId && currentTab.pageInstanceId !== pageInstanceId) {
+        console.warn(`[Paulifest Copilot] Quick View descartado: pageInstanceId obsoleto (${pageInstanceId} vs atual ${currentTab.pageInstanceId})`);
+        sendResponse({ ok: false, error: 'Ação rejeitada: documento expirado ou navegação concorrente detectada.' });
+        return;
+      }
+
+      // Sinaliza carregamento do Quick View no Dock e Sidebar
+      const loadingState = await tabContextManager.registerOrUpdateTab(tabId, {
+        uiState: {
+          ...currentTab.uiState,
+          quickViewLoading: true,
+          quickViewError: null
+        }
+      });
+      this.dispatchUiStateToContentScript(tabId, loadingState);
+      this.notifyActiveTabToSidebar(tabId, loadingState);
+
+      const snapshotTabId = tabId;
+      const snapshotPageInstanceId = currentTab.pageInstanceId;
+      const snapshotRevision = loadingState.contextRevision;
+      const snapshotProductId = productId;
+
+      const dedupeKey = `quickview:${snapshotTabId}:${snapshotProductId}:${snapshotPageInstanceId}:${snapshotRevision}`;
+
+      let pending = this.inFlightRequests.get(dedupeKey);
+      if (!pending) {
+        if (this.mockMode || pageInstanceId === 'inst_mock') {
+          pending = Promise.resolve({
+            productId: snapshotProductId,
+            sku: currentTab.detectedProduct?.sku || `SKU-SIM-${snapshotProductId}`,
+            name: `Produto Bling #${snapshotProductId} (Simulado)`,
+            costPrice: 89.00,
+            stock: {
+              physicalTotal: 37,
+              virtualTotal: 35,
+              deposits: [
+                { depositId: '1', depositName: 'Geral', physicalBalance: 37, virtualBalance: 35 }
+              ],
+              retrievedAt: new Date().toISOString(),
+              source: 'bling_erp' as const
+            },
+            stockInfo: {
+              physicalTotal: 37,
+              virtualTotal: 35,
+              deposits: [
+                { depositId: '1', depositName: 'Geral', physicalBalance: 37, virtualBalance: 35 }
+              ],
+              retrievedAt: new Date().toISOString(),
+              source: 'bling_erp' as const
+            },
+            unit: 'UN',
+            retrievedAt: new Date().toISOString()
+          });
+        } else {
+          pending = this.gatewayClient.fetchBlingProductQuickView(snapshotProductId);
+        }
+        this.inFlightRequests.set(dedupeKey, pending);
+      }
+
+      let quickViewResult: BlingProductQuickView;
+      try {
+        quickViewResult = await pending;
+      } catch (err: any) {
+        const freshTab = await tabContextManager.getTabState(snapshotTabId);
+        const isStale = (
+          !freshTab ||
+          freshTab.tabId !== snapshotTabId ||
+          freshTab.pageInstanceId !== snapshotPageInstanceId ||
+          freshTab.contextRevision !== snapshotRevision ||
+          freshTab.detectedProduct?.id !== snapshotProductId
+        );
+
+        if (isStale) {
+          console.warn(`[Paulifest Copilot] Erro de Quick View descartado por contexto stale na aba ${snapshotTabId}`);
+          sendResponse({ ok: false, warning: 'Resposta descartada por contexto stale.' });
+          return;
+        }
+
+        const errState = await tabContextManager.registerOrUpdateTab(snapshotTabId, {
+          uiState: {
+            ...freshTab.uiState,
+            quickViewLoading: false,
+            quickViewError: err?.message || 'Falha ao consultar Quick View do produto.'
+          }
+        });
+        this.dispatchUiStateToContentScript(snapshotTabId, errState);
+        this.notifyActiveTabToSidebar(snapshotTabId, errState);
+
+        sendResponse({ ok: false, error: err?.message || 'Falha ao consultar Quick View.' });
+        return;
+      } finally {
+        this.inFlightRequests.delete(dedupeKey);
+      }
+
+      // BARREIRA RIGOROSA DE STALE-RESPONSE
+      const freshTab = await tabContextManager.getTabState(snapshotTabId);
+      const isValidForCommit = (
+        freshTab !== undefined &&
+        freshTab.tabId === snapshotTabId &&
+        freshTab.pageInstanceId === snapshotPageInstanceId &&
+        freshTab.contextRevision === snapshotRevision &&
+        freshTab.detectedProduct?.id === snapshotProductId
+      );
+
+      if (!isValidForCommit) {
+        console.warn(
+          `[Paulifest Copilot] Resposta de Quick View descartada para produto #${snapshotProductId} na aba ${snapshotTabId}. Motivo: contexto, revisão ou produto alterados.`
+        );
+        sendResponse({
+          ok: false,
+          warning: 'Resposta de Quick View descartada: contexto da aba foi alterado durante a requisição.'
+        });
+        return;
+      }
+
+      const updatedState = await tabContextManager.registerOrUpdateTab(snapshotTabId, {
+        uiState: {
+          ...freshTab.uiState,
+          quickView: quickViewResult,
+          quickViewLoading: false,
+          quickViewError: null
+        }
+      });
+      this.dispatchUiStateToContentScript(snapshotTabId, updatedState);
+      this.notifyActiveTabToSidebar(snapshotTabId, updatedState);
+
+      sendResponse({
+        ok: true,
+        quickView: quickViewResult
+      });
+    } catch (err: any) {
+      console.error('[Paulifest Copilot] Erro em handleBlingGetQuickView:', err);
+      sendResponse({ ok: false, error: err?.message || 'Erro ao processar Quick View.' });
+    }
+  }
+
+  /**
    * Despacha o estado visual atualizado para o Shadow DOM do Content Script na aba correspondente.
    */
   dispatchUiStateToContentScript(tabId: number, state: TabContextState): void {
@@ -578,9 +770,14 @@ export class MessageRouter {
       detectedProduct: state.detectedProduct
     };
 
-    chrome.tabs.sendMessage(tabId, message).catch(() => {
+    try {
+      const p = chrome.tabs.sendMessage(tabId, message);
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {});
+      }
+    } catch {
       // Ignora erro se content script ainda não estiver injetado ou pronto
-    });
+    }
   }
 
   /**
@@ -595,9 +792,14 @@ export class MessageRouter {
       state
     };
 
-    chrome.runtime.sendMessage(message).catch(() => {
+    try {
+      const p = chrome.runtime.sendMessage(message);
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {});
+      }
+    } catch {
       // Ignora erro se sidebar estiver fechada
-    });
+    }
   }
 }
 

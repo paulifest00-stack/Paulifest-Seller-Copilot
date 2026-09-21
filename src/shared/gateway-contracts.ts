@@ -331,7 +331,31 @@ export interface BlingProductQuickView {
   sku?: string;
   name?: string;
   costPrice?: number | null;
-  stock?: ProductStockInfo;
+  stock?: ProductStockInfo | null;
+  stockInfo?: ProductStockInfo | null;
   unit?: string;
   retrievedAt: string;
+}
+
+export interface GetBlingProductQuickViewResponse {
+  ok: true;
+  quickView: BlingProductQuickView;
+  cached?: boolean;
+  retrievedAt: string;
+}
+
+export interface BlingGetQuickViewMessage {
+  type: 'BLING_GET_QUICK_VIEW';
+  pageInstanceId?: string;
+  payload?: {
+    productId: string;
+  };
+  productId?: string;
+}
+
+export interface BlingGetQuickViewResponse {
+  ok: boolean;
+  quickView?: BlingProductQuickView;
+  cached?: boolean;
+  error?: string;
 }

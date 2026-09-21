@@ -37,6 +37,8 @@ export type BlingDocumentedField = typeof BLING_DOCUMENTED_PRODUCT_FIELDS[number
 export type ConfirmedDimensionUnit = 'cm' | 'mm' | 'm';
 export type ConfirmedWeightUnit = 'kg' | 'g';
 
+import type { ProductStockInfo } from '../../shared/gateway-contracts.ts';
+
 /**
  * Contexto de execução e proveniência para o mapeamento de produtos Bling.
  */
@@ -48,4 +50,5 @@ export interface BlingMappingContext {
     weight?: ConfirmedWeightUnit;
     dimension?: ConfirmedDimensionUnit;
   };
+  stockInfo?: ProductStockInfo | null;
 }

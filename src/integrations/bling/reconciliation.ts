@@ -27,6 +27,9 @@ function areValuesEqual(a: unknown, b: unknown): boolean {
   if (typeof a === 'number' && typeof b === 'number') {
     return Math.abs(a - b) < 0.0001;
   }
+  if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
   const normA = normalizeComparisonString(a);
   const normB = normalizeComparisonString(b);
   if (!normA && !normB) return true;
@@ -172,6 +175,11 @@ export function reconcileBlingPatch(
     costPrice: reconcileSingleField(sheet.costPrice, patch.costPrice, 'costPrice', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     currentSalePrice: reconcileSingleField(sheet.currentSalePrice, patch.currentSalePrice, 'currentSalePrice', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     descriptionPlain: reconcileSingleField(sheet.descriptionPlain, patch.descriptionPlain, 'descriptionPlain', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
+    stockInfo: patch.stockInfo
+      ? (sheet.stockInfo
+          ? reconcileSingleField(sheet.stockInfo as any, patch.stockInfo as any, 'stockInfo', appliedFields, corroboratedFields, conflictedFields, unalteredFields)
+          : patch.stockInfo)
+      : sheet.stockInfo,
     suggestedSalePrice: reconcileSingleField(sheet.suggestedSalePrice, undefined, 'suggestedSalePrice', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     categoryIdML: reconcileSingleField(sheet.categoryIdML, undefined, 'categoryIdML', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     categoryPathML: reconcileSingleField(sheet.categoryPathML, undefined, 'categoryPathML', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
@@ -228,7 +236,7 @@ export function reconcileBlingPatch(
     corroboratedFields,
     conflictedFields,
     unalteredFields,
-    warnings: [...mapping.warnings],
-    unknownFields: [...mapping.unknownFields]
+    warnings: mapping.warnings ? [...mapping.warnings] : [],
+    unknownFields: mapping.unknownFields ? [...mapping.unknownFields] : []
   };
 }
