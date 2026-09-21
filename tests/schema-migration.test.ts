@@ -1,8 +1,26 @@
-// Testes Unitários: Fase 4A - Migração Segura de Schema (v1 -> v2) e Resiliência de Storage
 import assert from 'node:assert';
-import { createInitialSheet, createAuditedField } from '../src/core/schema/product.ts';
-import { migrateSheetToV2, validateSheetV2 } from '../src/core/schema/migrations.ts';
-import { saveActiveSheet, loadActiveSheet, clearActiveSheet } from '../src/core/storage/storage.ts';
+import {
+  createInitialSheet,
+  createAuditedField,
+  evaluatePreparationStatus
+} from '../src/core/schema/product.ts';
+import {
+  migrateSheetToV2,
+  validateSheetV2,
+  migrateSheetToV3,
+  validateSheetV3,
+  isValidAuditedFieldV3,
+  CURRENT_SCHEMA_VERSION
+} from '../src/core/schema/migrations.ts';
+import {
+  saveActiveSheet,
+  loadActiveSheet,
+  clearActiveSheet,
+  saveSheet,
+  loadSheet,
+  _setRawStorageForTesting,
+  _getRawStorageForTesting
+} from '../src/core/storage/storage.ts';
 
 async function runTest(name: string, fn: () => Promise<void> | void) {
   try {
@@ -220,9 +238,42 @@ export async function runSchemaMigrationTests() {
     assert.strictEqual(migrated.hasUnresolvedConflicts, true);
   });
 
+  // Helper para criar uma ficha Schema v2 válida e isolada
+  function createValidV2Sheet(): any {
+    return {
+      schemaVersion: 2,
+      id: `prod_v2_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      createdAt: '2026-09-15T10:00:00.000Z',
+      updatedAt: '2026-09-15T10:00:00.000Z',
+      ean: createAuditedField('7891000111222', 'user_manual', 1.0, 'approved'),
+      sku: createAuditedField('SKU-V2', 'user_manual', 1.0, 'approved'),
+      title: createAuditedField('Produto V2 Teste', 'user_manual', 1.0, 'approved'),
+      brand: createAuditedField('Marca V2', 'user_manual', 1.0, 'approved'),
+      model: createAuditedField('Modelo V2', 'user_manual', 1.0, 'approved'),
+      categoryIdML: createAuditedField('MLB1051', 'rule_engine', 1.0, 'approved'),
+      categoryPathML: createAuditedField('Ferramentas', 'rule_engine', 1.0, 'approved'),
+      ncm: createAuditedField('84672100', 'user_manual', 1.0, 'approved'),
+      packageWeightKg: createAuditedField(1.2, 'rule_engine', 1.0, 'approved'),
+      packageHeightCm: createAuditedField(12, 'rule_engine', 1.0, 'approved'),
+      packageWidthCm: createAuditedField(18, 'rule_engine', 1.0, 'approved'),
+      packageLengthCm: createAuditedField(24, 'rule_engine', 1.0, 'approved'),
+      costPrice: createAuditedField(45.0, 'user_manual', 1.0, 'approved'),
+      currentSalePrice: createAuditedField(89.90, 'bling_erp', 0.95, 'approved'),
+      suggestedSalePrice: createAuditedField(119.90, 'rule_engine', 1.0, 'approved'),
+      descriptionPlain: createAuditedField('Descrição v2', 'user_manual', 1.0, 'approved'),
+      bulletPoints: createAuditedField(['Destaque A'], 'user_manual', 1.0, 'approved'),
+      warrantyDays: createAuditedField(90, 'rule_engine', 1.0, 'approved'),
+      images: [],
+      attributes: [],
+      externalReferences: [],
+      overallConfidenceScore: 0.95,
+      hasUnresolvedConflicts: false
+    };
+  }
+
   // 6. Serialização
   await runTest('6. Serialização: ficha v2 é serializável em JSON sem perda de dados', () => {
-    const sheet = createInitialSheet();
+    const sheet = createValidV2Sheet();
     sheet.title = createAuditedField('Serra Tico-Tico', 'user_manual', 1.0, 'approved');
     sheet.currentSalePrice = createAuditedField(299.90, 'bling_erp', 0.95, 'approved');
 
@@ -235,8 +286,8 @@ export async function runSchemaMigrationTests() {
     assert.strictEqual(parsed.currentSalePrice.value, 299.90);
   });
 
-  // 7. Persistência e recarga transparente no storage
-  await runTest('7. Persistência e recarga: salva ficha v2 no storage e recarrega validada', async () => {
+  // 7. Persistência e recarga transparente no storage com evolução v3
+  await runTest('7. Persistência e recarga: salva ficha v3 no storage e recarrega validada', async () => {
     await clearActiveSheet();
     const sheet = createInitialSheet();
     sheet.title = createAuditedField('Furadeira Bosch GSB 13 RE', 'user_manual', 1.0, 'approved');
@@ -246,14 +297,14 @@ export async function runSchemaMigrationTests() {
     const reloaded = await loadActiveSheet();
 
     assert.ok(reloaded);
-    assert.strictEqual(reloaded?.schemaVersion, 2);
+    assert.strictEqual(reloaded?.schemaVersion, 3);
     assert.strictEqual(reloaded?.title.value, 'Furadeira Bosch GSB 13 RE');
     assert.strictEqual(reloaded?.currentSalePrice.value, 319.90);
   });
 
-  // 8. Ficha v2 íntegra é validada e retornada (idempotência)
+  // 8. Ficha v2 íntegra é validada e retornada (idempotência v2)
   await runTest('8. Idempotência: ficha v2 válida não sofre mutação ao passar por migrateSheetToV2', () => {
-    const sheetV2 = createInitialSheet();
+    const sheetV2 = createValidV2Sheet();
     sheetV2.title = createAuditedField('Produto V2 Já Estabilizado', 'user_manual', 1.0, 'approved');
 
     const result = migrateSheetToV2(sheetV2);
@@ -269,7 +320,7 @@ export async function runSchemaMigrationTests() {
     await saveActiveSheet(validSheet);
 
     const invalidSheet: any = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id: 'bad_sheet'
     };
 
@@ -286,14 +337,13 @@ export async function runSchemaMigrationTests() {
     assert.strictEqual(active?.title.value, 'Ficha Válida Salva');
   });
 
-  // 10. Ficha v2 existente estruturalmente inválida é rejeitada (Ajuste 1)
+  // 10. Ficha v2 existente estruturalmente inválida é rejeitada
   await runTest('10. Ficha v2 inválida: migrateSheetToV2 rejeita ficha com schemaVersion: 2 se for estruturalmente inválida', () => {
     const corruptedV2Sheet: any = {
       schemaVersion: 2,
       id: 'prod_v2_corrupted',
       createdAt: '2026-09-18T10:00:00.000Z',
       updatedAt: '2026-09-18T10:00:00.000Z',
-      // campos auditados essenciais faltando
       title: createAuditedField('Título', 'user_manual', 1.0, 'approved')
     };
 
@@ -303,9 +353,9 @@ export async function runSchemaMigrationTests() {
     );
   });
 
-  // 11. Validações estritas adicionais do Schema v2 (Ajuste 5)
+  // 11. Validações estritas adicionais do Schema v2
   await runTest('11. Validação estrita v2: rejeita confidence fora de [0,1], datas não-ISO e externalReferences malformadas', () => {
-    const sheet = createInitialSheet();
+    const sheet = createValidV2Sheet();
 
     // 11.1 Confidence > 1
     const invalidConfidence = { ...sheet, title: { ...sheet.title, confidence: 1.5 } };
@@ -336,5 +386,275 @@ export async function runSchemaMigrationTests() {
     const res5 = validateSheetV2(invalidRef);
     assert.strictEqual(res5.isValid, false);
     assert.ok(res5.errors.some(e => e.includes('externalReferences')));
+  });
+
+  // =========================================================================
+  // FASE 4D.1: SCHEMA V3, INVARIANTES DE NULL, MIGRAÇÃO V2 -> V3 & PREPARATION
+  // =========================================================================
+
+  console.log('\n================================================================');
+  console.log('   SUÍTE DE TESTES: SCHEMA V3, MIGRAÇÃO & PREPARAÇÃO (FASE 4D.1)');
+  console.log('================================================================\n');
+
+  // 12. Invariante Estrito de AuditedFieldV3: status === 'missing' aceita null
+  await runTest('12. Invariante V3: status === "missing" permite value: null', () => {
+    const missingField = createAuditedField(null, 'user_manual', 0.0, 'missing');
+    assert.strictEqual(isValidAuditedFieldV3(missingField), true);
+  });
+
+  // 13. Invariante Estrito de AuditedFieldV3: status !== 'missing' rejeita null
+  await runTest('13. Invariante V3: status !== "missing" REJEITA expressamente value: null ou undefined', () => {
+    const approvedNull = createAuditedField(null, 'user_manual', 1.0, 'approved');
+    assert.strictEqual(isValidAuditedFieldV3(approvedNull), false);
+
+    const pendingUndefined: any = {
+      value: undefined,
+      source: 'bling_erp',
+      confidence: 0.8,
+      status: 'pending_review'
+    };
+    assert.strictEqual(isValidAuditedFieldV3(pendingUndefined), false);
+  });
+
+  // 14. Invariante Estrito: conflictingValues não pode conter null como ausência
+  await runTest('14. Invariante V3: conflictingValues contendo null é rejeitado', () => {
+    const fieldWithNullConflict: any = {
+      value: 100.0,
+      source: 'user_manual',
+      confidence: 1.0,
+      status: 'conflict',
+      conflictingValues: [
+        {
+          value: null,
+          source: 'bling_erp',
+          confidence: 0.8
+        }
+      ]
+    };
+    assert.strictEqual(isValidAuditedFieldV3(fieldWithNullConflict), false);
+  });
+
+  // 15. Migração v2 válida -> v3
+  await runTest('15. Migração: v2 válida migra com sucesso para Schema v3', () => {
+    const v2Sheet = createValidV2Sheet();
+    v2Sheet.costPrice = createAuditedField(55.0, 'user_manual', 1.0, 'approved');
+
+    const v3 = migrateSheetToV3(v2Sheet);
+    assert.strictEqual(v3.schemaVersion, 3);
+    assert.ok(v3.migratedAt);
+    assert.ok(Array.isArray(v3.migrationNotes) && v3.migrationNotes.length > 0);
+    assert.strictEqual(v3.costPrice.value, 55.0);
+    assert.strictEqual(v3.costPrice.status, 'approved');
+  });
+
+  // 16. Migração legado v1 -> v2 -> v3
+  await runTest('16. Migração em cascata: v1 legada sem schemaVersion passa por v1 -> v2 -> v3', () => {
+    const v1Sheet: any = {
+      id: 'prod_legacy_chain',
+      createdAt: '2026-09-01T12:00:00.000Z',
+      updatedAt: '2026-09-01T12:00:00.000Z',
+      ean: createAuditedField('7891000111222', 'user_manual', 1.0, 'approved'),
+      sku: createAuditedField('SKU-CHAIN', 'user_manual', 1.0, 'approved'),
+      title: createAuditedField('Produto Legado Cadeia', 'user_manual', 1.0, 'approved'),
+      brand: createAuditedField('Marca', 'user_manual', 1.0, 'approved'),
+      model: createAuditedField('Modelo', 'user_manual', 1.0, 'approved'),
+      categoryIdML: createAuditedField('MLB1051', 'rule_engine', 1.0, 'approved'),
+      categoryPathML: createAuditedField('Ferramentas', 'rule_engine', 1.0, 'approved'),
+      ncm: createAuditedField('84672100', 'user_manual', 1.0, 'approved'),
+      packageWeightKg: createAuditedField(1.0, 'rule_engine', 1.0, 'approved'),
+      packageHeightCm: createAuditedField(10, 'rule_engine', 1.0, 'approved'),
+      packageWidthCm: createAuditedField(15, 'rule_engine', 1.0, 'approved'),
+      packageLengthCm: createAuditedField(20, 'rule_engine', 1.0, 'approved'),
+      costPrice: createAuditedField(0, 'user_manual', 0.0, 'missing'), // zero sintético legado
+      suggestedSalePrice: createAuditedField(0, 'rule_engine', 0.0, 'missing'),
+      descriptionPlain: createAuditedField('Desc', 'user_manual', 1.0, 'approved'),
+      bulletPoints: createAuditedField([], 'user_manual', 1.0, 'approved'),
+      warrantyDays: createAuditedField(90, 'rule_engine', 1.0, 'approved'),
+      images: [],
+      attributes: [],
+      overallConfidenceScore: 0.9,
+      hasUnresolvedConflicts: false
+    };
+
+    const v3 = migrateSheetToV3(v1Sheet);
+    assert.strictEqual(v3.schemaVersion, 3);
+    assert.strictEqual(v3.id, 'prod_legacy_chain');
+    // Zero sintético migra para null
+    assert.strictEqual(v3.costPrice.value, null);
+    assert.strictEqual(v3.costPrice.status, 'missing');
+  });
+
+  // 17. Idempotência v3: v3 válida retorna sem mutação
+  await runTest('17. Idempotência v3: ficha Schema v3 válida não sofre mutação ao passar por migrateSheetToV3', () => {
+    const sheetV3 = createInitialSheet();
+    sheetV3.title = createAuditedField('Item V3 Já Estabilizado', 'user_manual', 1.0, 'approved');
+
+    const result = migrateSheetToV3(sheetV3);
+    assert.strictEqual(result, sheetV3, 'Deve retornar a mesma instância validada');
+  });
+
+  // 18. Versão desconhecida rejeitada (fail-closed)
+  await runTest('18. Versão desconhecida: migrateSheetToV3 rejeita versões 4, 99 ou negativas com erro controlado', () => {
+    const futureSheet: any = {
+      schemaVersion: 4,
+      id: 'prod_future'
+    };
+    assert.throws(
+      () => migrateSheetToV3(futureSheet),
+      /versão desconhecida 4/
+    );
+
+    const negativeVersion: any = {
+      schemaVersion: -1,
+      id: 'prod_negative'
+    };
+    assert.throws(
+      () => migrateSheetToV3(negativeVersion),
+      /versão desconhecida -1/
+    );
+  });
+
+  // 19. Payload corrompido / não-objeto rejeitado (fail-closed)
+  await runTest('19. Payload corrompido: migrateSheetToV3 rejeita null, strings e tipos não-objeto', () => {
+    assert.throws(() => migrateSheetToV3(null), /esperava objeto/);
+    assert.throws(() => migrateSheetToV3('string_invalida'), /esperava objeto/);
+    assert.throws(() => migrateSheetToV3(12345), /esperava objeto/);
+  });
+
+  // 20. Preservação integral de metadados de auditoria (evidence, provenance, user_manual, conflictingValues, externalReferences)
+  await runTest('20. Preservação integral: histórico de auditoria e vínculos são mantidos intactos', () => {
+    const v2Sheet = createValidV2Sheet();
+    v2Sheet.title = {
+      value: 'Serra Circular Vendedor',
+      source: 'user_manual',
+      confidence: 1.0,
+      status: 'conflict',
+      evidence: {
+        sourceType: 'user_input',
+        sourceName: 'Seller Input Form',
+        capturedAt: '2026-09-12T14:00:00.000Z'
+      },
+      conflictingValues: [
+        {
+          value: 'Serra Elétrica Circular ERP',
+          source: 'bling_erp',
+          confidence: 0.9
+        }
+      ]
+    };
+    v2Sheet.externalReferences = [
+      {
+        system: 'bling',
+        externalId: '123456789',
+        importedAt: '2026-09-12T14:00:00.000Z',
+        metadata: { codigo: 'SERRA-01' }
+      }
+    ];
+
+    const v3 = migrateSheetToV3(v2Sheet);
+    assert.strictEqual(v3.title.status, 'conflict');
+    assert.strictEqual(v3.title.source, 'user_manual');
+    assert.strictEqual(v3.title.evidence?.sourceType, 'user_input');
+    assert.strictEqual(v3.title.evidence?.sourceName, 'Seller Input Form');
+    assert.strictEqual(v3.title.conflictingValues?.length, 1);
+    assert.strictEqual(v3.title.conflictingValues?.[0].value, 'Serra Elétrica Circular ERP');
+    assert.strictEqual(v3.externalReferences.length, 1);
+    assert.strictEqual(v3.externalReferences[0].externalId, '123456789');
+  });
+
+  // 21. costPrice: missing 0 vira null
+  await runTest('21. Semântica costPrice: missing com valor 0 migra para value: null', () => {
+    const v2Sheet = createValidV2Sheet();
+    v2Sheet.costPrice = createAuditedField(0, 'user_manual', 0.0, 'missing');
+
+    const v3 = migrateSheetToV3(v2Sheet);
+    assert.strictEqual(v3.costPrice.status, 'missing');
+    assert.strictEqual(v3.costPrice.value, null);
+  });
+
+  // 22. costPrice: zero explícito com status aprovado/pending permanece 0
+  await runTest('22. Semântica costPrice: zero explícito (status approved ou pending_review) permanece número 0', () => {
+    const v2Sheet = createValidV2Sheet();
+    v2Sheet.costPrice = createAuditedField(0, 'bling_erp', 0.9, 'approved');
+
+    const v3 = migrateSheetToV3(v2Sheet);
+    assert.strictEqual(v3.costPrice.status, 'approved');
+    assert.strictEqual(v3.costPrice.value, 0);
+
+    // Também para pending_review
+    const v2Pending = createValidV2Sheet();
+    v2Pending.costPrice = createAuditedField(0, 'bling_erp', 0.85, 'pending_review');
+    const v3Pending = migrateSheetToV3(v2Pending);
+    assert.strictEqual(v3Pending.costPrice.status, 'pending_review');
+    assert.strictEqual(v3Pending.costPrice.value, 0);
+  });
+
+  // 23. Storage não destrói dado legado se migração falhar
+  await runTest('23. Storage resiliência: falha de migração preserva storage e propaga erro controlado', async () => {
+    await clearActiveSheet();
+
+    // Grava diretamente no storage um payload corrompido com versão desconhecida
+    const corruptedPayload = {
+      schemaVersion: 999,
+      id: 'prod_alien'
+    };
+
+    await _setRawStorageForTesting('paulifest_sheet_prod_alien', corruptedPayload);
+
+    let threw = false;
+    try {
+      await loadSheet('prod_alien');
+    } catch (err: any) {
+      threw = true;
+      assert.ok(err.message.includes('Falha ao validar/migrar ficha prod_alien'));
+    }
+    assert.strictEqual(threw, true, 'Deve ter lançado erro controlado');
+
+    // Confirma que o dado persistido NÃO foi apagado nem sobrescrito
+    const rawInStore = await _getRawStorageForTesting('paulifest_sheet_prod_alien');
+    assert.deepStrictEqual(rawInStore, corruptedPayload, 'O storage persistido original deve permanecer intacto');
+  });
+
+  // 24. Preparation Status: incomplete
+  await runTest('24. evaluatePreparationStatus: incomplete quando falta título ou SKU/EAN', () => {
+    const sheet = createInitialSheet();
+    // Título e identificadores vazios
+    const evalResult = evaluatePreparationStatus(sheet);
+    assert.strictEqual(evalResult.status, 'incomplete');
+    assert.ok(evalResult.missingFields.includes('title'));
+  });
+
+  // 25. Preparation Status: pending_review
+  await runTest('25. evaluatePreparationStatus: pending_review quando campos importados aguardam validação', () => {
+    const sheet = createInitialSheet();
+    sheet.title = createAuditedField('Produto Importado', 'bling_erp', 0.9, 'pending_review');
+    sheet.sku = createAuditedField('SKU-123', 'bling_erp', 0.9, 'approved');
+
+    const evalResult = evaluatePreparationStatus(sheet);
+    assert.strictEqual(evalResult.status, 'pending_review');
+    assert.ok(evalResult.pendingFields.includes('title'));
+  });
+
+  // 26. Preparation Status: has_conflicts
+  await runTest('26. evaluatePreparationStatus: has_conflicts tem precedência absoluta se houver conflito', () => {
+    const sheet = createInitialSheet();
+    sheet.title = createAuditedField('Produto A', 'user_manual', 1.0, 'conflict');
+    sheet.sku = createAuditedField('SKU-123', 'bling_erp', 0.9, 'approved');
+
+    const evalResult = evaluatePreparationStatus(sheet);
+    assert.strictEqual(evalResult.status, 'has_conflicts');
+    assert.ok(evalResult.conflictFields.includes('title'));
+  });
+
+  // 27. Preparation Status: ready_for_review
+  await runTest('27. evaluatePreparationStatus: ready_for_review quando estrutura mínima está preenchida sem pendências', () => {
+    const sheet = createInitialSheet();
+    sheet.title = createAuditedField('Produto Completo e Aprovado', 'user_manual', 1.0, 'approved');
+    sheet.sku = createAuditedField('SKU-PRONTO', 'user_manual', 1.0, 'approved');
+
+    const evalResult = evaluatePreparationStatus(sheet);
+    assert.strictEqual(evalResult.status, 'ready_for_review');
+    assert.strictEqual(evalResult.conflictFields.length, 0);
+    assert.strictEqual(evalResult.pendingFields.length, 0);
   });
 }

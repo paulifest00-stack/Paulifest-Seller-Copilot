@@ -294,3 +294,44 @@ export interface BlingRetryConnectionResponse {
   message?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Contratos de Estoque Estruturado e Preparação (Fase 4D.1)
+// ---------------------------------------------------------------------------
+
+export interface BlingDepositBalance {
+  depositId: string | number;
+  depositName: string;
+  physicalBalance: number;
+  virtualBalance: number;
+}
+
+export interface ProductStockInfo {
+  physicalTotal: number;
+  virtualTotal: number;
+  deposits?: BlingDepositBalance[];
+  retrievedAt: string;
+  source: 'bling_erp';
+}
+
+export type ProductPreparationStatus =
+  | 'ready_for_review'
+  | 'pending_review'
+  | 'incomplete'
+  | 'has_conflicts';
+
+export interface PreparationStatusEvaluation {
+  status: ProductPreparationStatus;
+  missingFields: string[];
+  conflictFields: string[];
+  pendingFields: string[];
+}
+
+export interface BlingProductQuickView {
+  productId: string;
+  sku?: string;
+  name?: string;
+  costPrice?: number | null;
+  stock?: ProductStockInfo;
+  unit?: string;
+  retrievedAt: string;
+}

@@ -114,7 +114,7 @@ export async function runExtensionProductIntegrationTests() {
     assert.strictEqual(savedSheet.title.value, 'Fone de Ouvido Bluetooth Pro');
     assert.strictEqual(savedSheet.currentSalePrice.value, 199.90);
     assert.strictEqual(savedSheet.costPrice.value, 95.00);
-    assert.strictEqual(savedSheet.suggestedSalePrice.value, 0); // Invariante: suggestedSalePrice preservado
+    assert.strictEqual(savedSheet.suggestedSalePrice.value, null); // Invariante: suggestedSalePrice preservado
     assert.strictEqual(savedSheet.sku.value, 'SKU-FONE-01');
     assert.strictEqual(savedSheet.ean.value, '7891234567890');
     assert.strictEqual(savedSheet.externalReferences?.[0]?.system, 'bling');
@@ -406,7 +406,7 @@ export async function runExtensionProductIntegrationTests() {
   // 9. Novo GRT não aguarda Promise pertencente ao GRT antigo
   await runTest('9. Novo GRT não aguarda Promise pertencente ao GRT antigo', async () => {
     const client = new GatewayClient({ baseUrl: 'http://gateway.test' });
-    
+
     // Injeta promise pendente para grt_antigo
     client['activeRefreshPromises'].set('grt_antigo', new Promise(() => {}));
 
@@ -814,7 +814,7 @@ export async function runExtensionProductIntegrationTests() {
 
     const sheet = await loadSheet(resData.sheetId);
     assert.strictEqual(sheet?.currentSalePrice.value, 149.90);
-    assert.strictEqual(sheet?.suggestedSalePrice.value, 0);
+    assert.strictEqual(sheet?.suggestedSalePrice.value, null);
   });
 
   // 18. Fact-or-Omit: dimensões sem unidade confirmada no contexto

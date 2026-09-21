@@ -41,8 +41,8 @@ export async function runBlingReconciliationTests() {
     assert.strictEqual(result.sheet.currentSalePrice.value, 649.90);
     assert.strictEqual(result.sheet.costPrice.value, 420.00);
 
-    // suggestedSalePrice inicial permanece intacto (0, missing)
-    assert.strictEqual(result.sheet.suggestedSalePrice.value, 0);
+    // suggestedSalePrice inicial permanece intacto (null, missing)
+    assert.strictEqual(result.sheet.suggestedSalePrice.value, null);
     assert.strictEqual(result.sheet.suggestedSalePrice.status, 'missing');
 
     assert.strictEqual(result.sheet.externalReferences.length, 1);

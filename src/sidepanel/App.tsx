@@ -65,7 +65,7 @@ export const App: React.FC = () => {
           loadSheet(targetSheetId).then((savedSheet) => {
             if (savedSheet) {
               setSheet(savedSheet);
-              if (savedSheet.costPrice?.value > 0 || savedSheet.ean?.value || savedSheet.title?.value || savedSheet.currentSalePrice?.value > 0) {
+              if ((savedSheet.costPrice?.value ?? 0) > 0 || savedSheet.ean?.value || savedSheet.title?.value || (savedSheet.currentSalePrice?.value ?? 0) > 0) {
                 setActiveFlow(true);
               } else {
                 setActiveFlow(false);
@@ -93,7 +93,7 @@ export const App: React.FC = () => {
       loadPromise.then((savedSheet) => {
         if (savedSheet) {
           setSheet(savedSheet);
-          if (savedSheet.costPrice?.value > 0 || savedSheet.ean?.value || savedSheet.title?.value || savedSheet.currentSalePrice?.value > 0) {
+          if ((savedSheet.costPrice?.value ?? 0) > 0 || savedSheet.ean?.value || savedSheet.title?.value || (savedSheet.currentSalePrice?.value ?? 0) > 0) {
             setActiveFlow(true);
           }
         } else {

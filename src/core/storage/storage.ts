@@ -1,5 +1,5 @@
 import type { CentralProductSheet } from '../schema/product.ts';
-import { migrateSheetToV2, validateSheetV2 } from '../schema/migrations.ts';
+import { migrateSheetToV3, validateSheetV3 } from '../schema/migrations.ts';
 
 const STORAGE_KEYS = {
   ACTIVE_SHEET: 'paulifest_active_product_sheet_v1',
@@ -53,14 +53,41 @@ function removeStorageItem(key: string) {
   memoryStore.delete(key);
 }
 
+/**
+ * Utilitário exclusivo para testes: injeta payload bruto no storage ativo (chrome.storage ou memoryStore).
+ */
+export async function _setRawStorageForTesting(key: string, val: any): Promise<void> {
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    await chrome.storage.local.set({ [key]: val });
+  } else {
+    setStorageItem(key, typeof val === 'string' ? val : JSON.stringify(val));
+  }
+}
+
+/**
+ * Utilitário exclusivo para testes: lê payload bruto do storage ativo (chrome.storage ou memoryStore).
+ */
+export async function _getRawStorageForTesting(key: string): Promise<any> {
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    const res = await chrome.storage.local.get(key);
+    return res[key] || null;
+  }
+  const item = getStorageItem(key);
+  try {
+    return item ? JSON.parse(item) : null;
+  } catch {
+    return item;
+  }
+}
+
 const SHEET_STORAGE_PREFIX = 'paulifest_sheet_';
 
 /**
  * Salva uma ficha de produto pelo seu próprio ID no storage permanente (chrome.storage.local).
- * Garante validação de integridade com Schema v2 antes da gravação.
+ * Garante validação de integridade com Schema v3 antes da gravação.
  */
 export async function saveSheet(sheet: CentralProductSheet): Promise<void> {
-  const validation = validateSheetV2(sheet);
+  const validation = validateSheetV3(sheet);
   if (!validation.isValid) {
     throw new Error(`Não é possível salvar ficha inválida no storage: ${validation.errors.join('; ')}`);
   }
@@ -69,9 +96,9 @@ export async function saveSheet(sheet: CentralProductSheet): Promise<void> {
   const sheetKey = `${SHEET_STORAGE_PREFIX}${sheet.id}`;
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    await chrome.storage.local.set({ 
+    await chrome.storage.local.set({
       [sheetKey]: sheet,
-      [STORAGE_KEYS.ACTIVE_SHEET]: sheet 
+      [STORAGE_KEYS.ACTIVE_SHEET]: sheet
     });
   } else {
     setStorageItem(sheetKey, JSON.stringify(sheet));
@@ -81,6 +108,8 @@ export async function saveSheet(sheet: CentralProductSheet): Promise<void> {
 
 /**
  * Carrega uma ficha de produto pelo seu ID a partir do storage permanente (chrome.storage.local).
+ * Aplica migração pura e determinística para Schema v3.
+ * Preserva o dado persistido e propaga erro controlado se a migração falhar.
  */
 export async function loadSheet(sheetId: string): Promise<CentralProductSheet | null> {
   if (!sheetId || typeof sheetId !== 'string') return null;
@@ -97,24 +126,28 @@ export async function loadSheet(sheetId: string): Promise<CentralProductSheet | 
   }
 
   if (!raw) {
-    const active = await loadActiveSheet();
-    if (active && active.id === sheetId) {
-      return active;
+    try {
+      const active = await loadActiveSheet();
+      if (active && active.id === sheetId) {
+        return active;
+      }
+    } catch {
+      // Se active sheet falhar ou não corresponder, não mascara ausência da chave
     }
     return null;
   }
 
   try {
-    const migrated = migrateSheetToV2(raw);
+    const migrated = migrateSheetToV3(raw);
     return migrated;
   } catch (err) {
     console.error(`Falha ao validar/migrar ficha ${sheetId} do storage:`, err);
-    return null;
+    throw new Error(`Falha ao validar/migrar ficha ${sheetId} do storage: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
 /**
- * Salva a ficha de produto ativa no storage após validar conformidade com o Schema v2.
+ * Salva a ficha de produto ativa no storage após validar conformidade com o Schema v3.
  * Mantido como camada de compatibilidade com a Fase 2/3.
  */
 export async function saveActiveSheet(sheet: CentralProductSheet): Promise<void> {
@@ -122,8 +155,9 @@ export async function saveActiveSheet(sheet: CentralProductSheet): Promise<void>
 }
 
 /**
- * Recupera a ficha de produto ativa do storage, aplicando migração segura e transparente (v1 -> v2)
- * se necessário. Se os dados armazenados estiverem corrompidos, o storage legado é preservado intacto.
+ * Recupera a ficha de produto ativa do storage, aplicando migração segura e transparente (v1/v2 -> v3)
+ * se necessário. Se os dados armazenados estiverem corrompidos, o storage legado é preservado intacto
+ * e um erro controlado é propagado, sem recriar silenciosamente uma ficha vazia por cima.
  */
 export async function loadActiveSheet(): Promise<CentralProductSheet | null> {
   let raw: any = null;
@@ -138,12 +172,12 @@ export async function loadActiveSheet(): Promise<CentralProductSheet | null> {
   if (!raw) return null;
 
   try {
-    const migrated = migrateSheetToV2(raw);
+    const migrated = migrateSheetToV3(raw);
     return migrated;
   } catch (err) {
     console.error('Falha ao validar/migrar ficha legada do storage:', err);
-    // Preserva o storage legado intacto caso a migração falhe
-    return null;
+    // Preserva o storage legado intacto caso a migração falhe e propaga erro controlado
+    throw new Error(`Falha ao validar/migrar ficha ativa do storage: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

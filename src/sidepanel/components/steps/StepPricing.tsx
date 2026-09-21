@@ -1,28 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  DollarSign, 
-  Percent, 
-  ShieldAlert, 
-  Truck, 
-  Receipt, 
-  ArrowLeft, 
-  Save, 
-  Check, 
+import {
+  DollarSign,
+  Percent,
+  ShieldAlert,
+  Truck,
+  Receipt,
+  ArrowLeft,
+  Save,
+  Check,
   Sliders,
   ChevronDown,
   ChevronUp,
   Package
 } from 'lucide-react';
-import type { CentralProductSheet } from '../../../core/schema/product.ts';
+import type { CentralProductSheet, AuditedField } from '../../../core/schema/product.ts';
 import { createAuditedField } from '../../../core/schema/product.ts';
 import type { ListingType, PricingInputs, PricingOutputs } from '../../../core/schema/pricing.ts';
-import { 
-  calculateDirectPricing, 
-  calculateReversePricing 
+import {
+  calculateDirectPricing,
+  calculateReversePricing
 } from '../../../core/engines/pricing-calculator/pricing-calculator.ts';
-import { 
-  loadSellerPreferences, 
-  saveSellerPreferences 
+import {
+  loadSellerPreferences,
+  saveSellerPreferences
 } from '../../../core/storage/storage.ts';
 
 interface StepPricingProps {
@@ -32,21 +32,43 @@ interface StepPricingProps {
   onFinish?: () => void;
 }
 
+/**
+ * Validador estrito de computabilidade de preço de custo para a UI:
+ * - Ausente (missing ou value === null) -> bloqueia cálculo (retorna false)
+ * - Zero explícito (status approved ou pending_review com value === 0) -> cálculo permitido (retorna true)
+ * - Custo positivo numérico -> cálculo permitido (retorna true)
+ * - Não faz coerção sintética de null para 0
+ */
+export function isCostPriceComputable(
+  costPrice?: AuditedField<number | null> | null
+): boolean {
+  if (!costPrice) return false;
+  if (costPrice.status === 'missing') return false;
+  if (costPrice.value === null || costPrice.value === undefined) return false;
+  if (typeof costPrice.value !== 'number' || isNaN(costPrice.value)) return false;
+  return costPrice.value >= 0;
+}
+
 export const StepPricing: React.FC<StepPricingProps> = ({
   sheet,
   onUpdateSheet,
   onPrev,
   onFinish
 }) => {
+  const isCostComputable = isCostPriceComputable(sheet.costPrice);
+
   // Configurações do Vendedor
   const [mode, setMode] = useState<'target_margin' | 'free_price'>('target_margin');
   const [listingType, setListingType] = useState<ListingType>('gold_special');
   const [targetMargin, setTargetMargin] = useState<number>(20);
-  const [freePrice, setFreePrice] = useState<number>(sheet.suggestedSalePrice?.value || 0);
+  const initialSuggestedPrice = typeof sheet.suggestedSalePrice?.value === 'number' && sheet.suggestedSalePrice.value > 0
+    ? sheet.suggestedSalePrice.value
+    : 0;
+  const [freePrice, setFreePrice] = useState<number>(initialSuggestedPrice);
   const [taxRate, setTaxRate] = useState<number>(6.0);
   const [packagingCost, setPackagingCost] = useState<number>(2.50);
   const otherCost = 0;
-  
+
   // Estado dos Cálculos
   const [outputs, setOutputs] = useState<PricingOutputs | null>(null);
   const [showFeeDetails, setShowFeeDetails] = useState<boolean>(true);
@@ -64,16 +86,22 @@ export const StepPricing: React.FC<StepPricingProps> = ({
 
   // Recalcula dinamicamente sempre que qualquer variável mudar
   useEffect(() => {
+    if (!isCostComputable) {
+      setOutputs(null);
+      return;
+    }
+
     let isMounted = true;
+    const costPrice = sheet.costPrice.value as number;
 
     const inputs: PricingInputs = {
-      costPrice: sheet.costPrice.value || 0,
+      costPrice,
       taxRatePercent: taxRate,
       packagingCost,
       otherOperationalCost: otherCost,
       listingType,
       categoryId: sheet.categoryIdML.value || 'MLB1051',
-      packageWeightKg: sheet.packageWeightKg.value || 0.5,
+      packageWeightKg: typeof sheet.packageWeightKg?.value === 'number' && sheet.packageWeightKg.value > 0 ? sheet.packageWeightKg.value : 0.5,
       mode,
       freeSalePrice: freePrice,
       targetMarginPercent: targetMargin
@@ -107,21 +135,23 @@ export const StepPricing: React.FC<StepPricingProps> = ({
       isMounted = false;
     };
   }, [
-    mode, 
-    listingType, 
-    targetMargin, 
-    freePrice, 
-    taxRate, 
-    packagingCost, 
-    otherCost, 
-    sheet.costPrice.value, 
-    sheet.packageWeightKg.value, 
+    isCostComputable,
+    mode,
+    listingType,
+    targetMargin,
+    freePrice,
+    taxRate,
+    packagingCost,
+    otherCost,
+    sheet.costPrice.value,
+    sheet.costPrice.status,
+    sheet.packageWeightKg.value,
     sheet.categoryIdML.value
   ]);
 
   // Salva o preço na Ficha Central e as preferências do vendedor
   const handleApplyPrice = () => {
-    if (!outputs) return;
+    if (!isCostComputable || !outputs) return;
 
     onUpdateSheet((prev) => ({
       ...prev,
@@ -148,8 +178,6 @@ export const StepPricing: React.FC<StepPricingProps> = ({
       onFinish();
     }
   };
-
-  const cost = sheet.costPrice.value || 0;
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -275,7 +303,9 @@ export const StepPricing: React.FC<StepPricingProps> = ({
           <div>
             <label className="text-[10px] text-[#86868b] block mb-1">Custo CMV</label>
             <div className="px-2 py-1.5 bg-black/[0.03] rounded-lg text-xs font-mono font-semibold text-[#1d1d1f]">
-              R$ {cost.toFixed(2)}
+              {isCostComputable && typeof sheet.costPrice.value === 'number'
+                ? `R$ ${sheet.costPrice.value.toFixed(2)}`
+                : 'Não informado'}
             </div>
           </div>
 
@@ -305,8 +335,18 @@ export const StepPricing: React.FC<StepPricingProps> = ({
         </div>
       </div>
 
-      {/* 5. Painel de Resultados Principais (Hero Card) */}
-      {outputs && (
+      {/* 5. Painel de Resultados Principais (Hero Card) ou Bloqueio por Custo Ausente */}
+      {!isCostComputable ? (
+        <div className="apple-glass-card rounded-2xl p-4 text-center space-y-2 border-l-4 border-l-amber-500 bg-amber-50/30">
+          <div className="flex items-center justify-center gap-2 text-amber-800 font-semibold text-xs">
+            <ShieldAlert className="w-4 h-4 text-amber-600" />
+            <span>Cálculo financeiro bloqueado</span>
+          </div>
+          <p className="text-xs text-[#86868b]">
+            Informe o preço de custo para calcular lucro e margem.
+          </p>
+        </div>
+      ) : outputs && (
         <div className="apple-glass-card rounded-2xl p-4 space-y-3 border-l-4 border-l-[#0071e3]">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-bold text-[#86868b] uppercase tracking-wider">
@@ -362,7 +402,7 @@ export const StepPricing: React.FC<StepPricingProps> = ({
       )}
 
       {/* 6. Detalhamento Itemizado de Taxas (MarketplaceFeeProvider) */}
-      {outputs && (
+      {isCostComputable && outputs && (
         <div className="apple-glass-card rounded-2xl overflow-hidden">
           <button
             type="button"
@@ -452,10 +492,12 @@ export const StepPricing: React.FC<StepPricingProps> = ({
         <button
           type="button"
           onClick={handleApplyPrice}
-          disabled={!outputs || outputs.salePrice <= 0}
+          disabled={!isCostComputable || !outputs || outputs.salePrice <= 0}
           className={`flex-1 py-3 px-4 rounded-xl text-xs font-semibold apple-press-spring flex items-center justify-center gap-2 shadow-sm transition-all ${
             isSaved
               ? 'bg-emerald-600 text-white'
+              : !isCostComputable || !outputs || outputs.salePrice <= 0
+              ? 'bg-black/10 text-[#86868b] cursor-not-allowed'
               : 'bg-[#0071e3] hover:bg-[#0077ed] text-white'
           }`}
         >

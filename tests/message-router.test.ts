@@ -134,7 +134,7 @@ export async function runMessageRouterTests() {
     // Confirma que a ficha foi salva em storage.local (SSOT)
     const activeSheet = await loadActiveSheet();
     assert.ok(activeSheet);
-    assert.strictEqual(activeSheet?.schemaVersion, 2);
+    assert.strictEqual(activeSheet?.schemaVersion, 3);
     assert.ok(activeSheet?.title.value.includes('555666'));
     assert.strictEqual(activeSheet?.costPrice.value, 89.00);
     assert.strictEqual(activeSheet?.currentSalePrice.value, 149.90);
@@ -554,4 +554,3 @@ export async function runMessageRouterTests() {
     messageRouter.setMockMode(false);
   }
 }
-

@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Camera, 
-  Barcode, 
-  DollarSign, 
-  Tag, 
-  CheckCircle2, 
-  AlertCircle, 
+import {
+  Camera,
+  Barcode,
+  DollarSign,
+  Tag,
+  CheckCircle2,
+  AlertCircle,
   X,
   ArrowRight,
   Sparkles,
@@ -19,17 +19,17 @@ import {
 import type { CentralProductSheet } from '../../../core/schema/product.ts';
 import { createAuditedField } from '../../../core/schema/product.ts';
 import { validateEan } from '../../../core/engines/identification/ean-validator.ts';
-import { 
-  runProductIdentification, 
-  type IdentificationSummary 
+import {
+  runProductIdentification,
+  type IdentificationSummary
 } from '../../../core/engines/identification/product-identifier.ts';
-import { 
+import {
   GeminiAIProvider,
-  MockAIProvider 
+  MockAIProvider
 } from '../../../core/services/ai-provider.service.ts';
-import { 
-  loadSellerPreferences, 
-  saveSellerPreferences 
+import {
+  loadSellerPreferences,
+  saveSellerPreferences
 } from '../../../core/storage/storage.ts';
 
 interface StepInputProps {
@@ -196,7 +196,7 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
   };
 
   const hasAnyInput = Boolean(photoPreview || sheet.ean.value || rawName.trim());
-  const isFormReady = sheet.costPrice.value > 0;
+  const isFormReady = sheet.costPrice.value !== null && sheet.costPrice.status !== 'missing';
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -473,8 +473,8 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
               <span className="font-bold">{identSummary.researchedCount}</span>
             </div>
             <div className={`p-2 rounded-xl border flex items-center justify-between ${
-              identSummary.conflictCount > 0 
-                ? 'bg-rose-50 border-rose-200 text-rose-800 font-bold' 
+              identSummary.conflictCount > 0
+                ? 'bg-rose-50 border-rose-200 text-rose-800 font-bold'
                 : 'bg-black/[0.02] border-black/[0.04] text-[#86868b]'
             }`}>
               <span>Conflitos:</span>
@@ -560,7 +560,7 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
             type="number"
             step="0.01"
             min="0"
-            value={sheet.costPrice.value || ''}
+            value={sheet.costPrice.value ?? ''}
             onChange={(e) => handleCostChange(e.target.value)}
             placeholder="0,00"
             className="w-full px-3 py-2 bg-white rounded-xl border border-black/[0.1] focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 text-xs font-semibold text-emerald-700 outline-none"
