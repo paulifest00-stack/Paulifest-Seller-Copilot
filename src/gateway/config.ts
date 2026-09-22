@@ -19,6 +19,7 @@ export interface GatewayConfig {
   allowedExtensionOrigins?: string[]; // Allowlist explícita de origens de extensão
   trustProxy?: boolean;               // Habilita confiança em reverse proxy (X-Forwarded-For)
   allowLocalhostCors?: boolean;       // Permite localhost apenas em desenvolvimento/testes
+  quickViewCacheMaxEntries?: number; // Default 1000, FIFO eviction and opportunistic expiry
   quickViewCacheTtlMs: number;        // Default: 60000 (60s)
 }
 
@@ -34,6 +35,11 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     : [];
   const trustProxy = env.GATEWAY_TRUST_PROXY === 'true';
   const quickViewCacheTtlMs = parseInt(env.GATEWAY_QUICK_VIEW_CACHE_TTL_MS || '60000', 10);
+
+  const quickViewCacheMaxEntries = Number(env.GATEWAY_QUICK_VIEW_CACHE_MAX_ENTRIES || 1000);
+  if (!Number.isInteger(quickViewCacheMaxEntries) || quickViewCacheMaxEntries < 1 || !Number.isFinite(quickViewCacheTtlMs) || quickViewCacheTtlMs <= 0) {
+    throw new Error('Limites de cache Quick View inválidos.');
+  }
 
   if (environment === 'production') {
     // Validação estrita em Produção: nenhum segredo pode usar fallback fictício
@@ -93,7 +99,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       allowedExtensionOrigins,
       trustProxy,
       allowLocalhostCors: false,
-      quickViewCacheTtlMs
+      quickViewCacheTtlMs, quickViewCacheMaxEntries
     };
   }
 
@@ -153,7 +159,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       allowedExtensionOrigins,
       trustProxy,
       allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false',
-      quickViewCacheTtlMs
+      quickViewCacheTtlMs, quickViewCacheMaxEntries
     };
   }
 
@@ -196,6 +202,6 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     allowedExtensionOrigins,
     trustProxy,
     allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false',
-    quickViewCacheTtlMs
+    quickViewCacheTtlMs, quickViewCacheMaxEntries
   };
 }

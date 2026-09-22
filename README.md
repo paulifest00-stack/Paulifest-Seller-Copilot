@@ -1,99 +1,51 @@
-# Paulifest Seller Copilot 🚀
+# Paulifest Seller Copilot
 
-> Assistente inteligente oficial para sellers, integrando Mercado Livre e Bling ERP com Ficha Central Auditável (SSOT), motor de precificação determinístico e identificação assistida por IA.
+Extensão Chrome Manifest V3 para ficha central auditável, precificação e integração de leitura com Bling, com Gateway separado.
 
----
+## Estado atual
 
-## 📌 Status do Projeto: Fase 3 Concluída (Checkpoint de Arquitetura & Testes)
+Patch corretivo da fase 4D.2 reauditado localmente e aprovado para commit em 2026-09-22. A execução final aprovou 430 testes; os checks de TypeScript, builds e isolamento do pacote passaram. Homologação autenticada no Bling e visual no Chrome permanecem pendências futuras. A fase 4D.3 não foi iniciada.
 
-- [x] **Fase 1 — Fundação & Detecção de Contexto:**
-  - Arquitetura Manifest V3 com `side_panel` nativo e React 19 + TypeScript + Vite + Tailwind CSS.
-  - Design System Apple / Emil Kowalski com microinterações fluídas.
-  - Reconhecimento automático de abas Mercado Livre, Bling ERP e Neutras.
-- [x] **Fase 2 — Ficha Central & Precificação Determinística:**
-  - Ficha Central do Produto com proveniência de dados (`AuditedField<T>`), evidências e rastreabilidade.
-  - Validação rigorosa de EAN/GTIN (GS1 módulo-10) permitindo "Produto sem GTIN".
-  - Motor de Precificação determinístico (`PricingCalculator`) com margem líquida direta, reversa e break-even, desacoplado de taxas fixas chumbadas (`IMarketplaceFeeProvider`).
-- [x] **Fase 3 — Identificação Automática, Pesquisa e Proveniência Auditável:**
-  - Gateway desacoplado `AIProvider` (com `GeminiAIProvider` e `MockAIProvider`).
-  - Regra inegociável **Fact-or-Omit**: campos sem evidência visual ou documental permanecem `missing` e nunca são inventados.
-  - Hierarquia de fontes determinística por Tiers (Tier 1 Fabricante $\to$ Tier 2 Marca $\to$ Tier 3 Ficha Técnica $\to$ Tier 4 Distribuidor $\to$ Tier 5 GS1 $\to$ Tier 6 Marketplace).
-  - Verificação de identidade do produto e bloqueio de contaminação por variantes divergentes.
-  - 28 testes automatizados cobrindo todos os 18 cenários de auditoria.
+Quick View consulta custo e estoque sem salvar a ficha. Há um único cache de resultados no Gateway, isolado por conexão/produto, com TTL padrão de 60 segundos e limite de 1.000 entradas. Background deduplica somente requisições simultâneas. Estado é invalidado por navegação e mudanças de autenticação; Sidepanel consulta a aba ativa da própria janela.
 
----
+A integração de taxas do Mercado Livre continua simulada, mesmo quando um token é configurado. Publicação no marketplace e escrita de produtos no Bling não fazem parte deste patch. Pesquisa técnica usa MockResearchProvider; pesquisa externa real permanece futura.
 
-## 🔬 Estado da Pesquisa Técnica (`IResearchProvider`)
+Detalhes de correções, arquivos, evidências oficiais do Bling, testes e limitações: [relatório 4D.2](docs/phase-4d2-corrections.md).
 
-- **`IResearchProvider`:** Interface desacoplada e arquitetura preparada para suportar provedores de enriquecimento técnico.
-- **`MockResearchProvider`:** Implementação concreta atual utilizada para testes e homologação local, com catálogo controlado e fontes rastreáveis.
-- **`RealResearchProvider`:** Pendência futura de pesquisa externa em tempo real (web scraping / APIs oficiais).
-- **Transparência:** Nenhum dado simulado do mock é apresentado silenciosamente como pesquisa em tempo real. A interface avisa explicitamente quando o Modo Demonstração está em uso.
+## Validação e build
 
----
+Use Node.js, npm e PostgreSQL dedicado a testes. DATABASE_URL deve apontar exclusivamente para o banco descartável paulifest_test; nunca use credenciais de produção. A suíte inclui migrações e operações de persistência reais.
 
-## 🔑 Configuração da Chave de IA
-
-- A chave da API Gemini nunca é mantida no código, em arquivos `.env` ou versionada no Git.
-- O usuário configura sua própria chave diretamente na interface da Sidebar (`chrome.storage.local`).
-- A ausência de chave alerta o vendedor sobre a configuração pendente e bloqueia o provider real, permitindo alternar para o Modo Demonstração de forma transparente.
-- A tela central de **"Configurações & Integrações"** está planejada para a próxima etapa, unificando as credenciais de IA, Bling, Mercado Livre e Provedores de Pesquisa.
-
----
-
-## 🎯 Direcionamento Oficial para a Próxima Fase
-
-A próxima etapa não implementará autofill ou publicação cega, mas priorizará:
-
-1. **Dois Níveis de Interface:**
-   - **Sidebar:** Centro de inteligência, Ficha Central (SSOT), identificação, precificação e resolução de conflitos.
-   - **Integração Contextual Injetada:** Botões e ações acionáveis diretamente nas telas do Bling e do Mercado Livre (ex: *"Preparar para Mercado Livre"*, seleção de itens na listagem para carga na extensão, revisão em tela).
-2. **Fluxo Bidirecional do Bling:**
-   - `Bling → Extensão → Mercado Livre`: Importar produto existente do Bling, carregar na Ficha Central preservando a origem, enriquecer dados faltantes, precificar e preparar anúncio.
-   - `Extensão → Bling → Mercado Livre`: Produto novo identificado na extensão (foto/EAN/nome) com Ficha Central validada e cadastrado no Bling antes da publicação.
-
----
-
-## 🛠️ Como Carregar a Extensão no Google Chrome
-
-### 1. Pré-requisitos e Build
-```bash
+```powershell
 npm install
-npm test          # Executa a suíte completa de 28 testes unitários
-npm run build     # Compila o bundle Manifest V3 em dist/
+$env:DATABASE_URL='postgresql://USUARIO:SENHA@127.0.0.1:PORTA/paulifest_test'
+npm test
+npx tsc --noEmit
+npm run typecheck:gateway
+npm run typecheck:tests
+npm run build:gateway
+npm run build
+npm run verify:extension-isolation
+git diff --check
 ```
 
-### 2. Ativar no Chrome
-1. Abra `chrome://extensions` no Chrome.
-2. Ative o **"Modo do desenvolvedor"** no canto superior direito.
-3. Clique em **"Carregar sem compactação"** e selecione a pasta `dist` deste repositório.
-4. Abra o painel lateral do Chrome e use o **Paulifest Seller Copilot**!
+Os testes Quick View e de corrida de importação também têm verificação TypeScript dedicada; esse comando não abrange todos os testes legados. Builds geram dist/, dist-gateway/ e dist-test/, ignorados pelo Git.
 
----
+Para carregar a extensão, use Chrome 114+, habilite modo desenvolvedor em chrome://extensions e selecione dist/ em “Carregar sem compactação”. Configure e execute o Gateway separadamente conforme os documentos de configuração em docs/; o pacote da extensão não inclui o backend.
 
-## 📁 Estrutura do Projeto
+## Credenciais e simulação
 
-```
-Paulifest-Seller-Copilot/
-├── dist/                          # Pacote compilado para o Chrome (ignorado no Git)
-├── docs/
-│   ├── AUDITORIA_AVANTPRO.md      # Relatório de engenharia reversa e benchmarking
-│   └── ESPECIFICACAO_V1.md        # Especificação técnica e arquitetura de dados V1
-├── public/
-│   ├── icons/                     # Ícones oficiais (16, 32, 48 e 128px)
-│   └── manifest.json              # Manifesto MV3
-├── scripts/
-│   └── generate_icons.py          # Gerador autoral dos assets visuais
-├── src/
-│   ├── background/                # Service Worker e Detecção de Contexto
-│   ├── content-scripts/           # Observador leve de páginas
-│   ├── core/
-│   │   ├── engines/               # Motores de Precificação, EAN, Fact-or-Omit e Truth
-│   │   ├── schema/                # Schemas canônicos da Ficha Central e Precificação
-│   │   ├── services/              # Gateways de IA e Provedores de Pesquisa
-│   │   └── storage/               # Camada de persistência local auditável
-│   ├── sidepanel/                 # Aplicação React da Sidebar nativa
-│   └── styles/                    # Design System Tailwind CSS e Apple Blur
-├── tests/                         # Suíte de testes unitários (28 cenários)
-└── package.json
-```
+Tokens Bling permanecem no Gateway. GRT fica em storage.local e GST em storage.session, ambos restritos a TRUSTED_CONTEXTS antes de processar mensagens; falha nessa proteção bloqueia a inicialização segura. A API permite acesso a páginas confiáveis da extensão, mas exclui content scripts. Credenciais não são enviadas à UI por mensagens.
+
+connectionId presente no JWT é legível e não deve ser tratado como segredo. O Gateway deriva autoridade da sessão autenticada, nunca de um tenant declarado pela UI. A chave Gemini é configurada pelo usuário na Sidebar; não deve ser versionada.
+
+## Estrutura
+
+- src/background/: sessões, mensagens e contexto por aba.
+- src/content-scripts/: detecção e Dock contextual.
+- src/sidepanel/: interface React e ficha.
+- src/core/: schema, armazenamento e motores.
+- src/integrations/: mapeamento e reconciliação.
+- src/gateway/: OAuth, PostgreSQL, integrações e cache.
+- tests/: testes unitários e de integração.
+- docs/: especificações, auditorias e evidências.

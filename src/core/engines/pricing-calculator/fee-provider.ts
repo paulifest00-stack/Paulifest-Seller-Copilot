@@ -139,47 +139,23 @@ export class MockMercadoLivreFeeProvider implements IMarketplaceFeeProvider {
 export class MercadoLivreFeeProvider implements IMarketplaceFeeProvider {
   readonly providerId = 'mercadolivre-live';
   private mockFallback: MockMercadoLivreFeeProvider;
-  private accessToken?: string;
-
-  constructor(accessToken?: string) {
-    this.accessToken = accessToken;
+  constructor(_accessToken?: string) {
     this.mockFallback = new MockMercadoLivreFeeProvider();
   }
 
-  get isSimulated(): boolean {
-    return !this.accessToken;
-  }
+  readonly isSimulated = true;
 
-  setAccessToken(token: string) {
-    this.accessToken = token;
+  setAccessToken(_token: string): void {
+    // Compatibility only: credentials cannot enable an unimplemented live provider.
   }
 
   async getFeeRule(request: MarketplaceFeeRequest): Promise<MarketplaceFeeRule> {
-    if (!this.accessToken) {
-      // Sem credencial OAuth2 conectada: utiliza estimativa simulada
-      return this.mockFallback.getFeeRule(request);
-    }
-
-    // TODO: Na Fase 3 / Integrações, efetuar chamada real a /sites/MLB/listing_prices
     return this.mockFallback.getFeeRule(request);
   }
 
   async getDynamicFees(request: MarketplaceFeeRequest & { price: number }): Promise<DynamicFeeBreakdown> {
-    if (!this.accessToken) {
-      // Sem credencial conectada: retorna estimativa simulada identificada
-      const sim = await this.mockFallback.getDynamicFees(request);
-      return {
-        ...sim,
-        providerName: 'Mercado Livre (Estimativa Simulação)'
-      };
-    }
-
-    // TODO: Na Fase 3, chamar API oficial do ML para precificação com shipping_mode e billable_weight reais
-    const live = await this.mockFallback.getDynamicFees(request);
-    return {
-      ...live,
-      providerName: 'Mercado Livre API Oficial'
-    };
+    const estimate = await this.mockFallback.getDynamicFees(request);
+    return { ...estimate, isSimulated: true, providerName: 'Mercado Livre (Estimativa / Simulação)' };
   }
 }
 

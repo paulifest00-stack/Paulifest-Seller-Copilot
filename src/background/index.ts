@@ -1,3 +1,6 @@
+import { restrictCredentialStorage } from './storage-access.ts';
+const credentialStorageReady = restrictCredentialStorage(chrome.storage);
+void credentialStorageReady.catch(() => console.error('[Paulifest] Isolamento de storage indisponível; autenticação bloqueada.'));
 import { tabContextManager } from './tab-context-manager.ts';
 import { messageRouter } from './message-router.ts';
 import { blingAuthOrchestrator } from './bling-auth-orchestrator.ts';
@@ -25,7 +28,8 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // 2. Reidratação automática de contexto por aba quando o Service Worker acordar
-tabContextManager.rehydrate().catch((err) => {
+const backgroundReady = credentialStorageReady.then(() => tabContextManager.rehydrate()).then(() => tabContextManager.invalidateQuickViews());
+void backgroundReady.catch((err) => {
   console.debug('[Paulifest Copilot] Erro na reidratação do TabContextManager:', err);
 });
 
@@ -116,7 +120,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // 6. Roteamento centralizado de mensagens tipadas
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  messageRouter.handleMessage(message, sender, sendResponse).catch((err) => {
+  backgroundReady.then(() => messageRouter.handleMessage(message, sender, sendResponse)).catch((err) => {
+    sendResponse({ ok: false, error: 'Operação bloqueada: inicialização segura indisponível.' });
     console.error('[Paulifest Copilot] Erro no roteador de mensagens:', err);
   });
   return true; // Mantém o canal de mensagens aberto para resposta assíncrona

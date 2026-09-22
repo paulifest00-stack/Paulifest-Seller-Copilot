@@ -208,8 +208,22 @@ export class GatewayClient {
   private sessionStorage: IStorageArea;
   // Mutex single-flight indexado pelo token de refresh de origem (protege contra race de sessões)
   private activeRefreshPromises = new Map<string, Promise<string>>();
-  // Cache volátil local em memória para Quick View (chave: sessionGeneration:productId)
-  private quickViewLocalCache = new Map<string, { data: BlingProductQuickView; expiresAt: number }>();
+  // Worker-owned monotonic identity. Never sent by UI, never used as a result cache.
+  private authGeneration = 0;
+  private authListeners = new Set<() => Promise<void>>();
+
+  getAuthGeneration(): number { return this.authGeneration; }
+
+  onAuthInvalidated(listener: () => Promise<void>): void { this.authListeners.add(listener); }
+
+  async invalidateAuth(): Promise<void> {
+    ++this.authGeneration;
+    await Promise.all([...this.authListeners].map(listener => listener()));
+  }
+
+  assertAuthGeneration(snapshot: number): void {
+    if (snapshot !== this.authGeneration) throw new GatewayAuthRequiredError('Resposta descartada: sessão alterada.');
+  }
 
   constructor(options: GatewayClientOptions = {}) {
     this.environment = options.environment || detectEnvironment();
@@ -299,7 +313,8 @@ export class GatewayClient {
    * - GST -> storage.session
    * - NUNCA grava GST em storage.local
    */
-  async saveSession(session: ExtensionGatewaySession): Promise<void> {
+  async saveSession(session: ExtensionGatewaySession, preserveAuthIdentity = false): Promise<void> {
+    if (!preserveAuthIdentity) await this.invalidateAuth();
     const refreshData: StoredRefreshSession = {
       gatewayRefreshToken: session.gatewayRefreshToken,
       sessionGeneration: session.sessionGeneration,
@@ -326,18 +341,11 @@ export class GatewayClient {
    * Limpa todas as credenciais locais: local e session storage.
    */
   async clearSession(): Promise<void> {
+    await this.invalidateAuth();
     await this.localStorage.remove(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
     await this.localStorage.remove(STORAGE_KEYS.LEGACY_SESSION);
     await this.sessionStorage.remove(STORAGE_KEYS.SESSION_GST);
     this.activeRefreshPromises.clear();
-    this.quickViewLocalCache.clear();
-  }
-
-  /**
-   * Limpa explicitamente o cache local de Quick View.
-   */
-  clearQuickViewLocalCache(): void {
-    this.quickViewLocalCache.clear();
   }
 
   /**
@@ -345,6 +353,7 @@ export class GatewayClient {
    * POST /auth/bling/start
    */
   async startBlingAuth(clientSessionId?: string): Promise<StartAuthResponse> {
+    await this.invalidateAuth();
     const finalClientSessionId = clientSessionId && clientSessionId.trim().length >= 16
       ? clientSessionId.trim()
       : `cli_${Math.random().toString(36).substring(2)}${Date.now().toString(36)}${Math.random().toString(36).substring(2)}`;
@@ -384,6 +393,7 @@ export class GatewayClient {
    * POST /auth/bling/session
    */
   async completeSessionHandshake(pairingId: string, pairingSecret: string): Promise<SessionHandshakeResponse> {
+    const snapshotAuth = this.authGeneration;
     if (!pairingId || !pairingSecret) {
       return {
         ok: false,
@@ -422,6 +432,7 @@ export class GatewayClient {
       };
     }
 
+    this.assertAuthGeneration(snapshotAuth);
     const handshakeData = body as SessionHandshakeResponse;
     if (handshakeData.ok && handshakeData.gatewaySessionToken && handshakeData.gatewayRefreshToken) {
       const expiresInSeconds = handshakeData.expiresInSeconds || 900;
@@ -523,6 +534,7 @@ export class GatewayClient {
    * declara desconexão remota bem-sucedida falsamente. Permite retry seguro.
    */
   async disconnectBling(): Promise<DisconnectResponse> {
+    await this.invalidateAuth();
     const session = await this.loadSession();
     if (!session || !session.gatewayRefreshToken) {
       await this.clearSession();
@@ -712,7 +724,7 @@ export class GatewayClient {
         // PROTEÇÃO CAS / SESSION-GENERATION RACE:
         const currentStored = await this.loadSession();
         if (!currentStored || currentStored.gatewayRefreshToken !== originatingRefreshToken) {
-          return data.gatewaySessionToken!;
+          throw new GatewayAuthRequiredError('Resposta de refresh descartada: sessão alterada.');
         }
 
         const newSession: ExtensionGatewaySession = {
@@ -723,7 +735,7 @@ export class GatewayClient {
           updatedAt: new Date().toISOString()
         };
 
-        await this.saveSession(newSession);
+        await this.saveSession(newSession, true);
         return newSession.gatewaySessionToken!;
       } finally {
         this.activeRefreshPromises.delete(originatingRefreshToken);
@@ -792,29 +804,15 @@ export class GatewayClient {
     return res.json();
   }
 
-  /**
-   * Consulta Quick View de produto (custo + estoque) no Gateway:
-   * 1. Verifica cache volátil local (chave: sessionGeneration:productId);
-   * 2. Obtém GST válido;
-   * 3. Executa GET /integrations/bling/products/:id/quick-view;
-   * 4. Trata 401 autoritativo do Gateway com 1 tentativa de refresh;
-   * 5. Segundo 401 dispara GatewayAuthRequiredError;
-   * 6. Armazena no cache volátil local (30s).
-   */
+  /** Read-only Quick View. No local TTL/result cache. */
   async fetchBlingProductQuickView(productId: string): Promise<BlingProductQuickView> {
+    const snapshotAuth = this.authGeneration;
     const trimmedId = productId.trim();
     if (!trimmedId) {
       throw new GatewayProductError('INVALID_PRODUCT_ID', 'ID do produto não pode ser vazio.', 400);
     }
 
-    const currentStored = await this.loadSession();
-    const sessionGen = currentStored?.sessionGeneration ?? 0;
-    const cacheKey = `${sessionGen}:${trimmedId}`;
-
-    const cached = this.quickViewLocalCache.get(cacheKey);
-    if (cached && Date.now() <= cached.expiresAt) {
-      return cached.data;
-    }
+    this.assertAuthGeneration(snapshotAuth);
 
     let gst: string;
     try {
@@ -823,15 +821,21 @@ export class GatewayClient {
       throw err;
     }
 
+    this.assertAuthGeneration(snapshotAuth);
     let res = await this.rawFetchQuickView(trimmedId, gst);
+    this.assertAuthGeneration(snapshotAuth);
 
     if (res.status === 401) {
+      const currentStored = await this.loadSession();
+      this.assertAuthGeneration(snapshotAuth);
       if (!currentStored?.gatewayRefreshToken) {
         throw new GatewayAuthRequiredError('Sessão inexistente no Gateway.');
       }
 
       gst = await this.executeSingleFlightRefresh(currentStored.gatewayRefreshToken);
+      this.assertAuthGeneration(snapshotAuth);
       res = await this.rawFetchQuickView(trimmedId, gst);
+      this.assertAuthGeneration(snapshotAuth);
       if (res.status === 401) {
         throw new GatewayAuthRequiredError('Sessão definitivamente rejeitada pelo Gateway após renovação.');
       }
@@ -858,11 +862,10 @@ export class GatewayClient {
     const data: GetBlingProductQuickViewResponse = await res.json();
     const quickView = data.quickView;
 
-    // Atualiza cache volátil local (otimização efêmera, não autoridade)
-    this.quickViewLocalCache.set(cacheKey, {
-      data: quickView,
-      expiresAt: Date.now() + 30_000
-    });
+    this.assertAuthGeneration(snapshotAuth);
+    if (!data.ok || !quickView || quickView.productId !== trimmedId) {
+      throw new GatewayProductError('INVALID_GATEWAY_PAYLOAD', 'Identidade da Quick View inválida.', 422);
+    }
 
     return quickView;
   }

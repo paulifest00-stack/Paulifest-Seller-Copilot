@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import { SidepanelContextSync, readPanelContext } from './context-sync.ts';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   ShoppingBag,
   Layers,
@@ -11,7 +12,7 @@ import {
   Tag,
   AlertCircle
 } from 'lucide-react';
-import type { ExtensionMessage, PageContextState } from '../shared/types';
+import type { PageContextState } from '../shared/types';
 import type { CentralProductSheet } from '../core/schema/product.ts';
 import { createInitialSheet } from '../core/schema/product.ts';
 import {
@@ -28,6 +29,7 @@ import { BlingConnectionCard } from './components/BlingConnectionCard.tsx';
 import type { BlingConnectionStatus } from '../shared/gateway-contracts.ts';
 
 export const App: React.FC = () => {
+  const contextSyncRef = useRef<SidepanelContextSync | null>(null);
   // 1. Contexto da Aba do Chrome
   const [context, setContext] = useState<PageContextState>({
     platform: 'neutral',
@@ -59,11 +61,15 @@ export const App: React.FC = () => {
 
   // Carrega a ficha persistida e escuta o contexto do Service Worker
   useEffect(() => {
+    let sheetLoadRevision = 0;
+    let lastSheetContext = '';
     // Requisito 3: Se a aba é Bling, carregar loadSheet(activeSheetId); se não possui activeSheetId, NÃO carregar loadActiveSheet()
     const reloadSheet = (targetSheetId?: string, platform?: string) => {
+      const revision = ++sheetLoadRevision;
       if (platform === 'bling') {
         if (targetSheetId) {
           loadSheet(targetSheetId).then((savedSheet) => {
+            if (revision !== sheetLoadRevision) return;
             if (savedSheet) {
               setSheet(savedSheet);
               if ((savedSheet.costPrice?.value ?? 0) > 0 || savedSheet.ean?.value || savedSheet.title?.value || (savedSheet.currentSalePrice?.value ?? 0) > 0) {
@@ -92,6 +98,7 @@ export const App: React.FC = () => {
         : loadActiveSheet();
 
       loadPromise.then((savedSheet) => {
+        if (revision !== sheetLoadRevision) return;
         if (savedSheet) {
           setSheet(savedSheet);
           if ((savedSheet.costPrice?.value ?? 0) > 0 || savedSheet.ean?.value || savedSheet.title?.value || (savedSheet.currentSalePrice?.value ?? 0) > 0) {
@@ -104,23 +111,22 @@ export const App: React.FC = () => {
       });
     };
 
-    // Busca inicial do contexto da aba ativa
+    const contextSync = new SidepanelContextSync(readPanelContext, (res) => {
+      setTabContext(res);
+      if (res) {
+        setContext(prev => ({ ...prev, platform: res.platform, url: res.url, title: res.url,
+          summaryLabel: res.platform === 'bling' ? 'Bling ERP • ' + res.pageType : 'Contexto ativo' }));
+        const key = JSON.stringify([res.tabId, res.pageInstanceId, res.activeSheetId, res.uiState.actionFeedback]);
+        if (key !== lastSheetContext) { lastSheetContext = key; reloadSheet(res.activeSheetId, res.platform); }
+      } else {
+        setContext(prev => ({ ...prev, platform: 'neutral', url: '', title: '', summaryLabel: 'Aguardando contexto...' }));
+        ++sheetLoadRevision; lastSheetContext = '';
+        setSheet(createInitialSheet()); setActiveFlow(false);
+      }
+    }, () => setTabContext(null));
+    contextSyncRef.current = contextSync;
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-      chrome.runtime.sendMessage({ type: 'GET_ACTIVE_TAB_CONTEXT' }, (res) => {
-        if (res && res.platform) {
-          setTabContext(res);
-          setContext((prev) => ({
-            ...prev,
-            platform: res.platform,
-            url: res.url,
-            title: res.url,
-            summaryLabel: res.platform === 'bling' ? `Bling ERP • ${res.pageType}` : prev.summaryLabel
-          }));
-          reloadSheet(res.activeSheetId, res.platform);
-        } else {
-          reloadSheet();
-        }
-      });
+      void contextSync.refresh();
 
       // AJUSTE OBRIGATÓRIO 5: Consulta estado de conexão Bling na abertura/reabertura da Sidebar.
       // Não depende exclusivamente de evento passado — sempre busca estado atual do Background.
@@ -140,17 +146,10 @@ export const App: React.FC = () => {
     // Listener para eventos em tempo real
     const listener = (message: any) => {
       if (message.type === 'CONTEXT_UPDATED' && message.payload) {
-        setContext(message.payload);
+        void contextSync.refresh();
       }
-      if (message.type === 'ACTIVE_TAB_CONTEXT_UPDATED' && message.state) {
-        setTabContext(message.state);
-        setContext((prev) => ({
-          ...prev,
-          platform: message.state.platform,
-          url: message.state.url,
-          summaryLabel: message.state.platform === 'bling' ? `Bling ERP • ${message.state.pageType}` : prev.summaryLabel
-        }));
-        reloadSheet(message.state.activeSheetId, message.state.platform);
+      if (message.type === 'ACTIVE_TAB_CONTEXT_UPDATED') {
+        void contextSync.refresh();
       }
       // Atualiza estado de conexão Bling em tempo real via broadcast do Background
       if (message.type === 'BLING_CONNECTION_STATUS_CHANGED') {
@@ -161,30 +160,31 @@ export const App: React.FC = () => {
       }
     };
 
+    const onTabChanged = () => { void contextSync.refresh(); };
+    chrome.tabs?.onActivated.addListener(onTabChanged);
     chrome.runtime?.onMessage.addListener(listener);
     return () => {
+      contextSync.dispose();
+      contextSyncRef.current = null;
+      ++sheetLoadRevision;
+      chrome.tabs?.onActivated.removeListener(onTabChanged);
       chrome.runtime?.onMessage.removeListener(listener);
     };
   }, []);
 
-  // Salva automaticamente no storage quando a ficha sofrer alterações
-  useEffect(() => {
-    if (isLoaded && activeFlow) {
-      saveSheet(sheet);
-    }
-  }, [sheet, isLoaded, activeFlow]);
+  // Only explicit editor changes persist; context/Quick View hydration never writes a sheet.
+  const handleUpdateSheet = (updater: (prev: CentralProductSheet) => CentralProductSheet) => {
+    const updated = updater(sheet);
+    setSheet(updated);
+    if (isLoaded && activeFlow) void saveSheet(updated);
+  };
 
   const handleRefresh = () => {
     setRefreshSpin(true);
-    chrome.runtime?.sendMessage<ExtensionMessage>({ type: 'GET_CONTEXT' }, (res) => {
-      if (res && res.platform) {
-        setContext(res);
-      }
-      setTimeout(() => setRefreshSpin(false), 400);
-    });
+    void contextSyncRef.current?.refresh().finally(() => setRefreshSpin(false));
   };
 
-  const handleStartNewProduct = () => {
+  const handleStartNewProduct = async () => {
     const initial = createInitialSheet();
     setSheet(initial);
     saveActiveSheet(initial);
@@ -196,6 +196,7 @@ export const App: React.FC = () => {
     if (tabContext && typeof tabContext.tabId === 'number') {
       chrome.runtime?.sendMessage({
         type: 'LINK_SHEET_TO_TAB',
+        windowId: (await chrome.windows.getCurrent()).id,
         tabId: tabContext.tabId,
         sheetId: initial.id
       }, (res) => {
@@ -445,14 +446,14 @@ export const App: React.FC = () => {
                   <div className="bg-white/80 rounded-xl p-2 border border-black/[0.04] space-y-0.5">
                     <span className="text-[9.5px] text-[#86868b] block font-medium">Estoque Disponível</span>
                     <span className="text-xs font-bold text-[#1d1d1f]">
-                      {(tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock) !== null &&
-                       (tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock) !== undefined
-                        ? `${(tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock)!.virtualTotal} un.`
+                      {(tabContext.uiState.quickView.stockInfo) !== null &&
+                       (tabContext.uiState.quickView.stockInfo) !== undefined
+                        ? `${(tabContext.uiState.quickView.stockInfo)!.virtualTotal} un.`
                         : 'Não informado'}
                     </span>
-                    {(tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock) && (
+                    {(tabContext.uiState.quickView.stockInfo) && (
                       <span className="text-[9px] text-[#86868b] block">
-                        Físico: {(tabContext.uiState.quickView.stockInfo ?? tabContext.uiState.quickView.stock)!.physicalTotal} un.
+                        Físico: {(tabContext.uiState.quickView.stockInfo)!.physicalTotal} un.
                       </span>
                     )}
                   </div>
@@ -593,7 +594,7 @@ export const App: React.FC = () => {
             {currentStep === 1 && (
               <StepInput
                 sheet={sheet}
-                onUpdateSheet={setSheet}
+                onUpdateSheet={handleUpdateSheet}
                 onNext={() => setCurrentStep(2)}
               />
             )}
@@ -601,7 +602,7 @@ export const App: React.FC = () => {
             {currentStep === 2 && (
               <StepSheet
                 sheet={sheet}
-                onUpdateSheet={setSheet}
+                onUpdateSheet={handleUpdateSheet}
                 onNext={() => setCurrentStep(3)}
                 onPrev={() => setCurrentStep(1)}
               />
@@ -610,7 +611,7 @@ export const App: React.FC = () => {
             {currentStep === 3 && (
               <StepPricing
                 sheet={sheet}
-                onUpdateSheet={setSheet}
+                onUpdateSheet={handleUpdateSheet}
                 onPrev={() => setCurrentStep(2)}
                 onFinish={() => {
                   alert('Preço e Ficha Central salvos com sucesso no armazenamento local do Copilot!');

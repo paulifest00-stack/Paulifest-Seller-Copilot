@@ -1,3 +1,4 @@
+import { SidepanelContextSync } from '../src/sidepanel/context-sync.ts';
 // Suíte Oficial de Testes da Subfase 4D.2: Leitura Real de Custo/Estoque, Cache e Quick View
 import assert from 'node:assert';
 import http from 'node:http';
@@ -83,9 +84,8 @@ class FakeBlingQuickViewServer {
             data: [
               {
                 produto: { id: productId },
-                deposito: { id: 101, nome: 'Depósito Central' },
-                saldoFisico: 37,
-                saldoVirtual: 35
+                saldoFisicoTotal: 37, saldoVirtualTotal: 35,
+                depositos: [{ id: 101, saldoFisico: 37, saldoVirtual: 35 }]
               }
             ]
           }));
@@ -116,7 +116,7 @@ class FakeBlingQuickViewServer {
               nome: `Produto QuickView #${productId}`,
               codigo: `SKU-${productId}`,
               preco: 49.90,
-              precoCusto: 8.42,
+              fornecedor: { precoCusto: 8.42 },
               tipo: 'P',
               situacao: 'A'
             }
@@ -211,9 +211,8 @@ export async function runQuickViewAndStockTests() {
         data: [
           {
             produto: { id: 12345 },
-            deposito: { id: 1, nome: 'Geral' },
-            saldoFisico: 50,
-            saldoVirtual: 45
+            saldoFisicoTotal: 50, saldoVirtualTotal: 45,
+            depositos: [{ id: 1, saldoFisico: 50, saldoVirtual: 45 }]
           }
         ]
       }));
@@ -229,8 +228,8 @@ export async function runQuickViewAndStockTests() {
       assert.strictEqual(stock.physicalTotal, 50);
       assert.strictEqual(stock.virtualTotal, 45);
       assert.strictEqual(stock.source, 'bling_erp');
-      assert.strictEqual(stock.deposits.length, 1);
-      assert.strictEqual(stock.deposits[0].depositName, 'Geral');
+      assert.strictEqual(stock.deposits!.length, 1);
+      assert.strictEqual(stock.deposits![0].depositName, undefined);
     } finally {
       fakeServer.close();
     }
@@ -243,15 +242,8 @@ export async function runQuickViewAndStockTests() {
         data: [
           {
             produto: { id: 12345 },
-            deposito: { id: 1, nome: 'Filial SP' },
-            saldoFisico: 20,
-            saldoVirtual: 18
-          },
-          {
-            produto: { id: 12345 },
-            deposito: { id: 2, nome: 'Filial RJ' },
-            saldoFisico: 15,
-            saldoVirtual: 15
+            saldoFisicoTotal: 35, saldoVirtualTotal: 33,
+            depositos: [{ id: 1, saldoFisico: 20, saldoVirtual: 18 }, { id: 2, saldoFisico: 15, saldoVirtual: 15 }]
           }
         ]
       }));
@@ -266,9 +258,9 @@ export async function runQuickViewAndStockTests() {
       assert.ok(stock);
       assert.strictEqual(stock.physicalTotal, 35);
       assert.strictEqual(stock.virtualTotal, 33);
-      assert.strictEqual(stock.deposits.length, 2);
-      assert.strictEqual(stock.deposits[0].depositName, 'Filial SP');
-      assert.strictEqual(stock.deposits[1].depositName, 'Filial RJ');
+      assert.strictEqual(stock.deposits!.length, 2);
+      assert.strictEqual(stock.deposits![0].depositName, undefined);
+      assert.strictEqual(stock.deposits![1].depositName, undefined);
     } finally {
       fakeServer.close();
     }
@@ -281,9 +273,8 @@ export async function runQuickViewAndStockTests() {
         data: [
           {
             produto: { id: 12345 },
-            deposito: { id: 1, nome: 'Depósito Principal' },
-            saldoFisico: 0,
-            saldoVirtual: 0
+            saldoFisicoTotal: 0, saldoVirtualTotal: 0,
+            depositos: [{ id: 1, saldoFisico: 0, saldoVirtual: 0 }]
           }
         ]
       }));
@@ -303,7 +294,7 @@ export async function runQuickViewAndStockTests() {
     }
   });
 
-  await runTest('8. Estoque Real: Estoque ausente (array vazio ou 404) retorna null (Fact-or-Omit, sem inventar zero)', async () => {
+  await runTest('8. Estoque Real: Estoque ausente (array vazio) retorna null; 404 permanece erro (Fact-or-Omit, sem inventar zero)', async () => {
     // Array vazio
     const fakeServer = http.createServer((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -332,8 +323,7 @@ export async function runQuickViewAndStockTests() {
     const client404 = new BlingProductClient({ baseUrl: `http://127.0.0.1:${port404}` });
 
     try {
-      const stock = await client404.fetchStockBalances('12345', 'dummy_token');
-      assert.strictEqual(stock, null);
+      await assert.rejects(() => client404.fetchStockBalances('12345', 'dummy_token'), /não encontrada/);
     } finally {
       fakeServer404.close();
     }
@@ -377,7 +367,6 @@ export async function runQuickViewAndStockTests() {
       name: 'Item Teste',
       costPrice: 42.50,
       stockInfo: null,
-      stock: null,
       retrievedAt: new Date().toISOString()
     };
     cache.set(connId, prodId, mockData);
@@ -403,7 +392,6 @@ export async function runQuickViewAndStockTests() {
       name: 'Produto da Conta A',
       costPrice: 10.00,
       stockInfo: null,
-      stock: null,
       retrievedAt: new Date().toISOString()
     });
 
@@ -416,7 +404,6 @@ export async function runQuickViewAndStockTests() {
       name: 'Produto da Conta B',
       costPrice: 20.00,
       stockInfo: null,
-      stock: null,
       retrievedAt: new Date().toISOString()
     });
 
@@ -435,7 +422,6 @@ export async function runQuickViewAndStockTests() {
       productId: 'prod_ttl',
       costPrice: 5.0,
       stockInfo: null,
-      stock: null,
       retrievedAt: new Date().toISOString()
     });
 
@@ -598,7 +584,7 @@ export async function runQuickViewAndStockTests() {
       assert.ok(body.quickView.stockInfo);
       assert.strictEqual(body.quickView.stockInfo.physicalTotal, 37);
       assert.strictEqual(body.quickView.stockInfo.virtualTotal, 35);
-      assert.strictEqual(body.quickView.stock.virtualTotal, 35);
+      assert.strictEqual('stock' in body.quickView, false);
     });
 
     // 16. Cache Hit no Gateway: segunda chamada não bate no Bling
@@ -639,7 +625,7 @@ export async function runQuickViewAndStockTests() {
         return {
           status: 200,
           body: {
-            data: { id, nome: 'Produto Pós-Refresh', preco: 100, precoCusto: 50 }
+            data: { id, nome: 'Produto Pós-Refresh', preco: 100, fornecedor: { precoCusto: 50 } }
           }
         };
       };
@@ -718,8 +704,58 @@ export async function runQuickViewAndStockTests() {
       // Desconexão marca conexão no banco como disconnected
       const conn = await repo.getConnection(connectionId);
       assert.strictEqual(conn?.status, 'disconnected');
+      assert.strictEqual(app.getQuickViewCache().get(connectionId, 'cache_dis'), null);
     });
 
+
+    await runTest('Gateway → Background → estado → broadcast → Dock/Sidepanel, sem secrets', async () => {
+      fakeBling.productHandler = (_req, id) => ({status: 200, body: {data: {id, nome: '<img src=x onerror=alert(1)>', fornecedor: {precoCusto: 8.42, access_token: 'UPSTREAM_SECRET'}, access_token: 'UPSTREAM_SECRET'}}});
+      fakeBling.stockHandler = undefined;
+      const {gst, grt} = await createTestConnectionAndSession();
+      const local = new Map<string, any>(); const session = new Map<string, any>();
+      const area = (map: Map<string, any>) => ({get: async (k: string) => map.get(k), set: async (k: string,v: any) => {map.set(k,v);}, remove: async (k: string) => {map.delete(k);}});
+      const client = new GatewayClient({baseUrl: gatewayBaseUrl, localStorage: area(local), sessionStorage: area(session)});
+      await client.saveSession({gatewaySessionToken: gst, gatewayRefreshToken: grt, sessionGeneration: 1, updatedAt: new Date().toISOString(), gstExpiresAt: new Date(Date.now()+600000).toISOString()});
+      await tabContextManager.clearAll();
+      await tabContextManager.registerOrUpdateTab(700,{platform:'bling',pageType:'product_form_edit',pageInstanceId:'e2e',detectedProduct:{id:'700'}});
+      const oldChrome = (globalThis as any).chrome;
+      const messages: any[] = [];
+      const dock = new BlingShadowUi({onAction: () => {}});
+      const panelStates: any[] = [];
+      const panel = new SidepanelContextSync(async () => (await tabContextManager.getTabState(700)) ?? null, state => {panelStates.push(state);});
+      (globalThis as any).chrome = {runtime:{sendMessage:async(message:any)=>{messages.push(message); await panel.refresh();}},tabs:{sendMessage:async(_tab:number,message:any)=>{messages.push(message);dock.update(message.uiState,message.pageType,message.detectedProduct);}}};
+      try {
+        const router = new MessageRouter(client); let response:any;
+        await router.handleMessage({type:'BLING_GET_QUICK_VIEW',pageInstanceId:'e2e',payload:{productId:'700'}},{tab:{id:700} as chrome.tabs.Tab},res=>{response=res;});
+        await panel.refresh();
+        assert.strictEqual(response.ok,true);
+        assert.ok(messages.some(m=>m.uiState?.quickViewLoading));
+        assert.strictEqual((dock as any).currentUiState.quickView.costPrice,8.42);
+        assert.strictEqual(panelStates.at(-1).uiState.quickView.stockInfo.virtualTotal,35);
+        assert.strictEqual(formatQuickViewDisplay((dock as any).currentUiState.quickView).costText,'Custo: R$ 8,42');
+        const boundary=JSON.stringify({response,messages});
+        for(const secret of [gst,grt,'UPSTREAM_SECRET']) assert.strictEqual(boundary.includes(secret),false);
+        assert.strictEqual('stock' in response.quickView,false);
+        assert.strictEqual((await tabContextManager.getTabState(700))?.activeSheetId,undefined);
+      } finally {(globalThis as any).chrome=oldChrome;}
+    });
+
+    await runTest('Gateway: request em voo não repovoa cache após disconnect real', async () => {
+      const {gst,connectionId}=await createTestConnectionAndSession();
+      const original=productClient.fetchQuickView;
+      let release!: (value: any)=>void; let signal!: ()=>void;
+      const started=new Promise<void>(resolve=>{signal=resolve;});
+      productClient.fetchQuickView=async()=>{signal();return await new Promise(resolve=>{release=resolve;});};
+      try {
+        const pending=fetch(gatewayBaseUrl+'/integrations/bling/products/701/quick-view',{headers:{Authorization:'Bearer '+gst}});
+        await started;
+        const disconnected=await fetch(gatewayBaseUrl+'/integrations/bling',{method:'DELETE',headers:{Authorization:'Bearer '+gst}});
+        assert.strictEqual(disconnected.status,200);
+        release({productId:'701',costPrice:8.42,stockInfo:null,retrievedAt:new Date().toISOString()});
+        const response=await pending;assert.strictEqual(response.status,401);
+        assert.strictEqual(app.getQuickViewCache().get(connectionId,'701'),null);
+      } finally {productClient.fetchQuickView=original;}
+    });
   } finally {
     await app.close();
     await fakeBling.stop();
@@ -740,14 +776,14 @@ export async function runQuickViewAndStockTests() {
     };
   }
 
-  await runTest('21. Background: Local Cache por sessionGeneration + productId e expurgo no clearSession', async () => {
+  await runTest('21. Background: chamadas sequenciais sempre consultam Gateway; não há cache local', async () => {
     const mockStorage = createMockSessionStorage();
     const client = new GatewayClient({ baseUrl: 'http://gateway.test', storage: mockStorage });
     await client.saveSession({
       gatewayRefreshToken: 'mock_grt',
       gatewaySessionToken: 'valid_gst_token',
       gstExpiresAt: new Date(Date.now() + 600000).toISOString(),
-      sessionGeneration: 3
+      sessionGeneration: 3, updatedAt: new Date().toISOString()
     });
 
     let fetchCount = 0;
@@ -763,7 +799,6 @@ export async function runQuickViewAndStockTests() {
             productId: '101',
             costPrice: 12.50,
             stockInfo: { physicalTotal: 10, virtualTotal: 8, deposits: [], retrievedAt: new Date().toISOString(), source: 'bling_erp' },
-            stock: { physicalTotal: 10, virtualTotal: 8, deposits: [], retrievedAt: new Date().toISOString(), source: 'bling_erp' },
             retrievedAt: new Date().toISOString()
           }
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -779,7 +814,7 @@ export async function runQuickViewAndStockTests() {
 
       // 2ª chamada -> Local Cache Hit
       const res2 = await client.fetchBlingProductQuickView('101');
-      assert.strictEqual(fetchCount, 1); // Não subiu!
+      assert.strictEqual(fetchCount, 2); // Sempre consulta Gateway
       assert.strictEqual(res2.costPrice, 12.50);
 
       // clearSession expurga cache local
@@ -790,12 +825,12 @@ export async function runQuickViewAndStockTests() {
         gatewayRefreshToken: 'mock_grt_4',
         gatewaySessionToken: 'valid_gst_token_gen4',
         gstExpiresAt: new Date(Date.now() + 600000).toISOString(),
-        sessionGeneration: 4
+        sessionGeneration: 4, updatedAt: new Date().toISOString()
       });
 
       // 3ª chamada -> Novo fetch
       const res3 = await client.fetchBlingProductQuickView('101');
-      assert.strictEqual(fetchCount, 2);
+      assert.strictEqual(fetchCount, 3);
       assert.strictEqual(res3.costPrice, 12.50);
     } finally {
       globalThis.fetch = originalFetch;
@@ -835,11 +870,14 @@ export async function runQuickViewAndStockTests() {
       detectedProduct: { id: '1001' }
     });
 
+    let markStarted!: () => void;
+    const started = new Promise<void>(resolve => { markStarted = resolve; });
     let resolveSlowFetch: (val: any) => void;
     const slowFetchPromise = new Promise((resolve) => { resolveSlowFetch = resolve; });
 
     const mockClient = new GatewayClient();
     mockClient.fetchBlingProductQuickView = async () => {
+      markStarted();
       await slowFetchPromise;
       return {
         productId: '1001',
@@ -847,8 +885,7 @@ export async function runQuickViewAndStockTests() {
         name: 'Produto 1001',
         costPrice: 99.00,
         stockInfo: null,
-        stock: null,
-        retrievedAt: new Date().toISOString()
+          retrievedAt: new Date().toISOString()
       };
     };
 
@@ -862,10 +899,11 @@ export async function runQuickViewAndStockTests() {
         pageInstanceId: pageInstanceId1,
         payload: { productId: '1001' }
       },
-      { tab: { id: tabId } },
+      { tab: { id: tabId } as chrome.tabs.Tab },
       (res) => { responseA = res; }
     );
 
+    await started;
     // Usuário navega para o produto B antes de A terminar!
     await tabContextManager.registerOrUpdateTab(tabId, {
       platform: 'bling',
@@ -886,7 +924,7 @@ export async function runQuickViewAndStockTests() {
     // Estado da aba permanece limpo para o produto B, sem poluição de A
     const tabState = await tabContextManager.getTabState(tabId);
     assert.strictEqual(tabState?.pageInstanceId, pageInstanceId2);
-    assert.strictEqual(tabState?.uiState.quickView, undefined);
+    assert.strictEqual(tabState?.uiState.quickView, null);
   });
 
   await runTest('24. Stale-Response Barrier: Troca de productId dentro da mesma aba descarta resposta antiga', async () => {
@@ -902,11 +940,14 @@ export async function runQuickViewAndStockTests() {
       detectedProduct: { id: '2001' }
     });
 
+    let markStarted!: () => void;
+    const started = new Promise<void>(resolve => { markStarted = resolve; });
     let resolveSlowFetch: (val: any) => void;
     const slowFetchPromise = new Promise((resolve) => { resolveSlowFetch = resolve; });
 
     const mockClient = new GatewayClient();
     mockClient.fetchBlingProductQuickView = async () => {
+      markStarted();
       await slowFetchPromise;
       return {
         productId: '2001',
@@ -914,8 +955,7 @@ export async function runQuickViewAndStockTests() {
         name: 'Produto 2001',
         costPrice: 15.00,
         stockInfo: null,
-        stock: null,
-        retrievedAt: new Date().toISOString()
+          retrievedAt: new Date().toISOString()
       };
     };
 
@@ -928,10 +968,11 @@ export async function runQuickViewAndStockTests() {
         pageInstanceId,
         payload: { productId: '2001' }
       },
-      { tab: { id: tabId } },
+      { tab: { id: tabId } as chrome.tabs.Tab },
       (res) => { responseA = res; }
     );
 
+    await started;
     // Contexto é atualizado com novo produto detectado 2002
     await tabContextManager.registerOrUpdateTab(tabId, {
       platform: 'bling',
@@ -957,9 +998,10 @@ export async function runQuickViewAndStockTests() {
     // Usuário definiu manualmente o custo como 120.00
     existingSheet.costPrice = {
       value: 120.00,
-      status: 'confirmed',
+      status: 'edited',
+      confidence: 1,
       source: 'user_manual',
-      evidence: { field: 'costPrice', rawValue: 120.00, capturedAt: new Date().toISOString() }
+      evidence: { capturedAt: new Date().toISOString() }
     };
     // Usuário definiu manualmente estoque como 99
     existingSheet.stockInfo = {
@@ -968,23 +1010,24 @@ export async function runQuickViewAndStockTests() {
         virtualTotal: 99,
         deposits: [],
         retrievedAt: new Date().toISOString(),
-        source: 'user_manual'
+        source: 'bling_erp'
       },
-      status: 'confirmed',
+      status: 'edited',
+      confidence: 1,
       source: 'user_manual',
-      evidence: { field: 'stockInfo', rawValue: 99, capturedAt: new Date().toISOString() }
+      evidence: { capturedAt: new Date().toISOString() }
     };
 
     // Patch vindo do Bling com custo 50 e estoque 10
     const blingPatch: any = {
-      costPrice: createAuditedField(50.00, 'bling_erp', { field: 'precoCusto', rawValue: 50.00, capturedAt: new Date().toISOString() }),
+      costPrice: createAuditedField(50.00, 'bling_erp', 1, 'pending_review'),
       stockInfo: createAuditedField({
         physicalTotal: 10,
         virtualTotal: 10,
         deposits: [],
         retrievedAt: new Date().toISOString(),
         source: 'bling_erp'
-      }, 'bling_erp', { field: 'stockInfo', rawValue: 10, capturedAt: new Date().toISOString() })
+      }, 'bling_erp', 1, 'pending_review')
     };
 
     const reconciled = reconcileBlingPatch(existingSheet, {
@@ -1003,26 +1046,24 @@ export async function runQuickViewAndStockTests() {
     assert.strictEqual(reconciled.conflictedFields.length, 2);
   });
 
-  await runTest('26. Quick View Isolado: Leitura de Quick View NÃO salva nem altera CentralProductSheet silenciosamente', async () => {
-    await clearActiveSheet();
-    const sheetBefore = await loadSheet('sheet_any');
-    assert.strictEqual(sheetBefore, null);
-
-    // O ato de consultar quick view não gera ficha
-    const client = new GatewayClient();
-    client.fetchBlingProductQuickView = async () => ({
-      ok: true,
-      quickView: {
-        productId: '999',
-        costPrice: 15.00,
-        stockInfo: { physicalTotal: 5, virtualTotal: 5, deposits: [], retrievedAt: new Date().toISOString(), source: 'bling_erp' },
-        stock: { physicalTotal: 5, virtualTotal: 5, deposits: [], retrievedAt: new Date().toISOString(), source: 'bling_erp' },
-        retrievedAt: new Date().toISOString()
-      }
-    });
-
-    const sheetAfter = await loadSheet('sheet_any');
-    assert.strictEqual(sheetAfter, null); // Continua null!
+  await runTest('26. Quick View isolado executa router e não grava ficha', async () => {
+    const originalChrome = (globalThis as any).chrome;
+    const writes: string[] = [];
+    (globalThis as any).chrome = { storage: { local: {
+      get: async () => ({}), set: async (value: object) => { writes.push(...Object.keys(value)); }
+    } } };
+    try {
+      await tabContextManager.clearAll();
+      await tabContextManager.registerOrUpdateTab(999, { platform: 'bling', pageType: 'product_form_edit', pageInstanceId: 'page', detectedProduct: { id: '999' } });
+      const client = new GatewayClient();
+      client.fetchBlingProductQuickView = async () => ({productId: '999', costPrice: 15, stockInfo: null, retrievedAt: new Date().toISOString()});
+      const router = new MessageRouter(client);
+      let response: any;
+      await router.handleMessage({ type: 'BLING_GET_QUICK_VIEW', pageInstanceId: 'page', payload: {productId: '999'} }, {tab: {id: 999} as chrome.tabs.Tab}, res => { response = res; });
+      assert.strictEqual(response.ok, true);
+      assert.strictEqual((await tabContextManager.getTabState(999))?.uiState.quickView?.costPrice, 15);
+      assert.deepStrictEqual(writes, []);
+    } finally { (globalThis as any).chrome = originalChrome; }
   });
 
   // =========================================================================
@@ -1034,7 +1075,6 @@ export async function runQuickViewAndStockTests() {
     const display1 = formatQuickViewDisplay({
       costPrice: 8.42,
       stockInfo: { physicalTotal: 37, virtualTotal: 35, deposits: [], retrievedAt: '', source: 'bling_erp' },
-      stock: { physicalTotal: 37, virtualTotal: 35, deposits: [], retrievedAt: '', source: 'bling_erp' },
       productId: '1',
       retrievedAt: ''
     });
@@ -1047,7 +1087,6 @@ export async function runQuickViewAndStockTests() {
     const displayZero = formatQuickViewDisplay({
       costPrice: 0,
       stockInfo: { physicalTotal: 0, virtualTotal: 0, deposits: [], retrievedAt: '', source: 'bling_erp' },
-      stock: { physicalTotal: 0, virtualTotal: 0, deposits: [], retrievedAt: '', source: 'bling_erp' },
       productId: '2',
       retrievedAt: ''
     });
@@ -1060,7 +1099,6 @@ export async function runQuickViewAndStockTests() {
     const displayMissing = formatQuickViewDisplay({
       costPrice: null,
       stockInfo: null,
-      stock: null,
       productId: '3',
       retrievedAt: ''
     });
@@ -1074,26 +1112,7 @@ export async function runQuickViewAndStockTests() {
     assert.strictEqual(displayNull.stockText, 'Estoque: Não informado');
     assert.strictEqual(displayNull.costText, 'Custo: Não informado');
 
-    // 5. Anti-XSS: textContent no DOM nunca interpreta tags HTML
-    const fakeSpan = { textContent: '' };
-    fakeSpan.textContent = display1.stockText;
-    assert.strictEqual(fakeSpan.textContent, 'Estoque: 35 disp. (37 físico)');
+
   });
 
-  await runTest('28. Zero Secrets: Nenhum token, segredo ou chave vaza no objeto final de Quick View', () => {
-    const qv: any = {
-      productId: '101',
-      costPrice: 10,
-      stockInfo: { physicalTotal: 5, virtualTotal: 5, deposits: [], retrievedAt: '', source: 'bling_erp' },
-      stock: { physicalTotal: 5, virtualTotal: 5, deposits: [], retrievedAt: '', source: 'bling_erp' },
-      retrievedAt: new Date().toISOString()
-    };
-
-    const serialized = JSON.stringify(qv);
-    assert.strictEqual(serialized.includes('Bearer'), false);
-    assert.strictEqual(serialized.includes('eyJ'), false);
-    assert.strictEqual(serialized.includes('token'), false);
-    assert.strictEqual(serialized.includes('client_secret'), false);
-    assert.strictEqual(serialized.includes('encryptionKey'), false);
-  });
 }

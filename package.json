@@ -14,7 +14,8 @@
     "typecheck:gateway": "tsc --project tsconfig.gateway.json --noEmit",
     "build:gateway": "tsc --project tsconfig.gateway.json && node scripts/copy-gateway-migrations.mjs",
     "verify:extension-isolation": "npm run clean:extension && npm run build && node scripts/verify-extension-isolation.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck:tests": "tsc --project tsconfig.tests.json --noEmit"
   },
   "dependencies": {
     "clsx": "^2.1.1",

@@ -11,13 +11,27 @@ export interface QuickViewCacheEntry {
 export class QuickViewCache {
   private cache = new Map<string, QuickViewCacheEntry>();
   private defaultTtlMs: number;
+  private reads = new Set<{ connectionId: string; valid: boolean }>();
 
-  constructor(defaultTtlMs: number = 60_000) {
+  beginRead(connectionId: string) {
+    const ticket = { connectionId, valid: true };
+    this.reads.add(ticket);
+    return ticket;
+  }
+
+  endRead(ticket: { connectionId: string; valid: boolean }): void { this.reads.delete(ticket); }
+
+  private prune(): void {
+    for (const [key, entry] of this.cache) if (Date.now() >= entry.expiresAt) this.cache.delete(key);
+  }
+
+  constructor(defaultTtlMs: number = 60_000, private maxEntries = 1000) {
+    if (!Number.isInteger(maxEntries) || maxEntries < 1) throw new Error('Invalid cache limit');
     this.defaultTtlMs = defaultTtlMs;
   }
 
   private makeKey(connectionId: string, productId: string): string {
-    return `${connectionId.trim()}:${productId.trim()}`;
+    return JSON.stringify([connectionId.trim(), productId.trim()]);
   }
 
   get(connectionId: string, productId: string): BlingProductQuickView | null {
@@ -26,7 +40,7 @@ export class QuickViewCache {
     const entry = this.cache.get(key);
     if (!entry) return null;
 
-    if (Date.now() > entry.expiresAt) {
+    if (Date.now() >= entry.expiresAt) {
       this.cache.delete(key);
       return null;
     }
@@ -38,6 +52,9 @@ export class QuickViewCache {
     if (!connectionId || !productId || !data) return;
     const key = this.makeKey(connectionId, productId);
     const ttl = ttlMs !== undefined && ttlMs > 0 ? ttlMs : this.defaultTtlMs;
+    this.prune();
+    this.cache.delete(key);
+    while (this.cache.size >= this.maxEntries) this.cache.delete(this.cache.keys().next().value!);
     this.cache.set(key, {
       data,
       expiresAt: Date.now() + ttl
@@ -51,19 +68,21 @@ export class QuickViewCache {
 
   clearForConnection(connectionId: string): void {
     if (!connectionId) return;
-    const prefix = `${connectionId.trim()}:`;
+    for (const ticket of this.reads) if (ticket.connectionId === connectionId) ticket.valid = false;
     for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) {
+      if (JSON.parse(key)[0] === connectionId.trim()) {
         this.cache.delete(key);
       }
     }
   }
 
   clear(): void {
+    for (const ticket of this.reads) ticket.valid = false;
     this.cache.clear();
   }
 
   size(): number {
+    this.prune();
     return this.cache.size;
   }
 }

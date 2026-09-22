@@ -289,6 +289,9 @@ export async function runMessageRouterTests() {
     assert.strictEqual(staleActionResult?.ok, false);
     assert.ok(staleActionResult?.error?.includes('desatualizado') || staleActionResult?.error?.includes('rejeitada'));
 
+    // Deixa a Quick View automática do contexto B concluir antes da ação independente.
+    await new Promise(resolve => setImmediate(resolve));
+
     // 5. Ação de B (atual) é aceita
     let currentActionResult: any = null;
     await messageRouter.handleMessage({
@@ -524,7 +527,7 @@ export async function runMessageRouterTests() {
   });
 
   // 13. Vínculo de Novo Produto da Sidebar (Requisito 4)
-  await runTest('13. Vínculo Sidebar: LINK_SHEET_TO_TAB associa nova ficha criada pela Sidebar à aba ativa', async () => {
+  await runTest('13. Vínculo: LINK_SHEET_TO_TAB associa ficha à aba atestada pelo Chrome', async () => {
     const tabId = 801;
 
     await tabContextManager.registerOrUpdateTab(tabId, {
@@ -542,7 +545,7 @@ export async function runMessageRouterTests() {
       type: 'LINK_SHEET_TO_TAB',
       tabId,
       sheetId: newSidebarSheet.id
-    }, {} as any, (res) => { linkResult = res; });
+    }, { tab: { id: tabId } } as any, (res) => { linkResult = res; });
 
     assert.strictEqual(linkResult?.ok, true);
     assert.strictEqual(linkResult?.state?.activeSheetId, newSidebarSheet.id);

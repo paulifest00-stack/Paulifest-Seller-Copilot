@@ -68,7 +68,7 @@ export function createDefaultTabState(tabId: number, url: string = ''): TabConte
     uiState: {
       dockVisible: false,
       canImport: false,
-      isSimulatedMock: true
+      isSimulatedMock: false
     }
   };
 }
@@ -85,6 +85,14 @@ export function createDefaultTabState(tabId: number, url: string = ''): TabConte
 export class TabContextManager {
   private tabStates = new Map<number, TabContextState>();
   private isRehydrated = false;
+  private persistence = new Map<number, Promise<void>>();
+  private persistInOrder<T>(tabId: number, operation: () => Promise<T>): Promise<T> {
+    const result = (this.persistence.get(tabId) ?? Promise.resolve()).then(operation);
+    const settled = result.then(() => {}, () => {});
+    this.persistence.set(tabId, settled);
+    void settled.then(() => { if (this.persistence.get(tabId) === settled) this.persistence.delete(tabId); });
+    return result;
+  }
 
   /**
    * Reconstitui o cache em memória a partir de chrome.storage.session após o Service Worker acordar.
@@ -170,7 +178,7 @@ export class TabContextManager {
       }
 
       this.tabStates.set(tabId, initial);
-      await setSessionItem(`${SESSION_KEY_PREFIX}${tabId}`, initial);
+      await this.persistInOrder(tabId, () => setSessionItem(`${SESSION_KEY_PREFIX}${tabId}`, initial));
       return initial;
     }
 
@@ -263,6 +271,18 @@ export class TabContextManager {
       current.uiState.actionFeedback.message !== targetFeedback?.message
     );
 
+    const identityChanged = platformChanged || pageTypeChanged || urlChanged || instanceChanged || detectedIdChanged;
+    const quickViewUpdate = identityChanged
+      ? { quickView: null, quickViewLoading: false, quickViewError: null }
+      : {
+          quickView: update.uiState?.quickView !== undefined ? update.uiState.quickView : current.uiState.quickView,
+          quickViewLoading: update.uiState?.quickViewLoading ?? current.uiState.quickViewLoading,
+          quickViewError: update.uiState?.quickViewError !== undefined ? update.uiState.quickViewError : current.uiState.quickViewError
+        };
+    const quickViewChanged = JSON.stringify(quickViewUpdate) !== JSON.stringify({
+      quickView: current.uiState.quickView, quickViewLoading: current.uiState.quickViewLoading,
+      quickViewError: current.uiState.quickViewError
+    });
     const hasSemanticChange = (
       platformChanged ||
       pageTypeChanged ||
@@ -273,7 +293,8 @@ export class TabContextManager {
       activeSheetChanged ||
       dockChanged ||
       canImportChanged ||
-      feedbackChanged
+      feedbackChanged || quickViewChanged ||
+      (update.uiState?.isSimulatedMock !== undefined && update.uiState.isSimulatedMock !== current.uiState.isSimulatedMock)
     );
 
     if (!hasSemanticChange) {
@@ -281,7 +302,7 @@ export class TabContextManager {
       if (update.pageInstanceId && !current.pageInstanceId) {
         current.pageInstanceId = update.pageInstanceId;
         this.tabStates.set(tabId, current);
-        await setSessionItem(`${SESSION_KEY_PREFIX}${tabId}`, current);
+        await this.persistInOrder(tabId, () => setSessionItem(`${SESSION_KEY_PREFIX}${tabId}`, current));
       }
       return current;
     }
@@ -291,6 +312,7 @@ export class TabContextManager {
     const mergedUiState: TabContextUiState = {
       ...current.uiState,
       ...(update.uiState || {}),
+      ...quickViewUpdate,
       dockVisible: targetDockVisible,
       canImport: targetCanImport,
       actionFeedback: targetFeedback,
@@ -319,9 +341,30 @@ export class TabContextManager {
     }
 
     this.tabStates.set(tabId, updatedState);
-    await setSessionItem(`${SESSION_KEY_PREFIX}${tabId}`, updatedState);
+    await this.persistInOrder(tabId, () => setSessionItem(`${SESSION_KEY_PREFIX}${tabId}`, updatedState));
 
     return updatedState;
+  }
+
+  /** Synchronous authoritative snapshot; callers must hydrate before capturing it. */
+  peekTabState(tabId: number): TabContextState | undefined { return this.tabStates.get(tabId); }
+
+  /** Compare-and-set after hydration, before the synchronous in-memory update. */
+  async updateQuickView(
+    tabId: number, expectedRevision: number, uiState: Partial<TabContextUiState>,
+    authIsCurrent: () => boolean
+  ): Promise<TabContextState | undefined> {
+    if (!this.isRehydrated) await this.rehydrate();
+    const current = this.tabStates.get(tabId);
+    if (!authIsCurrent() || !current || current.contextRevision !== expectedRevision) return undefined;
+    return this.registerOrUpdateTab(tabId, { uiState });
+  }
+
+  async invalidateQuickViews(): Promise<TabContextState[]> {
+    if (!this.isRehydrated) await this.rehydrate();
+    return Promise.all([...this.tabStates.keys()].map(tabId => this.registerOrUpdateTab(tabId, {
+      uiState: { quickView: null, quickViewLoading: false, quickViewError: null }
+    })));
   }
 
   /**
@@ -333,15 +376,40 @@ export class TabContextManager {
     current.contextRevision += 1;
     current.lastSyncedAt = new Date().toISOString();
     this.tabStates.set(tabId, current);
-    await setSessionItem(`${SESSION_KEY_PREFIX}${tabId}`, current);
+    await this.persistInOrder(tabId, () => setSessionItem(`${SESSION_KEY_PREFIX}${tabId}`, current));
     return current.contextRevision;
   }
 
   /**
    * Associa uma Ficha Central (por ID) à aba ativa sem armazenar o objeto da ficha no session storage.
    */
-  async linkSheetToTab(tabId: number, sheetId: string): Promise<TabContextState | undefined> {
-    return this.registerOrUpdateTab(tabId, { activeSheetId: sheetId });
+  async linkSheetToTab(tabId: number, sheetId: string, importCommit?: {
+    assertCurrent: () => TabContextState;
+    uiState: Partial<TabContextUiState>;
+    publish: (state: TabContextState) => void;
+  }): Promise<TabContextState | undefined> {
+    if (!importCommit) return this.registerOrUpdateTab(tabId, { activeSheetId: sheetId });
+    return this.persistInOrder(tabId, async () => {
+      const current = importCommit.assertCurrent();
+      const next: TabContextState = { ...current, activeSheetId: sheetId,
+        contextRevision: current.contextRevision + 1, lastSyncedAt: new Date().toISOString(),
+        uiState: {...current.uiState, ...importCommit.uiState} };
+      try {
+        await setSessionItem(SESSION_KEY_PREFIX + tabId, next);
+        importCommit.assertCurrent();
+      } catch (error) {
+        // A navigation/logout may have happened while storage was pending.
+        // Repair disk without reverting the current in-memory context.
+        const live = this.tabStates.get(tabId);
+        if (live) await setSessionItem(SESSION_KEY_PREFIX + tabId, live);
+        else await removeSessionItem(SESSION_KEY_PREFIX + tabId);
+        throw error;
+      }
+      // No await between the last barrier, visibility of the link, and response.
+      this.tabStates.set(tabId, next);
+      importCommit.publish(next);
+      return next;
+    });
   }
 
   /**
@@ -349,7 +417,7 @@ export class TabContextManager {
    */
   async removeTab(tabId: number): Promise<void> {
     this.tabStates.delete(tabId);
-    await removeSessionItem(`${SESSION_KEY_PREFIX}${tabId}`);
+    await this.persistInOrder(tabId, () => removeSessionItem(`${SESSION_KEY_PREFIX}${tabId}`));
   }
 
   /**

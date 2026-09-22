@@ -67,6 +67,7 @@ export function createGatewaySessionToken(
   const header = { alg: 'HS256', typ: 'JWT' };
   const now = Math.floor(Date.now() / 1000);
   const payload = {
+    // Signed, not encrypted: the client can decode this ID but is never its authority.
     sub: claims.connectionId,
     csid: claims.clientSessionId,
     sid: claims.sessionId,

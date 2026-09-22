@@ -1,3 +1,5 @@
+import { runImportContextRaceTests } from './import-context-race.test.ts';
+import { runQuickViewCorrectionTests } from './quick-view-corrections.test.ts';
 // Test Runner Principal para todas as Suítes de Testes do Copilot
 import { runPricingTests } from './pricing-and-ean.test.ts';
 import { runIdentificationTests } from './ai-identification.test.ts';
@@ -38,6 +40,8 @@ const SUITES: SuiteDefinition[] = [
   { name: 'Extension Real Product Integration & SSOT', phase: 'Fase 4C.3', fn: runExtensionProductIntegrationTests },
   { name: 'Gateway Auth Orchestration & Storage Migration', phase: 'Fase 4C.4A', fn: runGatewayAuthOrchestrationTests },
   { name: 'Bling Connection UX — Sidebar, Dock & Arquitetura', phase: 'Fase 4C.4B', fn: runBlingConnectionUxTests },
+  { name: 'Importação: barreiras de contexto', phase: 'Fase 4D.2', fn: runImportContextRaceTests },
+  { name: 'Patch corretivo Quick View', phase: 'Fase 4D.2', fn: runQuickViewCorrectionTests },
   { name: 'Quick View, Estoque Real e Cache', phase: 'Fase 4D.2', fn: runQuickViewAndStockTests }
 ];
 

@@ -346,7 +346,7 @@ export async function runExtensionProductIntegrationTests() {
 
       // Agora o refresh de A responde tardiamente
       resolveRefreshA();
-      await promiseA;
+      await assert.rejects(() => promiseA, /sessão alterada/);
 
       // Confere que a Sessão B PERMANECEU INTACTA no storage e não foi corrompida por A!
       const currentSession: any = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
@@ -393,7 +393,7 @@ export async function runExtensionProductIntegrationTests() {
       await mockStorage.remove(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
 
       resolveRefreshA();
-      await promiseA;
+      await assert.rejects(() => promiseA, /sessão alterada/);
 
       // Confere que a sessão CONTINUA NULA (não foi ressuscitada)
       const currentSession = await mockStorage.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);
@@ -407,6 +407,7 @@ export async function runExtensionProductIntegrationTests() {
   await runTest('9. Novo GRT não aguarda Promise pertencente ao GRT antigo', async () => {
     const client = new GatewayClient({ baseUrl: 'http://gateway.test' });
 
+    await client.saveSession({gatewayRefreshToken: 'grt_novo', sessionGeneration: 1, updatedAt: new Date().toISOString()});
     // Injeta promise pendente para grt_antigo
     client['activeRefreshPromises'].set('grt_antigo', new Promise(() => {}));
 

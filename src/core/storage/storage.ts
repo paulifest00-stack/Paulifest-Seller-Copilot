@@ -86,7 +86,7 @@ const SHEET_STORAGE_PREFIX = 'paulifest_sheet_';
  * Salva uma ficha de produto pelo seu próprio ID no storage permanente (chrome.storage.local).
  * Garante validação de integridade com Schema v3 antes da gravação.
  */
-export async function saveSheet(sheet: CentralProductSheet): Promise<void> {
+async function saveSheetUnlocked(sheet: CentralProductSheet): Promise<void> {
   const validation = validateSheetV3(sheet);
   if (!validation.isValid) {
     throw new Error(`Não é possível salvar ficha inválida no storage: ${validation.errors.join('; ')}`);
@@ -111,7 +111,7 @@ export async function saveSheet(sheet: CentralProductSheet): Promise<void> {
  * Aplica migração pura e determinística para Schema v3.
  * Preserva o dado persistido e propaga erro controlado se a migração falhar.
  */
-export async function loadSheet(sheetId: string): Promise<CentralProductSheet | null> {
+async function loadSheetUnlocked(sheetId: string): Promise<CentralProductSheet | null> {
   if (!sheetId || typeof sheetId !== 'string') return null;
 
   const sheetKey = `${SHEET_STORAGE_PREFIX}${sheetId}`;
@@ -127,7 +127,7 @@ export async function loadSheet(sheetId: string): Promise<CentralProductSheet | 
 
   if (!raw) {
     try {
-      const active = await loadActiveSheet();
+      const active = await loadActiveSheetUnlocked();
       if (active && active.id === sheetId) {
         return active;
       }
@@ -159,7 +159,7 @@ export async function saveActiveSheet(sheet: CentralProductSheet): Promise<void>
  * se necessário. Se os dados armazenados estiverem corrompidos, o storage legado é preservado intacto
  * e um erro controlado é propagado, sem recriar silenciosamente uma ficha vazia por cima.
  */
-export async function loadActiveSheet(): Promise<CentralProductSheet | null> {
+async function loadActiveSheetUnlocked(): Promise<CentralProductSheet | null> {
   let raw: any = null;
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     const res = await chrome.storage.local.get(STORAGE_KEYS.ACTIVE_SHEET);
@@ -184,7 +184,7 @@ export async function loadActiveSheet(): Promise<CentralProductSheet | null> {
 /**
  * Limpa a ficha de produto ativa (para reiniciar o cadastro).
  */
-export async function clearActiveSheet(): Promise<void> {
+async function clearActiveSheetUnlocked(): Promise<void> {
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     await chrome.storage.local.remove(STORAGE_KEYS.ACTIVE_SHEET);
   } else {
@@ -216,4 +216,77 @@ export async function loadSellerPreferences(): Promise<SellerPreferences> {
     const raw = getStorageItem(STORAGE_KEYS.SELLER_PREFERENCES);
     return raw ? JSON.parse(raw) : DEFAULT_PREFERENCES;
   }
+}
+
+// Web Locks coordinates the worker and Sidepanel for the same extension origin.
+// The in-process fallback is for Node/unit tests without the browser LockManager.
+let sheetTail: Promise<void> = Promise.resolve();
+async function withSheetLock<T>(operation: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== 'undefined' && navigator.locks?.request) {
+    return await navigator.locks.request('paulifest:ssot', operation);
+  }
+  const result = sheetTail.then(operation);
+  sheetTail = result.then(() => {}, () => {});
+  return result;
+}
+export function saveSheet(sheet: CentralProductSheet): Promise<void> {
+  return withSheetLock(() => saveSheetUnlocked(sheet));
+}
+export function loadSheet(sheetId: string): Promise<CentralProductSheet | null> {
+  return withSheetLock(() => loadSheetUnlocked(sheetId));
+}
+export function loadActiveSheet(): Promise<CentralProductSheet | null> {
+  return withSheetLock(loadActiveSheetUnlocked);
+}
+export function clearActiveSheet(): Promise<void> {
+  return withSheetLock(clearActiveSheetUnlocked);
+}
+
+/** Compensated import: readers/writers cannot observe or overwrite a tentative sheet.
+ * Context/auth invalidation is deliberately NOT locked. Any failure before publish
+ * restores both the sheet and the previous active-sheet pointer before releasing.
+ */
+export function commitImportedSheet(
+  sheet: CentralProductSheet, assertCurrent: () => unknown, publish: () => Promise<void>,
+  expectedBase?: CentralProductSheet
+): Promise<void> {
+  return withSheetLock(async () => {
+    assertCurrent();
+    const keys = [SHEET_STORAGE_PREFIX + sheet.id, STORAGE_KEYS.ACTIVE_SHEET];
+    const before = new Map<string, any>();
+    for (const key of keys) {
+      const raw = typeof chrome !== 'undefined' && chrome.storage?.local
+        ? (await chrome.storage.local.get(key))[key] : getStorageItem(key);
+      before.set(key, raw == null ? undefined : structuredClone(raw));
+      assertCurrent();
+    }
+    if (expectedBase) {
+      const stored = before.get(keys[0]) ?? before.get(keys[1]);
+      const current = stored === undefined ? null : migrateSheetToV3(typeof stored === 'string' ? JSON.parse(stored) : stored);
+      if (JSON.stringify(current) !== JSON.stringify(expectedBase)) {
+        throw new Error('Importação descartada: ficha editada durante a operação.');
+      }
+    }
+    try {
+      assertCurrent();
+      await saveSheetUnlocked(sheet);
+      assertCurrent();
+      await publish();
+    } catch (error) {
+      try {
+        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+          const restore = Object.fromEntries([...before].filter(([, value]) => value !== undefined));
+          if (Object.keys(restore).length) await chrome.storage.local.set(restore);
+          for (const [key, value] of before) if (value === undefined) await chrome.storage.local.remove(key);
+        } else {
+          for (const [key, value] of before) {
+            if (value === undefined) removeStorageItem(key); else setStorageItem(key, value);
+          }
+        }
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'Falha de importação e de restauração do storage.');
+      }
+      throw error;
+    }
+  });
 }

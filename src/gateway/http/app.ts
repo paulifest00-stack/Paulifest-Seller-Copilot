@@ -66,7 +66,7 @@ export class GatewayApp {
       baseUrl: this.config.blingBaseUrl,
       timeoutMs: this.config.blingTimeoutMs
     });
-    this.quickViewCache = options.quickViewCache || new QuickViewCache(this.config.quickViewCacheTtlMs);
+    this.quickViewCache = options.quickViewCache || new QuickViewCache(this.config.quickViewCacheTtlMs, this.config.quickViewCacheMaxEntries);
   }
 
   getBlingTokenManager(): BlingTokenManager {
@@ -646,6 +646,8 @@ export class GatewayApp {
 
     const conn = await this.repository.getConnection(auth.connectionId);
 
+    this.quickViewCache.clearForConnection(auth.connectionId);
+
     // Tentativa prévia de revogação remota oficial no Bling para access e refresh token (best-effort)
     let accessStatus: 'success' | 'failed' | 'not_available' = 'not_available';
     let refreshStatus: 'success' | 'failed' | 'not_available' = 'not_available';
@@ -812,7 +814,7 @@ export class GatewayApp {
         if (err.status === 404) {
           this.sendJson(res, 404, {
             ok: false,
-            error: 'BLING_PRODUCT_NOT_FOUND',
+            error: err.code,
             message: err.message
           });
           return;
@@ -959,7 +961,8 @@ export class GatewayApp {
       return;
     }
 
-    // 5. Execução autenticada via BlingTokenManager (com auto-refresh se 401 do Bling)
+    // A ticket is invalidated synchronously by disconnect, including during database awaits.
+    const ticket = this.quickViewCache.beginRead(auth.connectionId);
     try {
       const quickViewResult = await this.tokenManager.executeWithBlingAuth(
         auth.connectionId,
@@ -968,6 +971,13 @@ export class GatewayApp {
         }
       );
 
+      const currentConnection = await this.repository.getConnection(auth.connectionId);
+      const currentSession = auth.sessionId ? await this.repository.getSession(auth.sessionId) : null;
+      if (!ticket.valid || currentConnection?.status !== 'connected' || !currentSession || currentSession.revokedAt || currentSession.connectionId !== auth.connectionId) {
+        this.sendJson(res, 401, { ok: false, error: 'SESSION_REVOKED', message: 'Sessão alterada durante a consulta.' });
+        return;
+      }
+      // No await between ticket validation and insertion/response.
       // Salva no cache volátil com TTL configurável
       this.quickViewCache.set(auth.connectionId, trimmedId, quickViewResult, this.config.quickViewCacheTtlMs);
 
@@ -1050,6 +1060,8 @@ export class GatewayApp {
         error: 'INTERNAL_ERROR',
         message: 'Erro interno ao consultar Quick View do produto no Bling.'
       });
+    } finally {
+      this.quickViewCache.endRead(ticket);
     }
   }
 

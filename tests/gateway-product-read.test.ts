@@ -71,7 +71,7 @@ class FakeBlingProductServer {
               nome: `Produto Bling #${productId}`,
               codigo: `SKU-${productId}`,
               preco: 149.90,
-              precoCusto: 89.00,
+              fornecedor: { precoCusto: 89.00 },
               tipo: 'P',
               situacao: 'A'
             }

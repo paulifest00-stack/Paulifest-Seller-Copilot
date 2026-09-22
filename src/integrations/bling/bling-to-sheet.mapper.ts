@@ -205,7 +205,7 @@ export function mapBlingProductToSheetPatch(
         'bling_erp',
         0.95,
         'pending_review',
-        createBlingEvidence(externalId, 'precoCusto', timestamp, context?.sourceName, String(dto.precoCusto))
+        createBlingEvidence(externalId, 'fornecedor.precoCusto', timestamp, context?.sourceName, String(dto.precoCusto))
       );
     } else if (parsedCost.warning) {
       warnings.push(parsedCost.warning);

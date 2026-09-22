@@ -299,8 +299,8 @@ export interface BlingRetryConnectionResponse {
 // ---------------------------------------------------------------------------
 
 export interface BlingDepositBalance {
-  depositId: string | number;
-  depositName: string;
+  depositId?: string | number;
+  depositName?: string;
   physicalBalance: number;
   virtualBalance: number;
 }
@@ -331,7 +331,6 @@ export interface BlingProductQuickView {
   sku?: string;
   name?: string;
   costPrice?: number | null;
-  stock?: ProductStockInfo | null;
   stockInfo?: ProductStockInfo | null;
   unit?: string;
   retrievedAt: string;

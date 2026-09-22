@@ -16,7 +16,7 @@ export const BLING_DOCUMENTED_PRODUCT_FIELDS = [
   'nome',
   'codigo',
   'preco',
-  'precoCusto',
+  'fornecedor',
   'tipo',
   'situacao',
   'formato',
@@ -71,7 +71,7 @@ export class BlingProductClient {
   /**
    * Executa a busca de produto por ID na API v3 do Bling.
    * Endpoint oficial: GET /Api/v3/produtos/{idProduto}
-   * Headers obrigatórios:
+   * Headers enviados (necessidade de enable-jwt pendente de homologação):
    * - Authorization: Bearer <accessToken>
    * - Accept: application/json
    * - enable-jwt: 1
@@ -174,7 +174,11 @@ export class BlingProductClient {
     if (typeof rawData.nome === 'string' && rawData.nome.trim()) sanitizedProduct.nome = rawData.nome.trim();
     if (rawData.codigo !== undefined && rawData.codigo !== null) sanitizedProduct.codigo = String(rawData.codigo).trim();
     if (rawData.preco !== undefined) sanitizedProduct.preco = rawData.preco as any;
-    if (rawData.precoCusto !== undefined) sanitizedProduct.precoCusto = rawData.precoCusto as any;
+    // Official supplier cost, normalized for the internal mapper DTO.
+    if (rawData.fornecedor && typeof rawData.fornecedor === 'object' && !Array.isArray(rawData.fornecedor)) {
+      const cost = parseCostPrice((rawData.fornecedor as Record<string, unknown>).precoCusto);
+      if (cost !== null) sanitizedProduct.precoCusto = cost;
+    }
     if (typeof rawData.tipo === 'string') sanitizedProduct.tipo = rawData.tipo;
     if (typeof rawData.situacao === 'string') sanitizedProduct.situacao = rawData.situacao;
     if (typeof rawData.formato === 'string') sanitizedProduct.formato = rawData.formato;
@@ -266,9 +270,9 @@ export class BlingProductClient {
       throw new BlingProductError('Permissão insuficiente para consultar estoque no Bling (403).', 403, 'BLING_FORBIDDEN');
     }
 
-    // Se a API retornar 404 para saldos deste produto, significa ausência de registro de estoque
+    // 404 is not documented as absence of stock.
     if (response.status === 404) {
-      return null;
+      throw new BlingProductError('Consulta de estoque não encontrada.', 404, 'BLING_STOCK_NOT_FOUND');
     }
 
     if (response.status === 429) {
@@ -302,77 +306,58 @@ export class BlingProductClient {
       return null; // Fact-or-Omit: nenhum registro de saldo retornado
     }
 
-    const deposits: BlingDepositBalance[] = [];
-
-    for (const item of rawList) {
-      if (!item || typeof item !== 'object') {
-        throw new BlingProductError('Item do payload de estoque malformado.', 422, 'INVALID_BLING_PAYLOAD');
+    // Official contract: one product record with totals and nested deposits.
+    const parseBalance = (value: unknown): number => {
+      if (typeof value === 'string') {
+        const text = value.trim();
+        if (!/^\d+(?:[.,]\d+)?$/.test(text)) {
+          throw new BlingProductError('Saldo ausente ou inválido.', 422, 'INVALID_BLING_PAYLOAD');
+        }
+        value = Number(text.replace(',', '.'));
       }
-
-      const rec = item as Record<string, any>;
-
-      // Validação de divergência de produto caso produto esteja informado
-      if (rec.produto && typeof rec.produto === 'object') {
-        const returnedProdId = rec.produto.id !== undefined && rec.produto.id !== null ? String(rec.produto.id).trim() : '';
-        if (returnedProdId && returnedProdId !== trimmedId) {
-          gatewayLogger.warn(`[BlingProductClient] Divergência no saldo de estoque: solicitado=#${trimmedId}, retornado=#${returnedProdId}`);
-          throw new BlingProductError(
-            `Incoerência no retorno de estoque: produto #${returnedProdId} difere do solicitado #${trimmedId}.`,
-            422,
-            'INVALID_BLING_PAYLOAD'
-          );
-        }
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new BlingProductError('Saldo ausente ou inválido.', 422, 'INVALID_BLING_PAYLOAD');
       }
-
-      // Validação e extração do depósito
-      const depObj = typeof rec.deposito === 'object' && rec.deposito !== null ? rec.deposito : {};
-      const depositId = depObj.id !== undefined && depObj.id !== null ? depObj.id : (rec.depositoId ?? 'default');
-      const depositName = typeof depObj.nome === 'string' && depObj.nome.trim()
-        ? depObj.nome.trim()
-        : (typeof depObj.descricao === 'string' && depObj.descricao.trim() ? depObj.descricao.trim() : 'Geral');
-
-      // Validação estrita dos saldos: podem ser 0, positivos ou negativos, mas devem ser números finitos
-      const parseSaldo = (val: unknown, fieldName: string): number => {
-        if (typeof val === 'number') {
-          if (!Number.isFinite(val)) {
-            throw new BlingProductError(`Campo "${fieldName}" contém número não-finito (NaN/Infinity).`, 422, 'INVALID_BLING_PAYLOAD');
-          }
-          return val;
+      return value;
+    };
+    if (rawList.length !== 1) {
+      throw new BlingProductError('Quantidade inesperada de produtos no estoque.', 422, 'INVALID_BLING_PAYLOAD');
+    }
+    const record = rawList[0] as Record<string, any>;
+    if (!record || typeof record !== 'object' || Array.isArray(record) ||
+        !record.produto || String(record.produto.id ?? '').trim() !== trimmedId) {
+      throw new BlingProductError('Identidade do produto inválida no estoque.', 422, 'INVALID_BLING_PAYLOAD');
+    }
+    let deposits: BlingDepositBalance[] | undefined;
+    if (record.depositos !== undefined) {
+      if (!Array.isArray(record.depositos)) {
+        throw new BlingProductError('Depósitos inválidos.', 422, 'INVALID_BLING_PAYLOAD');
+      }
+      const ids = new Set<string>();
+      deposits = record.depositos.map((deposit: unknown) => {
+        if (!deposit || typeof deposit !== 'object' || Array.isArray(deposit)) {
+          throw new BlingProductError('Depósito inválido.', 422, 'INVALID_BLING_PAYLOAD');
         }
-        if (typeof val === 'string') {
-          const parsed = Number(val.trim().replace(',', '.'));
-          if (!Number.isFinite(parsed)) {
-            throw new BlingProductError(`Campo "${fieldName}" contém string numérica inválida.`, 422, 'INVALID_BLING_PAYLOAD');
+        const d = deposit as Record<string, unknown>;
+        const id = d.id;
+        if (id !== undefined && id !== null) {
+          if (!((typeof id === 'number' && Number.isSafeInteger(id) && id > 0) ||
+                (typeof id === 'string' && /^\d+$/.test(id) && Number(id) > 0)) || ids.has(String(id))) {
+            throw new BlingProductError('Identidade de depósito inválida ou duplicada.', 422, 'INVALID_BLING_PAYLOAD');
           }
-          return parsed;
+          ids.add(String(id));
         }
-        throw new BlingProductError(`Campo "${fieldName}" de saldo ausente ou em formato inválido.`, 422, 'INVALID_BLING_PAYLOAD');
-      };
-
-      const physicalBalance = parseSaldo(rec.saldoFisico, 'saldoFisico');
-      const virtualBalance = parseSaldo(rec.saldoVirtual, 'saldoVirtual');
-
-      deposits.push({
-        depositId,
-        depositName,
-        physicalBalance,
-        virtualBalance
+        return {
+          ...(id != null ? { depositId: id as string | number } : {}),
+          physicalBalance: parseBalance(d.saldoFisico),
+          virtualBalance: parseBalance(d.saldoVirtual)
+        };
       });
     }
-
-    if (deposits.length === 0) {
-      return null;
-    }
-
-    const physicalTotal = Math.round(deposits.reduce((sum, d) => sum + d.physicalBalance, 0) * 10000) / 10000;
-    const virtualTotal = Math.round(deposits.reduce((sum, d) => sum + d.virtualBalance, 0) * 10000) / 10000;
-
     return {
-      physicalTotal,
-      virtualTotal,
-      deposits,
-      retrievedAt: new Date().toISOString(),
-      source: 'bling_erp'
+      physicalTotal: parseBalance(record.saldoFisicoTotal),
+      virtualTotal: parseBalance(record.saldoVirtualTotal), deposits,
+      retrievedAt: new Date().toISOString(), source: 'bling_erp'
     };
   }
 
@@ -399,7 +384,6 @@ export class BlingProductClient {
       sku: productResult.product.codigo,
       name: productResult.product.nome,
       costPrice,
-      stock: stockResult,
       stockInfo: stockResult,
       unit: productResult.product.unidade,
       retrievedAt: new Date().toISOString()
@@ -423,7 +407,7 @@ export function parseCostPrice(val: unknown): number | null {
     num = val;
   } else if (typeof val === 'string') {
     const cleaned = val.trim().replace(',', '.');
-    if (!cleaned) return null;
+    if (!/^\d+(?:\.\d+)?$/.test(cleaned)) return null;
     num = Number(cleaned);
   } else {
     return null;
@@ -433,5 +417,6 @@ export function parseCostPrice(val: unknown): number | null {
     return null;
   }
 
-  return Math.round(num * 100) / 100;
+  const rounded = Math.round(num * 100) / 100;
+  return Number.isFinite(rounded) ? rounded : null;
 }

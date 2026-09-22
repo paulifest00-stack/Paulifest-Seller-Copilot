@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": [
+    "tests/quick-view-and-stock.test.ts",
+    "tests/quick-view-corrections.test.ts",
+    "tests/import-context-race.test.ts"
+  ]
+}

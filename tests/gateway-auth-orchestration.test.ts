@@ -543,7 +543,7 @@ export async function runGatewayAuthOrchestrationTests(): Promise<void> {
       // Em paralelo, usuário aciona desconexão local
       await client.clearSession();
 
-      await refreshPromise;
+      await assert.rejects(() => refreshPromise, /sessão alterada/);
 
       // Confirma que a sessão apagada NÃO foi ressuscitada em storage.local nem em storage.session
       const localCheck = await mockLocal.get(STORAGE_KEYS.LOCAL_REFRESH_SESSION);

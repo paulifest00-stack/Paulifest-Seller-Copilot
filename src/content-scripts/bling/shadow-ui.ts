@@ -24,7 +24,7 @@ export function formatQuickViewDisplay(quickView: BlingProductQuickView | null |
     };
   }
 
-  const stock = quickView.stockInfo ?? quickView.stock;
+  const stock = quickView.stockInfo;
   let stockText = 'Estoque: Não informado';
   let hasStock = false;
 

@@ -91,10 +91,12 @@ export interface TabContextSyncMessage {
 
 export interface GetActiveTabContextRequest {
   type: 'GET_ACTIVE_TAB_CONTEXT';
+  windowId?: number;
 }
 
 export interface LinkSheetToTabRequest {
   type: 'LINK_SHEET_TO_TAB';
+  windowId?: number;
   tabId?: number;
   sheetId: string;
 }

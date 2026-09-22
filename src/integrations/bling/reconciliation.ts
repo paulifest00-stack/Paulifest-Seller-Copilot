@@ -2,6 +2,7 @@ import type {
   CentralProductSheet, 
   AuditedField 
 } from '../../core/schema/product.ts';
+import type { ProductStockInfo } from '../../shared/gateway-contracts.ts';
 import type { BlingMappingOutput, BlingSheetPatch } from './bling-to-sheet.mapper.ts';
 
 export interface BlingReconciliationResult {
@@ -22,12 +23,25 @@ function normalizeComparisonString(v: unknown): string {
 /**
  * Compara se dois valores são substancialmente idênticos / concordantes.
  */
+function stockFacts(value: ProductStockInfo): string {
+  return JSON.stringify({
+    physicalTotal: value.physicalTotal, virtualTotal: value.virtualTotal,
+    deposits: value.deposits?.map(d => JSON.stringify({
+      depositId: d.depositId, depositName: d.depositName,
+      physicalBalance: d.physicalBalance, virtualBalance: d.virtualBalance
+    })).sort()
+  });
+}
+
 function areValuesEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (typeof a === 'number' && typeof b === 'number') {
     return Math.abs(a - b) < 0.0001;
   }
   if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
+    if ('physicalTotal' in a && 'virtualTotal' in a && 'physicalTotal' in b && 'virtualTotal' in b) {
+      return stockFacts(a as ProductStockInfo) === stockFacts(b as ProductStockInfo);
+    }
     return JSON.stringify(a) === JSON.stringify(b);
   }
   const normA = normalizeComparisonString(a);
@@ -64,10 +78,14 @@ function reconcileSingleField<T>(
   }
 
   // 2. Campo existente está ausente ('missing') ou com valor padrão vazio: aplica valor do Bling
-  const isExistingEmpty = 
+  const isManual = existingField.source === 'user_manual' || existingField.status === 'edited';
+  // Initial templates use user_manual even for missing null/empty values: these are not facts.
+  const isMissingWithoutFact = existingField.status === 'missing' &&
+    (existingField.value === null || existingField.value === undefined || existingField.value === '');
+  const isExistingEmpty = isMissingWithoutFact || !isManual && (
     existingField.status === 'missing' ||
     existingField.value === '' || 
-    (typeof existingField.value === 'number' && existingField.value === 0 && existingField.confidence === 0);
+    (typeof existingField.value === 'number' && existingField.value === 0 && existingField.confidence === 0));
 
   if (isExistingEmpty) {
     appliedFields.push(fieldName);
@@ -92,7 +110,6 @@ function reconcileSingleField<T>(
 
   // 4. Divergência com valor manual do vendedor ('user_manual' ou 'edited'):
   // REGRA DE OURO: NUNCA sobrescrever dado manual. Cria conflito auditável mantendo o valor do seller!
-  const isManual = existingField.source === 'user_manual' || existingField.status === 'edited';
   if (isManual) {
     conflictedFields.push(fieldName);
     const existingConflicts = existingField.conflictingValues ? [...existingField.conflictingValues] : [];

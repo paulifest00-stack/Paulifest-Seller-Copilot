@@ -1,3 +1,4 @@
+import { importCommitGate } from './import-commit-gate.ts';
 import { 
   extractVerifiedSenderTabId,
   isBlingDomain,
@@ -11,7 +12,7 @@ import {
 } from '../shared/tab-context-contracts.ts';
 import type { BlingProductQuickView } from '../shared/gateway-contracts.ts';
 import { tabContextManager } from './tab-context-manager.ts';
-import { loadSheet, saveSheet } from '../core/storage/storage.ts';
+import { loadSheet, commitImportedSheet } from '../core/storage/storage.ts';
 import { createInitialSheet, type CentralProductSheet } from '../core/schema/product.ts';
 import { validateBlingProductInput } from '../integrations/bling/runtime-validator.ts';
 import { mapBlingProductToSheetPatch } from '../integrations/bling/bling-to-sheet.mapper.ts';
@@ -34,11 +35,14 @@ export interface RouteMessageResult {
   error?: string;
 }
 
+class StaleImportError extends Error {}
+
 export class MessageRouter {
   private gatewayClient: GatewayClient;
   private authOrchestrator: BlingAuthOrchestrator;
   private inFlightRequests = new Map<string, Promise<any>>();
   private mockMode: boolean = false;
+  private importResponders = new Map<string, Set<(response: any) => void>>();
 
   constructor(
     gatewayClientInstance?: GatewayClient,
@@ -47,6 +51,13 @@ export class MessageRouter {
     this.gatewayClient = gatewayClientInstance || gatewayClient;
     this.authOrchestrator = options?.authOrchestrator || (gatewayClientInstance ? new BlingAuthOrchestrator(this.gatewayClient) : blingAuthOrchestrator);
     this.mockMode = options?.mockMode ?? false;
+    this.gatewayClient.onAuthInvalidated(async () => {
+      this.inFlightRequests.clear();
+      for (const state of await tabContextManager.invalidateQuickViews()) {
+        this.dispatchUiStateToContentScript(state.tabId, state);
+        this.notifyActiveTabToSidebar(state.tabId, state);
+      }
+    });
   }
 
   getAuthOrchestrator(): BlingAuthOrchestrator {
@@ -130,20 +141,14 @@ export class MessageRouter {
 
     // 1. Mensagens da Sidebar pedindo contexto da aba ativa
     if (message.type === 'GET_ACTIVE_TAB_CONTEXT' || message.type === 'GET_CONTEXT') {
-      await this.handleGetActiveTabContext(sendResponse);
+      await this.handleGetActiveTabContext(sendResponse, message.windowId, sender);
       return true; // resposta assíncrona
     }
 
     // Requisito 4: Mensagem da Sidebar para associar Ficha Central à aba
     if (message.type === 'LINK_SHEET_TO_TAB') {
       const sheetId = message.sheetId;
-      let targetTabId = message.tabId;
-      if (!targetTabId && typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
-        try {
-          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          targetTabId = activeTab?.id;
-        } catch {}
-      }
+      const targetTabId = await this.resolveTargetTab(sender, message.tabId, message.windowId);
       if (targetTabId && sheetId) {
         const updated = await tabContextManager.linkSheetToTab(targetTabId, sheetId);
         if (updated) {
@@ -159,13 +164,7 @@ export class MessageRouter {
 
     // Operação de Quick View (leitura de custo e estoque)
     if (message.type === 'BLING_GET_QUICK_VIEW') {
-      let targetTabId = extractVerifiedSenderTabId(sender);
-      if (!targetTabId && typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
-        try {
-          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          targetTabId = activeTab?.id ?? null;
-        } catch {}
-      }
+      const targetTabId = await this.resolveTargetTab(sender);
 
       if (!targetTabId) {
         sendResponse({ ok: false, error: 'Remetente sem tabId confiável da plataforma.' });
@@ -199,6 +198,16 @@ export class MessageRouter {
     }
 
     return false;
+  }
+
+  private async resolveTargetTab(sender: chrome.runtime.MessageSender, requestedTabId?: number, windowId?: number): Promise<number | null> {
+    const contentTab = extractVerifiedSenderTabId(sender);
+    if (contentTab !== null) return contentTab;
+    if (typeof chrome === 'undefined' || !chrome.runtime?.getURL ||
+        sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('sidepanel.html')) return null;
+    const [active] = await chrome.tabs.query(Number.isInteger(windowId) ? { active: true, windowId } : { active: true, currentWindow: true });
+    if (!active?.id || (requestedTabId !== undefined && requestedTabId !== active.id)) return null;
+    return active.id;
   }
 
   /**
@@ -278,6 +287,7 @@ export class MessageRouter {
     sendResponse: (res: any) => void
   ): Promise<void> {
     try {
+      const snapshotAuth = this.gatewayClient.getAuthGeneration();
       const currentTab = await tabContextManager.getTabState(tabId);
       if (!currentTab) {
         sendResponse({ ok: false, error: 'Aba não encontrada no gerenciador de contexto.' });
@@ -305,6 +315,16 @@ export class MessageRouter {
       }
 
       if (payload.action === 'prepare_mercadolivre') {
+        const operationKey = JSON.stringify([snapshotAuth, tabId, pageInstanceId, currentTab.contextRevision]);
+        const existing = this.importResponders.get(operationKey);
+        if (existing) { existing.add(sendResponse); return; }
+        const responders = new Set([sendResponse]);
+        const operationKeys = [operationKey];
+        this.importResponders.set(operationKey, responders);
+        sendResponse = response => {
+          for (const key of operationKeys) if (this.importResponders.get(key) === responders) this.importResponders.delete(key);
+          for (const respond of responders) { try { respond(response); } catch { /* Closed message port must not fail the commit or other responders. */ } }
+        };
         if (currentTab.pageType === 'product_form_new') {
           sendResponse({ 
             ok: false, 
@@ -331,241 +351,124 @@ export class MessageRouter {
           return;
         }
 
-        // Fallback exclusivo para a suíte de testes de simulação legada da Fase 4B (zero fallback silencioso em prod)
-        if (this.mockMode || pageInstanceId === 'inst_mock') {
-          const mockRawPayload = {
-            nome: `Produto Bling #${targetId} (Simulado 4B)`,
-            codigo: currentTab.detectedProduct?.sku || `SKU-SIM-${targetId}`,
-            preco: 149.90,
-            precoCusto: 89.00,
-            tipo: 'P',
-            situacao: 'A',
-            gtin: '7891000111222',
-            marca: 'Marca Demonstrativa'
-          };
-
-          const validated = validateBlingProductInput(mockRawPayload);
-          const mapped = mapBlingProductToSheetPatch(validated.sanitized, {
-            externalId: targetId,
-            sourceName: 'Bling ERP (Simulação 4B)'
-          });
-
-          let baseSheet: CentralProductSheet | null = null;
-          if (currentTab.activeSheetId) {
-            const loaded = await loadSheet(currentTab.activeSheetId);
-            if (loaded) {
-              const hasConflictingBlingRef = loaded.externalReferences?.some(
-                (ref) => ref.system === 'bling' && ref.externalId && String(ref.externalId) !== String(targetId)
-              );
-              if (hasConflictingBlingRef) {
-                baseSheet = null;
-              } else {
-                baseSheet = loaded;
-              }
-            }
+        // Capture immutable identity before any upstream/storage await. Read the
+        // manager synchronously at every barrier: awaiting a check creates another gap.
+        let expectedState = currentTab;
+        let expectedRevision = currentTab.contextRevision;
+        const expectedInstance = currentTab.pageInstanceId;
+        const assertCurrent = (): TabContextState => {
+          const live = tabContextManager.peekTabState(tabId);
+          this.gatewayClient.assertAuthGeneration(snapshotAuth);
+          if (!live || live !== expectedState || live.tabId !== tabId || live.pageInstanceId !== expectedInstance ||
+              live.contextRevision !== expectedRevision || live.detectedProduct?.id !== targetId ||
+              live.platform !== currentTab.platform || live.pageType !== 'product_form_edit') {
+            throw new StaleImportError('Resposta descartada: contexto alterado durante a importação.');
           }
-          if (!baseSheet) {
-            baseSheet = createInitialSheet();
-          }
+          return live;
+        };
+        assertCurrent();
 
-          const reconciled = reconcileBlingPatch(baseSheet, mapped);
-          await saveSheet(reconciled.sheet);
-
-          const stateWithFeedback = await tabContextManager.registerOrUpdateTab(tabId, {
-            activeSheetId: reconciled.sheet.id,
-            uiState: {
-              isSimulatedMock: true,
-              actionFeedback: {
-                type: 'success',
-                message: `✓ Produto #${targetId} carregado na Ficha Central (Simulado)`
-              }
-            }
-          });
-          this.dispatchUiStateToContentScript(tabId, stateWithFeedback);
-          this.notifyActiveTabToSidebar(tabId, stateWithFeedback);
-
-          if (typeof chrome !== 'undefined' && chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
-            chrome.sidePanel.open({ tabId }).catch(() => {});
-          }
-
-          sendResponse({ 
-            ok: true, 
-            action: 'prepare_mercadolivre',
-            isSimulatedMock: true,
-            sheetId: reconciled.sheet.id
-          });
-          return;
-        }
-
-        // Modo Real 4C.3: Feedback imediato de carregamento no Dock e Sidebar
-        const loadingState = await tabContextManager.registerOrUpdateTab(tabId, {
-          uiState: {
-            isSimulatedMock: false,
-            actionFeedback: {
-              type: 'loading',
-              message: `Carregando produto #${targetId} do Bling...`
-            }
-          }
+        // Publish loading only while the original context is still authoritative.
+        const loadingPromise = tabContextManager.registerOrUpdateTab(tabId, {
+          uiState: { isSimulatedMock: this.mockMode, actionFeedback: {
+            type: 'loading', message: `Carregando produto #${targetId} do Bling...`
+          } }
         });
+        expectedState = tabContextManager.peekTabState(tabId)!;
+        expectedRevision = expectedState.contextRevision;
+        const loadingOperationKey = JSON.stringify([snapshotAuth, tabId, pageInstanceId, expectedRevision]);
+        operationKeys.push(loadingOperationKey);
+        this.importResponders.set(loadingOperationKey, responders);
+        const loadingState = await loadingPromise;
+        assertCurrent();
         this.dispatchUiStateToContentScript(tabId, loadingState);
         this.notifyActiveTabToSidebar(tabId, loadingState);
 
-        // Snapshot pré-request capturado com a contextRevision do estado de loading
-        const snapshotTabId = tabId;
-        const snapshotPageInstanceId = pageInstanceId;
-        const snapshotRevision = loadingState.contextRevision;
-        const snapshotProductId = targetId;
-
-        // Chave de deduplicação incorporando contextRevision
-        const dedupeKey = `${snapshotTabId}:${snapshotProductId}:${snapshotPageInstanceId}:${snapshotRevision}`;
-
-        // Execução da consulta ao Gateway com deduplicação em voo e cleanup garantido em finally
+        const dedupeKey = `import:${snapshotAuth}:${tabId}:${targetId}:${expectedInstance}:${expectedRevision}`;
         let pending = this.inFlightRequests.get(dedupeKey);
         if (!pending) {
-          pending = this.gatewayClient.fetchBlingProduct(snapshotProductId);
+          pending = this.mockMode ? Promise.resolve({
+            product: { nome: `Produto Bling #${targetId} (Simulado 4B)`,
+              codigo: currentTab.detectedProduct?.sku || `SKU-SIM-${targetId}`,
+              preco: 149.90, precoCusto: 89.00, tipo: 'P', situacao: 'A',
+              gtin: '7891000111222', marca: 'Marca Demonstrativa' },
+            retrievedAt: new Date().toISOString()
+          }) : this.gatewayClient.fetchBlingProduct(targetId);
           this.inFlightRequests.set(dedupeKey, pending);
         }
-
         let gatewayResponse: any;
-        try {
-          gatewayResponse = await pending;
-        } catch (err: any) {
-          let feedbackType: 'error' | 'warning' | 'auth_required' = 'error';
-          let message = err?.message || 'Falha ao consultar produto no Gateway.';
-
-          if (err instanceof GatewayAuthRequiredError) {
-            feedbackType = 'auth_required';
-            message = '⚠️ Conexão com o Bling requer autorização. Reconecte o Bling.';
-          } else if (err instanceof GatewayTransientError) {
-            feedbackType = 'warning';
-            message = `⚠️ ${err.message}`;
-          }
-
-          const errState = await tabContextManager.registerOrUpdateTab(tabId, {
-            uiState: {
-              actionFeedback: {
-                type: feedbackType,
-                message
-              }
-            }
+        try { gatewayResponse = await pending; }
+        catch (err: any) {
+          assertCurrent(); // Never publish an old request's error on a new context.
+          const type = err instanceof GatewayAuthRequiredError ? 'auth_required'
+            : err instanceof GatewayTransientError ? 'warning' : 'error';
+          const message = err?.message || 'Falha ao consultar produto no Gateway.';
+          const errorPromise = tabContextManager.registerOrUpdateTab(tabId, {
+            uiState: { actionFeedback: {type, message} }
           });
-          this.dispatchUiStateToContentScript(tabId, errState);
-          this.notifyActiveTabToSidebar(tabId, errState);
-
-          sendResponse({ ok: false, error: message });
+          expectedState = tabContextManager.peekTabState(tabId)!;
+          expectedRevision = expectedState.contextRevision;
+          const errorState = await errorPromise;
+          assertCurrent();
+          this.dispatchUiStateToContentScript(tabId, errorState);
+          this.notifyActiveTabToSidebar(tabId, errorState);
+          sendResponse({ok: false, error: message});
           return;
         } finally {
-          // Limpeza incondicional do Map em finally (tanto em sucesso quanto em erro)
-          this.inFlightRequests.delete(dedupeKey);
+          if (this.inFlightRequests.get(dedupeKey) === pending) this.inFlightRequests.delete(dedupeKey);
         }
-
-        // BARREIRA RIGOROSA DE STALE-RESPONSE (Validação Simultânea Pré-Commit)
-        const freshTab = await tabContextManager.getTabState(snapshotTabId);
-        const isValidForCommit = (
-          freshTab !== undefined &&
-          freshTab.tabId === snapshotTabId &&
-          freshTab.pageInstanceId === snapshotPageInstanceId &&
-          freshTab.contextRevision === snapshotRevision &&
-          freshTab.detectedProduct?.id === snapshotProductId &&
-          freshTab.pageType === 'product_form_edit'
-        );
-
-        if (!isValidForCommit) {
-          console.warn(
-            `[Paulifest Copilot] Resposta stale descartada para produto #${snapshotProductId} na aba ${snapshotTabId}. Motivo: contexto, revisão ou tipo de tela alterados durante a requisição.`
-          );
-          sendResponse({ 
-            ok: false, 
-            warning: 'Resposta descartada: contexto da aba foi alterado durante a requisição.' 
-          });
-          return; // DESCARTA SEM TOCAR NA CENTRAL PRODUCT SHEET
-        }
-
-        // Defesa em profundidade: Se a aba apontava para ficha com produto Bling conflitante, gera nova
+        const freshTab = assertCurrent();
         let baseSheet: CentralProductSheet | null = null;
         if (freshTab.activeSheetId) {
           const loaded = await loadSheet(freshTab.activeSheetId);
-          if (loaded) {
-            const hasConflictingBlingRef = loaded.externalReferences?.some(
-              (ref) => ref.system === 'bling' && ref.externalId && String(ref.externalId) !== String(snapshotProductId)
-            );
-            if (hasConflictingBlingRef) {
-              console.warn(
-                `[Paulifest Copilot] Defesa em profundidade: aba ${tabId} apontava para ficha com produto Bling conflitante. Descartando ficha anterior e gerando nova.`
-              );
-              baseSheet = null;
-            } else {
-              baseSheet = loaded;
-            }
-          }
+          assertCurrent();
+          if (loaded && !loaded.externalReferences?.some(ref => ref.system === 'bling' &&
+              ref.externalId && String(ref.externalId) !== String(targetId))) baseSheet = loaded;
         }
-        if (!baseSheet) {
-          baseSheet = createInitialSheet();
-        }
-
-        // Executa o pipeline puro da Fase 4A com contratos oficiais
+        const persistedBase = baseSheet;
+        if (!baseSheet) baseSheet = createInitialSheet();
+        const sourceName = this.mockMode ? 'Bling ERP (Simulação 4B)' : 'Bling ERP (API Oficial v3)';
         const validated = validateBlingProductInput(gatewayResponse.product, {
-          externalId: snapshotProductId,
-          retrievedAt: gatewayResponse.retrievedAt,
-          sourceName: 'Bling ERP (API Oficial v3)'
+          externalId: targetId, retrievedAt: gatewayResponse.retrievedAt, sourceName
         });
-
         const mapped = mapBlingProductToSheetPatch(validated.sanitized, {
-          externalId: snapshotProductId,
-          retrievedAt: gatewayResponse.retrievedAt,
-          sourceName: 'Bling ERP (API Oficial v3)',
-          confirmedUnits: {
-            weight: 'kg',
-            dimension: 'cm'
-          },
-          stockInfo: freshTab.uiState?.quickView?.stockInfo || freshTab.uiState?.quickView?.stock || null
+          externalId: targetId, retrievedAt: gatewayResponse.retrievedAt, sourceName,
+          confirmedUnits: { weight: 'kg', dimension: 'cm' },
+          stockInfo: freshTab.uiState.quickView?.productId === targetId
+            ? freshTab.uiState.quickView.stockInfo : null
         });
-
         const reconciled = reconcileBlingPatch(baseSheet, mapped);
 
-        // Salva a ficha pelo seu próprio ID no storage permanente
-        await saveSheet(reconciled.sheet);
-
-        // Associa esse ID exclusivamente à aba correspondente
-        await tabContextManager.linkSheetToTab(tabId, reconciled.sheet.id);
-
-        // Abre a sidebar nativa
-        if (typeof chrome !== 'undefined' && chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
-          chrome.sidePanel.open({ tabId }).catch(() => {});
-        }
-
-        const hasConflicts = (reconciled.conflictedFields && reconciled.conflictedFields.length > 0) || reconciled.sheet.hasUnresolvedConflicts;
-        const feedbackType = hasConflicts ? 'warning' : 'success';
-        const feedbackMessage = hasConflicts
-          ? `✓ Produto #${snapshotProductId} carregado com divergências na Ficha Central`
-          : `✓ Produto #${snapshotProductId} carregado com sucesso do Bling`;
-
-        // Notifica o content script e sidebar com feedback real (isSimulatedMock: false)
-        const stateWithFeedback = await tabContextManager.registerOrUpdateTab(tabId, {
-          activeSheetId: reconciled.sheet.id,
-          uiState: {
-            isSimulatedMock: false,
-            actionFeedback: {
-              type: feedbackType,
-              message: feedbackMessage
-            }
-          }
-        });
-        this.dispatchUiStateToContentScript(tabId, stateWithFeedback);
-        this.notifyActiveTabToSidebar(tabId, stateWithFeedback);
-
-        sendResponse({ 
-          ok: true, 
-          action: 'prepare_mercadolivre',
-          isSimulatedMock: false,
-          sheetId: reconciled.sheet.id,
-          conflictedFields: reconciled.conflictedFields
+        // Serialize imports only. Navigation and auth invalidate immediately.
+        await importCommitGate.commit(async () => {
+          assertCurrent();
+          await commitImportedSheet(reconciled.sheet, assertCurrent, async () => {
+            assertCurrent();
+            const hasConflicts = reconciled.conflictedFields.length > 0 || reconciled.sheet.hasUnresolvedConflicts;
+            await tabContextManager.linkSheetToTab(tabId, reconciled.sheet.id, {
+              assertCurrent,
+              uiState: { isSimulatedMock: this.mockMode, actionFeedback: {
+                type: hasConflicts ? 'warning' : 'success',
+                message: `✓ Produto #${targetId} carregado${hasConflicts ? ' com divergências' : ''} na Ficha Central${this.mockMode ? ' (Simulado)' : ''}`
+              } },
+              publish: state => {
+                this.dispatchUiStateToContentScript(tabId, state);
+                this.notifyActiveTabToSidebar(tabId, state);
+                if (typeof chrome !== 'undefined' && chrome.sidePanel?.open) {
+                  try { void chrome.sidePanel.open({tabId}).catch(() => {}); } catch { /* UI is best effort. */ }
+                }
+                sendResponse({ok: true, action: 'prepare_mercadolivre', isSimulatedMock: this.mockMode,
+                  sheetId: reconciled.sheet.id, conflictedFields: reconciled.conflictedFields});
+              }
+            });
+          }, persistedBase ?? undefined);
         });
         return;
       }
 
       sendResponse({ ok: false, error: 'Ação não suportada.' });
     } catch (err: any) {
+      if (err instanceof StaleImportError) { sendResponse({ok: false, warning: err.message}); return; }
       console.error('[Paulifest Copilot] Erro ao executar ação contextual:', err);
       sendResponse({ ok: false, error: err?.message || 'Falha ao processar ação.' });
     }
@@ -574,11 +477,13 @@ export class MessageRouter {
   /**
    * Responde com o contexto da aba ativa atual para a Sidebar.
    */
-  private async handleGetActiveTabContext(sendResponse: (res: any) => void): Promise<void> {
+  private async handleGetActiveTabContext(sendResponse: (res: any) => void, windowId?: number, sender?: chrome.runtime.MessageSender): Promise<void> {
     try {
       let activeTabId: number | undefined;
       if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        const trustedPanel = sender?.id === chrome.runtime.id && sender?.url === chrome.runtime.getURL?.('sidepanel.html');
+        const tabs = await chrome.tabs.query(trustedPanel && Number.isInteger(windowId)
+          ? { active: true, windowId } : { active: true, currentWindow: true });
         activeTabId = tabs[0]?.id;
       }
 
@@ -607,6 +512,7 @@ export class MessageRouter {
     sendResponse: (res: any) => void
   ): Promise<void> {
     try {
+      const snapshotAuth = this.gatewayClient.getAuthGeneration();
       const rawProductId = payload?.productId;
       if (!isValidProductId(rawProductId)) {
         sendResponse({ ok: false, error: 'ID do produto inválido ou não informado.' });
@@ -626,14 +532,21 @@ export class MessageRouter {
         return;
       }
 
+      if (currentTab.platform !== 'bling' || currentTab.pageType !== 'product_form_edit' || currentTab.detectedProduct?.id !== productId) {
+        sendResponse({ ok: false, error: 'Produto não corresponde ao contexto atual.' });
+        return;
+      }
+      this.gatewayClient.assertAuthGeneration(snapshotAuth);
       // Sinaliza carregamento do Quick View no Dock e Sidebar
-      const loadingState = await tabContextManager.registerOrUpdateTab(tabId, {
-        uiState: {
+      const loadingState = await tabContextManager.updateQuickView(tabId, currentTab.contextRevision, {
           ...currentTab.uiState,
+          quickView: null,
+          isSimulatedMock: this.mockMode,
           quickViewLoading: true,
           quickViewError: null
-        }
-      });
+      }, () => this.gatewayClient.getAuthGeneration() === snapshotAuth);
+      if (!loadingState || tabContextManager.peekTabState(tabId) !== loadingState) { sendResponse({ok: false, warning: 'Contexto alterado antes da consulta.'}); return; }
+      this.gatewayClient.assertAuthGeneration(snapshotAuth);
       this.dispatchUiStateToContentScript(tabId, loadingState);
       this.notifyActiveTabToSidebar(tabId, loadingState);
 
@@ -642,25 +555,16 @@ export class MessageRouter {
       const snapshotRevision = loadingState.contextRevision;
       const snapshotProductId = productId;
 
-      const dedupeKey = `quickview:${snapshotTabId}:${snapshotProductId}:${snapshotPageInstanceId}:${snapshotRevision}`;
+      const dedupeKey = `quickview:${snapshotAuth}:${snapshotTabId}:${snapshotProductId}:${snapshotPageInstanceId}:${snapshotRevision}`;
 
       let pending = this.inFlightRequests.get(dedupeKey);
       if (!pending) {
-        if (this.mockMode || pageInstanceId === 'inst_mock') {
+        if (this.mockMode) {
           pending = Promise.resolve({
             productId: snapshotProductId,
             sku: currentTab.detectedProduct?.sku || `SKU-SIM-${snapshotProductId}`,
             name: `Produto Bling #${snapshotProductId} (Simulado)`,
             costPrice: 89.00,
-            stock: {
-              physicalTotal: 37,
-              virtualTotal: 35,
-              deposits: [
-                { depositId: '1', depositName: 'Geral', physicalBalance: 37, virtualBalance: 35 }
-              ],
-              retrievedAt: new Date().toISOString(),
-              source: 'bling_erp' as const
-            },
             stockInfo: {
               physicalTotal: 37,
               virtualTotal: 35,
@@ -685,6 +589,7 @@ export class MessageRouter {
       } catch (err: any) {
         const freshTab = await tabContextManager.getTabState(snapshotTabId);
         const isStale = (
+          this.gatewayClient.getAuthGeneration() !== snapshotAuth ||
           !freshTab ||
           freshTab.tabId !== snapshotTabId ||
           freshTab.pageInstanceId !== snapshotPageInstanceId ||
@@ -698,30 +603,33 @@ export class MessageRouter {
           return;
         }
 
-        const errState = await tabContextManager.registerOrUpdateTab(snapshotTabId, {
-          uiState: {
+        const errState = await tabContextManager.updateQuickView(snapshotTabId, snapshotRevision, {
             ...freshTab.uiState,
             quickViewLoading: false,
             quickViewError: err?.message || 'Falha ao consultar Quick View do produto.'
-          }
-        });
+        }, () => this.gatewayClient.getAuthGeneration() === snapshotAuth);
+        if (!errState || tabContextManager.peekTabState(snapshotTabId) !== errState) { sendResponse({ok: false, warning: 'Erro descartado: contexto alterado.'}); return; }
+        this.gatewayClient.assertAuthGeneration(snapshotAuth);
         this.dispatchUiStateToContentScript(snapshotTabId, errState);
         this.notifyActiveTabToSidebar(snapshotTabId, errState);
 
         sendResponse({ ok: false, error: err?.message || 'Falha ao consultar Quick View.' });
         return;
       } finally {
-        this.inFlightRequests.delete(dedupeKey);
+        if (this.inFlightRequests.get(dedupeKey) === pending) this.inFlightRequests.delete(dedupeKey);
       }
 
       // BARREIRA RIGOROSA DE STALE-RESPONSE
       const freshTab = await tabContextManager.getTabState(snapshotTabId);
       const isValidForCommit = (
+        this.gatewayClient.getAuthGeneration() === snapshotAuth &&
         freshTab !== undefined &&
         freshTab.tabId === snapshotTabId &&
         freshTab.pageInstanceId === snapshotPageInstanceId &&
         freshTab.contextRevision === snapshotRevision &&
-        freshTab.detectedProduct?.id === snapshotProductId
+        freshTab.detectedProduct?.id === snapshotProductId &&
+        freshTab.pageType === 'product_form_edit' &&
+        quickViewResult.productId === snapshotProductId
       );
 
       if (!isValidForCommit) {
@@ -735,14 +643,14 @@ export class MessageRouter {
         return;
       }
 
-      const updatedState = await tabContextManager.registerOrUpdateTab(snapshotTabId, {
-        uiState: {
+      const updatedState = await tabContextManager.updateQuickView(snapshotTabId, snapshotRevision, {
           ...freshTab.uiState,
           quickView: quickViewResult,
           quickViewLoading: false,
           quickViewError: null
-        }
-      });
+      }, () => this.gatewayClient.getAuthGeneration() === snapshotAuth);
+      if (!updatedState || tabContextManager.peekTabState(snapshotTabId) !== updatedState) { sendResponse({ok: false, warning: 'Resposta descartada: contexto alterado.'}); return; }
+      this.gatewayClient.assertAuthGeneration(snapshotAuth);
       this.dispatchUiStateToContentScript(snapshotTabId, updatedState);
       this.notifyActiveTabToSidebar(snapshotTabId, updatedState);
 
