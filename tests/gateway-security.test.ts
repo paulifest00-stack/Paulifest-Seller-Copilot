@@ -19,6 +19,7 @@ import { sanitizeForLogs } from '../src/gateway/security/logger.ts';
 import { MemoryRateLimiter } from '../src/gateway/security/rate-limiter.ts';
 import { GatewayApp } from '../src/gateway/http/app.ts';
 import { loadGatewayConfig } from '../src/gateway/config.ts';
+import { startGateway } from '../src/gateway/bootstrap.ts';
 
 async function runTest(name: string, fn: () => Promise<void> | void) {
   try {
@@ -606,7 +607,7 @@ export async function runGatewaySecurityTests() {
     assert.strictEqual(resNoSub.error, 'Claim sub (connectionId) ausente ou inválida.');
   });
 
-  await runTest('22. Configuração de Desenvolvimento: exige configuração explícita e rejeita inicialização sem secrets', () => {
+  await runTest('22. Configuração e bootstrap: exige secrets, aceita PORT do host e rejeita Gateway sem PostgreSQL', async () => {
     // Em ambiente development, não pode haver inicialização silenciosa com secrets fake conhecidos
     assert.throws(
       () => loadGatewayConfig({ NODE_ENV: 'development' }),
@@ -618,12 +619,41 @@ export async function runGatewaySecurityTests() {
     assert.strictEqual(testConfig.environment, 'test');
     assert.ok(testConfig.encryptionKey.length === 32);
     assert.ok(testConfig.jwtSecret.length >= 32);
+
+    const hostPortConfig = loadGatewayConfig({ NODE_ENV: 'test', PORT: '4321' });
+    assert.strictEqual(hostPortConfig.port, 4321);
+    const explicitPortConfig = loadGatewayConfig({ NODE_ENV: 'test', PORT: '4321', GATEWAY_PORT: '5432' });
+    assert.strictEqual(explicitPortConfig.port, 5432);
+    assert.throws(
+      () => loadGatewayConfig({ NODE_ENV: 'test', PORT: '0' }),
+      /Porta do Gateway inválida/
+    );
+    await assert.rejects(
+      () => startGateway({ NODE_ENV: 'test' }),
+      /DATABASE_URL é obrigatória/
+    );
+  });
+
+  await runTest('23. Health check: responde 503 quando a dependência PostgreSQL está indisponível', async () => {
+    const app = new GatewayApp({
+      config: loadGatewayConfig({ NODE_ENV: 'test' }),
+      repository: new InMemoryGatewayRepository(),
+      healthCheck: async () => false
+    });
+    const port = await app.listen(0);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/health`);
+      assert.strictEqual(response.status, 503);
+      assert.deepStrictEqual(await response.json(), { status: 'unavailable' });
+    } finally {
+      await app.close();
+    }
   });
 
   // ---------------------------------------------------------------------------
   // 10. Gate Estático de Isolamento do Código-Fonte (100% Independente de build)
   // ---------------------------------------------------------------------------
-  await runTest('23. Gate Estático: nenhum módulo da extensão importa src/gateway/**', () => {
+  await runTest('24. Gate Estático: nenhum módulo da extensão importa src/gateway/**', () => {
     const forbiddenPatterns = [
       /from\s+['"][^'"]*\/gateway\//,
       /from\s+['"][^'"]*\/gateway['"]/,

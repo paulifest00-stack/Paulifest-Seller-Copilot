@@ -1582,8 +1582,19 @@ export async function runGatewayOAuthRealTests() {
       assert.strictEqual(extended, true);
 
       const state = await repo.getRefreshLeaseState(connId);
-      const expiryMs = new Date(state.leaseExpiresAt!).getTime();
-      assert.ok(expiryMs > Date.now() + 15000, 'Expiração do lease deve ter sido estendida pelo heartbeat');
+      assert.strictEqual(state.isLeased, true);
+
+      const { rows } = await testPool.query<{ sufficiently_extended: boolean }>(
+        `SELECT refresh_lease_expires_at > NOW() + INTERVAL '15 seconds' AS sufficiently_extended
+         FROM bling_connections
+         WHERE id = $1`,
+        [connId]
+      );
+      assert.strictEqual(
+        rows[0]?.sufficiently_extended,
+        true,
+        'Expiração do lease deve ter sido estendida pelo heartbeat'
+      );
     });
 
     await runTest('26. Helper executeWithBlingAuth: recupera chamada com 401 via auto-refresh preventivo único', async () => {

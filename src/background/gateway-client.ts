@@ -91,21 +91,24 @@ export interface GatewayClientOptions {
 }
 
 export function detectEnvironment(): GatewayEnvironment {
-  // 1. Prioridade para ambiente de teste (Node / Vite test runner)
-  try {
-    if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'test') {
-      return 'test';
-    }
-  } catch {}
-
+  // 1. Suporte a Vite / bundlers (import.meta.env)
   try {
     if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
       const metaEnv = (import.meta as any).env;
       if (metaEnv.MODE === 'test') {
         return 'test';
       }
-      if (metaEnv.MODE === 'production' || metaEnv.PROD === true) {
+      if (metaEnv.VITE_APP_ENV === 'production' || metaEnv.VITE_ENVIRONMENT === 'production') {
         return 'production';
+      }
+      if (metaEnv.VITE_APP_ENV === 'development' || metaEnv.VITE_ENVIRONMENT === 'development') {
+        return 'development';
+      }
+      if (metaEnv.VITE_GATEWAY_URL && typeof metaEnv.VITE_GATEWAY_URL === 'string') {
+        const urlStr = metaEnv.VITE_GATEWAY_URL.trim().toLowerCase();
+        if (urlStr.startsWith('https://') && !urlStr.includes('localhost') && !urlStr.includes('127.0.0.1')) {
+          return 'production';
+        }
       }
       return 'development';
     }
@@ -114,6 +117,7 @@ export function detectEnvironment(): GatewayEnvironment {
   try {
     if (typeof process !== 'undefined' && process.env) {
       if (process.env.NODE_ENV === 'production') return 'production';
+      if (process.env.NODE_ENV === 'test') return 'test';
       if (process.env.NODE_ENV === 'development') return 'development';
     }
   } catch {}
@@ -227,7 +231,13 @@ export class GatewayClient {
 
   constructor(options: GatewayClientOptions = {}) {
     this.environment = options.environment || detectEnvironment();
-    this.baseUrl = validateAndResolveBaseUrl(options.baseUrl, this.environment);
+    let envBaseUrl: string | undefined;
+    try {
+      if (typeof import.meta !== 'undefined' && (import.meta as any).env && (import.meta as any).env.VITE_GATEWAY_URL) {
+        envBaseUrl = String((import.meta as any).env.VITE_GATEWAY_URL).trim();
+      }
+    } catch {}
+    this.baseUrl = validateAndResolveBaseUrl(options.baseUrl || envBaseUrl, this.environment);
     this.timeoutMs = options.timeoutMs || 8000;
     this.localStorage = options.localStorage || options.storage || createDefaultLocalStorage();
     this.sessionStorage = options.sessionStorage || createDefaultSessionStorage();

@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: paulifest-seller-copilot-gateway
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build:gateway
+    startCommand: npm run start:gateway
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_SSL_CA_PATH
+        value: config/certs/supabase-prod-ca-2021.crt
+      - key: GATEWAY_TRUST_PROXY
+        value: "true"
+      - key: GATEWAY_ALLOW_LOCALHOST_CORS
+        value: "false"
+      - key: DATABASE_URL
+        sync: false
+      - key: BLING_CLIENT_ID
+        sync: false
+      - key: BLING_CLIENT_SECRET
+        sync: false
+      - key: BLING_REDIRECT_URI
+        sync: false
+      - key: GATEWAY_ENCRYPTION_KEY
+        sync: false
+      - key: GATEWAY_JWT_SECRET
+        sync: false
+      - key: GATEWAY_ALLOWED_EXTENSION_ORIGINS
+        sync: false

@@ -33,6 +33,34 @@ Os testes Quick View e de corrida de importação também têm verificação Typ
 
 Para carregar a extensão, use Chrome 114+, habilite modo desenvolvedor em chrome://extensions e selecione dist/ em “Carregar sem compactação”. Configure e execute o Gateway separadamente conforme os documentos de configuração em docs/; o pacote da extensão não inclui o backend.
 
+## Gateway operacional
+
+O Gateway público usa obrigatoriamente PostgreSQL; o repositório em memória fica restrito a testes com injeção explícita. Na inicialização ele valida o banco, executa as migrações pendentes sob advisory lock e só então abre a porta HTTP. Se configuração, banco ou migração falharem, o processo encerra sem publicar um servidor parcial.
+
+Variáveis obrigatórias em produção:
+
+```text
+NODE_ENV=production
+DATABASE_URL=postgresql://...
+DATABASE_SSL_CA_PATH=config/certs/supabase-prod-ca-2021.crt
+BLING_CLIENT_ID=...
+BLING_CLIENT_SECRET=...
+BLING_REDIRECT_URI=https://SEU_GATEWAY/auth/bling/callback
+GATEWAY_ENCRYPTION_KEY=... # 32 bytes em hex/base64 ou frase derivada por SHA-256
+GATEWAY_JWT_SECRET=...     # mínimo de 32 caracteres
+GATEWAY_ALLOWED_EXTENSION_ORIGINS=chrome-extension://ID_REAL
+GATEWAY_TRUST_PROXY=true
+```
+
+`GATEWAY_PORT` tem precedência sobre `PORT`; provedores que injetam somente `PORT` são suportados. Para executar localmente, copie as variáveis para um arquivo `.env` ignorado pelo Git e rode:
+
+```powershell
+npm run build:gateway
+npm run start:gateway:local
+```
+
+Em hospedagem, use `npm run build:gateway` no build e `npm run start:gateway` no start. Para apontar o pacote da extensão ao serviço publicado, compile com `VITE_APP_ENV=production` e `VITE_GATEWAY_URL=https://SEU_GATEWAY`. O `BLING_REDIRECT_URI` deve ser cadastrado exatamente como link de redirecionamento no aplicativo do Bling.
+
 ## Credenciais e simulação
 
 Tokens Bling permanecem no Gateway. GRT fica em storage.local e GST em storage.session, ambos restritos a TRUSTED_CONTEXTS antes de processar mensagens; falha nessa proteção bloqueia a inicialização segura. A API permite acesso a páginas confiáveis da extensão, mas exclui content scripts. Credenciais não são enviadas à UI por mensagens.

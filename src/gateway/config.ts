@@ -16,6 +16,7 @@ export interface GatewayConfig {
   gstTtlSeconds: number;           // Default: 900 (15 minutos)
   sessionRefreshTtlDays: number;   // Default: 14 dias
   databaseUrl?: string;            // PostgreSQL connection string (Fase 4C.2)
+  databaseSslCaPath?: string;      // CA usada para validar TLS do PostgreSQL gerenciado
   allowedExtensionOrigins?: string[]; // Allowlist explícita de origens de extensão
   trustProxy?: boolean;               // Habilita confiança em reverse proxy (X-Forwarded-For)
   allowLocalhostCors?: boolean;       // Permite localhost apenas em desenvolvimento/testes
@@ -25,8 +26,10 @@ export interface GatewayConfig {
 
 export function loadGatewayConfig(env: Record<string, string | undefined> = process.env): GatewayConfig {
   const environment = (env.NODE_ENV === 'production' ? 'production' : env.NODE_ENV === 'test' ? 'test' : 'development') as GatewayConfig['environment'];
-  const port = parseInt(env.GATEWAY_PORT || '3001', 10);
+  const rawPort = env.GATEWAY_PORT?.trim() || env.PORT?.trim() || '3001';
+  const port = Number(rawPort);
   const databaseUrl = env.DATABASE_URL?.trim() || undefined;
+  const databaseSslCaPath = env.DATABASE_SSL_CA_PATH?.trim() || undefined;
   const blingBaseUrl = env.BLING_BASE_URL?.trim() || 'https://api.bling.com.br';
   const blingAuthUrl = env.BLING_AUTH_URL?.trim() || OFFICIAL_BLING_AUTH_URL;
   const blingTimeoutMs = parseInt(env.BLING_TIMEOUT_MS || '8000', 10);
@@ -35,6 +38,10 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     : [];
   const trustProxy = env.GATEWAY_TRUST_PROXY === 'true';
   const quickViewCacheTtlMs = parseInt(env.GATEWAY_QUICK_VIEW_CACHE_TTL_MS || '60000', 10);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('Porta do Gateway inválida. Configure GATEWAY_PORT ou PORT entre 1 e 65535.');
+  }
 
   const quickViewCacheMaxEntries = Number(env.GATEWAY_QUICK_VIEW_CACHE_MAX_ENTRIES || 1000);
   if (!Number.isInteger(quickViewCacheMaxEntries) || quickViewCacheMaxEntries < 1 || !Number.isFinite(quickViewCacheTtlMs) || quickViewCacheTtlMs <= 0) {
@@ -96,6 +103,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       gstTtlSeconds: 900,           // 15 minutos
       sessionRefreshTtlDays: 14,    // 14 dias
       databaseUrl,
+      databaseSslCaPath,
       allowedExtensionOrigins,
       trustProxy,
       allowLocalhostCors: false,
@@ -156,6 +164,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
       gstTtlSeconds: 900,
       sessionRefreshTtlDays: 14,
       databaseUrl,
+      databaseSslCaPath,
       allowedExtensionOrigins,
       trustProxy,
       allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false',
@@ -199,6 +208,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     gstTtlSeconds: 900,
     sessionRefreshTtlDays: 14,
     databaseUrl,
+    databaseSslCaPath,
     allowedExtensionOrigins,
     trustProxy,
     allowLocalhostCors: env.GATEWAY_ALLOW_LOCALHOST_CORS !== 'false',

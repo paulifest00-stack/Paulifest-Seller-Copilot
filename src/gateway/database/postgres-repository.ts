@@ -1102,19 +1102,22 @@ export class PostgresGatewayRepository implements IGatewayRepository {
 
   async getRefreshLeaseState(connectionId: string): Promise<RefreshLeaseState> {
     const { rows } = await this.pool.query(
-      'SELECT refresh_lease_owner, refresh_lease_expires_at, token_version FROM bling_connections WHERE id = $1',
+      `SELECT refresh_lease_owner,
+              refresh_lease_expires_at,
+              token_version,
+              refresh_lease_owner IS NOT NULL
+                AND refresh_lease_expires_at > NOW() AS is_leased
+       FROM bling_connections
+       WHERE id = $1`,
       [connectionId]
     );
     if (rows.length === 0) {
       return { isLeased: false, tokenVersion: 1 };
     }
     const row = rows[0];
-    const now = Date.now();
-    const expiresMs = row.refresh_lease_expires_at ? new Date(row.refresh_lease_expires_at).getTime() : 0;
-    const isLeased = Boolean(row.refresh_lease_owner && expiresMs > now);
 
     return {
-      isLeased,
+      isLeased: row.is_leased === true,
       leaseOwner: row.refresh_lease_owner,
       leaseExpiresAt: row.refresh_lease_expires_at ? new Date(row.refresh_lease_expires_at).toISOString() : null,
       tokenVersion: row.token_version ?? 1

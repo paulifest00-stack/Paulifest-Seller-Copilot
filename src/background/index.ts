@@ -18,6 +18,11 @@ function isMlDomain(urlStr: string): boolean {
 }
 
 // 1. Configura a ação do ícone para abrir a SidePanel nativa
+if (typeof chrome !== 'undefined' && chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => {
+    console.warn('[Paulifest Copilot] Erro ao configurar sidePanel behavior:', err);
+  });
+}
 chrome.runtime.onInstalled.addListener(() => {
   if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
     chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => {

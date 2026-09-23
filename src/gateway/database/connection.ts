@@ -1,6 +1,8 @@
 // Gerenciador de Conexão e Pool PostgreSQL do Gateway (Fase 4C.2A)
 import pg from 'pg';
 import type { PoolClient, QueryResult } from 'pg';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { gatewayLogger } from '../security/logger.ts';
 
 const { Pool } = pg;
@@ -12,6 +14,15 @@ export interface DatabasePoolOptions {
   max?: number;
   idleTimeoutMillis?: number;
   connectionTimeoutMillis?: number;
+  sslCaPath?: string;
+}
+
+function removeConnectionStringSslOptions(connectionString: string): string {
+  const parsed = new URL(connectionString);
+  for (const key of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey']) {
+    parsed.searchParams.delete(key);
+  }
+  return parsed.toString();
 }
 
 /**
@@ -32,8 +43,16 @@ export function getPool(options: DatabasePoolOptions = {}): pg.Pool {
     );
   }
 
+  const ssl = options.sslCaPath
+    ? {
+        ca: readFileSync(resolve(options.sslCaPath), 'utf8'),
+        rejectUnauthorized: true
+      }
+    : undefined;
+
   globalPool = new Pool({
-    connectionString,
+    connectionString: ssl ? removeConnectionStringSslOptions(connectionString) : connectionString,
+    ssl,
     max: options.max || 10,
     idleTimeoutMillis: options.idleTimeoutMillis || 10000,
     connectionTimeoutMillis: options.connectionTimeoutMillis || 5000

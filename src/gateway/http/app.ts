@@ -35,6 +35,7 @@ export interface GatewayAppOptions {
   tokenManager?: BlingTokenManager;
   productClient?: BlingProductClient;
   quickViewCache?: QuickViewCache;
+  healthCheck?: () => Promise<boolean>;
 }
 
 export class GatewayApp {
@@ -44,6 +45,7 @@ export class GatewayApp {
   private tokenManager: BlingTokenManager;
   private productClient: BlingProductClient;
   private quickViewCache: QuickViewCache;
+  private healthCheck?: () => Promise<boolean>;
   private server?: Server;
 
   constructor(options: GatewayAppOptions = {}) {
@@ -67,6 +69,7 @@ export class GatewayApp {
       timeoutMs: this.config.blingTimeoutMs
     });
     this.quickViewCache = options.quickViewCache || new QuickViewCache(this.config.quickViewCacheTtlMs, this.config.quickViewCacheMaxEntries);
+    this.healthCheck = options.healthCheck;
   }
 
   getBlingTokenManager(): BlingTokenManager {
@@ -192,6 +195,17 @@ export class GatewayApp {
     try {
       // 1. GET /health
       if (method === 'GET' && pathname === '/health') {
+        if (this.healthCheck) {
+          try {
+            if (!await this.healthCheck()) {
+              this.sendJson(res, 503, { status: 'unavailable' });
+              return;
+            }
+          } catch {
+            this.sendJson(res, 503, { status: 'unavailable' });
+            return;
+          }
+        }
         this.sendJson(res, 200, {
           status: 'ok',
           environment: this.config.environment,
