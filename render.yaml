@@ -6,7 +6,6 @@ services:
     buildCommand: npm ci && npm run build:gateway
     startCommand: npm run start:gateway
     healthCheckPath: /health
-    maxShutdownDelaySeconds: 30
     envVars:
       - key: NODE_ENV
         value: production
