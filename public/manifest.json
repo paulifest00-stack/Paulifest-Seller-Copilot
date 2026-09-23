@@ -28,7 +28,8 @@
   ],
   "host_permissions": [
     "*://*.mercadolivre.com.br/*",
-    "*://*.bling.com.br/*"
+    "*://*.bling.com.br/*",
+    "https://paulifest-seller-copilot-gateway.onrender.com/*"
   ],
   "background": {
     "service_worker": "background.js",
