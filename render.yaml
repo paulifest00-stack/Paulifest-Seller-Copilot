@@ -3,7 +3,7 @@ services:
     name: paulifest-seller-copilot-gateway
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run build:gateway
+    buildCommand: npm ci --include=dev && npm run build:gateway
     startCommand: npm run start:gateway
     healthCheckPath: /health
     envVars:
