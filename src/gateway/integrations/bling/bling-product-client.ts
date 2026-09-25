@@ -1,3 +1,4 @@
+import { validateEan } from '../../../core/engines/identification/ean-validator.ts';
 import { gatewayLogger } from '../../security/logger.ts';
 import type {
   GatewayBlingProductDTO,
@@ -5,6 +6,7 @@ import type {
   BlingDepositBalance,
   BlingProductQuickView
 } from '../../types/contracts.ts';
+import type { BlingProductUpdatePatch, UpdateBlingProductResponse } from '../../../shared/gateway-contracts.ts';
 
 export interface BlingProductClientOptions {
   baseUrl?: string;
@@ -59,6 +61,31 @@ export interface FetchProductResult {
 
 export class BlingProductClient {
   static parseCostPrice = parseCostPrice;
+
+  async searchProducts(query: string, page: number, searchBy: 'name' | 'sku', accessToken: string) {
+    const params = new URLSearchParams({ pagina: String(page), limite: '30' });
+    if (query.trim()) params.set(searchBy === 'sku' ? 'codigo' : 'nome', query.trim());
+    let response: Response;
+    try {
+      response = await fetch(this.baseUrl + '/Api/v3/produtos?' + params, {
+        headers: { Authorization: 'Bearer ' + accessToken, Accept: 'application/json', 'enable-jwt': '1' },
+        signal: AbortSignal.timeout(this.timeoutMs)
+      });
+    } catch { throw new BlingProductError('Não foi possível acessar o catálogo do Bling.', 502, 'BLING_NETWORK_ERROR'); }
+    if (!response.ok) {
+      const status = response.status;
+      throw new BlingProductError(status === 403 ? 'Sua conexão não tem permissão de leitura de produtos.' : status === 429 ? 'Limite de consultas atingido. Aguarde e tente novamente.' : 'Falha ao consultar o catálogo Bling (HTTP ' + status + ').', status, status === 401 ? 'UNAUTHORIZED' : 'BLING_API_ERROR', status === 429 ? 5000 : undefined);
+    }
+    let body: any;
+    try { body = await response.json(); } catch { throw new BlingProductError('Resposta inválida do catálogo.', 422, 'INVALID_BLING_PAYLOAD'); }
+    if (!Array.isArray(body?.data)) throw new BlingProductError('Lista de produtos inválida.', 422, 'INVALID_BLING_PAYLOAD');
+    const items = body.data.map((item: any) => {
+      if (!item || !/^\d+$/.test(String(item.id)) || typeof item.nome !== 'string') throw new BlingProductError('Produto inválido no catálogo.', 422, 'INVALID_BLING_PAYLOAD');
+      return { id: String(item.id), name: item.nome, sku: typeof item.codigo === 'string' ? item.codigo : '', price: typeof item.preco === 'number' && Number.isFinite(item.preco) ? item.preco : null };
+    });
+    return { items, page, hasMore: body.data.length === 30 };
+  }
+
 
   private baseUrl: string;
   private timeoutMs: number;
@@ -229,6 +256,64 @@ export class BlingProductClient {
     };
   }
 
+  /** Atualiza somente a whitelist explícita de campos de um produto existente. */
+  async updateProduct(
+    productId: string,
+    patch: BlingProductUpdatePatch,
+    accessToken: string
+  ): Promise<UpdateBlingProductResponse> {
+    const trimmedId = productId.trim();
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(trimmedId)) {
+      throw new BlingProductError('ID do produto inválido.', 400, 'INVALID_PRODUCT_ID');
+    }
+    validateUpdatePatch(patch);
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/Api/v3/produtos/${encodeURIComponent(trimmedId)}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'enable-jwt': '1'
+        },
+        body: JSON.stringify(patch),
+        signal: AbortSignal.timeout(this.timeoutMs)
+      });
+    } catch (err: any) {
+      if (err?.name === 'TimeoutError' || err?.message?.includes('timeout') || err?.code === 23) {
+        throw new BlingProductError(`Tempo limite de ${this.timeoutMs}ms esgotado na atualização do Bling.`, 504, 'BLING_TIMEOUT');
+      }
+      throw new BlingProductError(`Erro de rede ao atualizar produto no Bling: ${err?.message || 'Falha de conexão'}`, 502, 'BLING_NETWORK_ERROR');
+    }
+
+    if (response.status === 401) throw new BlingProductError('Credencial do Bling não autorizada ou expirada.', 401, 'UNAUTHORIZED');
+    if (response.status === 403) throw new BlingProductError('Permissão insuficiente para atualizar produtos no Bling.', 403, 'BLING_FORBIDDEN');
+    if (response.status === 404) throw new BlingProductError(`Produto #${trimmedId} não encontrado no Bling.`, 404, 'BLING_PRODUCT_NOT_FOUND');
+    if (response.status === 429) {
+      const seconds = Number.parseInt(response.headers.get('retry-after') || '5', 10);
+      throw new BlingProductError('Limite de requisições excedido no Bling.', 429, 'BLING_RATE_LIMITED', (seconds > 0 ? seconds : 5) * 1000);
+    }
+    if (response.status >= 500) throw new BlingProductError(`Erro interno do servidor Bling (${response.status}).`, 502, 'BLING_SERVER_ERROR');
+    if (!response.ok) throw new BlingProductError(`Bling rejeitou a atualização (HTTP ${response.status}).`, response.status, 'BLING_API_ERROR');
+
+    let body: any;
+    try { body = await response.json(); } catch {
+      throw new BlingProductError('Resposta de atualização do Bling não contém JSON válido.', 422, 'INVALID_BLING_PAYLOAD');
+    }
+    const returnedId = body?.data?.id === undefined || body?.data?.id === null ? '' : String(body.data.id).trim();
+    if (!returnedId || returnedId !== trimmedId) {
+      throw new BlingProductError('Identidade do produto retornado após atualização é inválida.', 422, 'INVALID_BLING_PAYLOAD');
+    }
+    return {
+      ok: true,
+      productId: trimmedId,
+      updatedFields: Object.keys(patch) as Array<keyof BlingProductUpdatePatch>,
+      retrievedAt: new Date().toISOString()
+    };
+  }
+
   /**
    * Consulta os saldos de estoque por depósito na API v3 Oficial do Bling.
    * Endpoint oficial: GET /Api/v3/estoques/saldos?idsProdutos[]={idProduto}
@@ -388,6 +473,38 @@ export class BlingProductClient {
       unit: productResult.product.unidade,
       retrievedAt: new Date().toISOString()
     };
+  }
+}
+
+const UPDATE_FIELDS = new Set(['nome', 'codigo', 'preco', 'gtin', 'marca', 'descricaoComplementar', 'pesoBruto', 'dimensoes', 'tributacao']);
+
+function validateUpdatePatch(patch: BlingProductUpdatePatch): void {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new BlingProductError('Patch de produto inválido.', 400, 'INVALID_PRODUCT_PATCH');
+  }
+  const keys = Object.keys(patch);
+  if (keys.length === 0 || keys.some(key => !UPDATE_FIELDS.has(key))) {
+    throw new BlingProductError('Patch vazio ou com campo não autorizado.', 400, 'INVALID_PRODUCT_PATCH');
+  }
+  if (patch.nome !== undefined && (typeof patch.nome !== 'string' || !patch.nome.trim() || patch.nome.length > 120)) throw new BlingProductError('Nome inválido.', 400, 'INVALID_PRODUCT_PATCH');
+  if (patch.codigo !== undefined && (typeof patch.codigo !== 'string' || !patch.codigo.trim() || patch.codigo.length > 100)) throw new BlingProductError('SKU inválido.', 400, 'INVALID_PRODUCT_PATCH');
+  if (patch.preco !== undefined && (!Number.isFinite(patch.preco) || patch.preco < 0)) throw new BlingProductError('Preço inválido.', 400, 'INVALID_PRODUCT_PATCH');
+  if (patch.gtin !== undefined && (typeof patch.gtin !== 'string' || !/^(?:\d{8}|\d{12,14})$/.test(patch.gtin) || !validateEan(patch.gtin).valid)) throw new BlingProductError('GTIN inválido.', 400, 'INVALID_PRODUCT_PATCH');
+  if (patch.marca !== undefined && (typeof patch.marca !== 'string' || !patch.marca.trim() || patch.marca.length > 100)) throw new BlingProductError('Marca inválida.', 400, 'INVALID_PRODUCT_PATCH');
+  if (patch.descricaoComplementar !== undefined && (typeof patch.descricaoComplementar !== 'string' || !patch.descricaoComplementar.trim())) throw new BlingProductError('Descrição inválida.', 400, 'INVALID_PRODUCT_PATCH');
+  if (patch.pesoBruto !== undefined && (!Number.isFinite(patch.pesoBruto) || patch.pesoBruto <= 0)) throw new BlingProductError('Peso inválido.', 400, 'INVALID_PRODUCT_PATCH');
+  if (patch.dimensoes !== undefined) {
+    if (!patch.dimensoes || typeof patch.dimensoes !== 'object' || Array.isArray(patch.dimensoes) || patch.dimensoes.unidadeMedida !== 1) throw new BlingProductError('Dimensões inválidas.', 400, 'INVALID_PRODUCT_PATCH');
+    const allowed = new Set(['altura', 'largura', 'profundidade', 'unidadeMedida']);
+    if (Object.keys(patch.dimensoes).some(key => !allowed.has(key))) throw new BlingProductError('Dimensões contêm campo não autorizado.', 400, 'INVALID_PRODUCT_PATCH');
+    const values = [patch.dimensoes.altura, patch.dimensoes.largura, patch.dimensoes.profundidade].filter(value => value !== undefined);
+    if (values.length === 0 || values.some(value => !Number.isFinite(value) || (value as number) <= 0)) throw new BlingProductError('Dimensões inválidas.', 400, 'INVALID_PRODUCT_PATCH');
+  }
+  if (patch.tributacao !== undefined) {
+    if (!patch.tributacao || typeof patch.tributacao !== 'object' || Array.isArray(patch.tributacao) || Object.keys(patch.tributacao).some(key => key !== 'ncm') ||
+        typeof patch.tributacao.ncm !== 'string' || !/^\d{8}$/.test(patch.tributacao.ncm.replace(/\D/g, ''))) {
+      throw new BlingProductError('NCM inválido.', 400, 'INVALID_PRODUCT_PATCH');
+    }
   }
 }
 

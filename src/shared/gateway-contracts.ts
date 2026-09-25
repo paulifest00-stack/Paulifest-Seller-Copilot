@@ -61,6 +61,54 @@ export interface GetBlingProductResponse {
   retrievedAt: string;
 }
 
+/** Whitelist de campos que o Copilot pode alterar em um produto existente. */
+export interface BlingProductUpdatePatch {
+  nome?: string;
+  codigo?: string;
+  preco?: number;
+  gtin?: string;
+  marca?: string;
+  descricaoComplementar?: string;
+  pesoBruto?: number;
+  dimensoes?: {
+    altura?: number;
+    largura?: number;
+    profundidade?: number;
+    unidadeMedida: 1;
+  };
+  tributacao?: { ncm?: string };
+}
+
+export type BlingProductUpdateField = keyof BlingProductUpdatePatch;
+
+export interface UpdateBlingProductResponse {
+  ok: true;
+  productId: string;
+  updatedFields: BlingProductUpdateField[];
+  retrievedAt: string;
+}
+
+export interface BlingUpdateProductMessage {
+  type: 'BLING_UPDATE_PRODUCT';
+  tabId: number;
+  windowId?: number;
+  pageInstanceId: string;
+  contextRevision: number;
+  productId: string;
+  sheetId: string;
+  confirmed: true;
+  confirmedPatch: string;
+}
+
+export interface BlingUpdateProductMessageResponse {
+  ok: boolean;
+  productId?: string;
+  updatedFields?: BlingProductUpdateField[];
+  stale?: boolean;
+  remoteUpdateMayHaveCompleted?: boolean;
+  error?: string;
+}
+
 export type GatewayProductErrorCode =
   | 'UNAUTHORIZED'
   | 'SESSION_REVOKED'

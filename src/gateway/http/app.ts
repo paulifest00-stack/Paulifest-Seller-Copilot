@@ -27,6 +27,7 @@ import type {
   DisconnectResponse,
   RefreshSessionResponse
 } from '../types/contracts.ts';
+import type { BlingProductUpdatePatch } from '../../shared/gateway-contracts.ts';
 
 export interface GatewayAppOptions {
   config?: GatewayConfig;
@@ -176,7 +177,7 @@ export class GatewayApp {
 
     if (origin && isAllowed) {
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, enable-jwt');
       res.setHeader('Vary', 'Origin');
     }
@@ -250,6 +251,16 @@ export class GatewayApp {
         return;
       }
 
+      if (method === 'GET' && pathname === '/integrations/bling/products') {
+        const page = Number(parsedUrl.searchParams.get('page') || 1);
+        const query = parsedUrl.searchParams.get('query') || '';
+        const searchBy = parsedUrl.searchParams.get('searchBy') || 'name';
+        if (!Number.isSafeInteger(page) || page < 1 || page > 100000 || query.length > 120 || !['name', 'sku'].includes(searchBy)) {
+          this.sendJson(res, 400, { ok: false, error: 'INVALID_SEARCH', message: 'Busca inválida.' }); return;
+        }
+        await this.handleGetBlingProduct(req, res, clientIp, '', { query, page, searchBy: searchBy as 'name' | 'sku' });
+        return;
+      }
       // 8. GET /integrations/bling/products/:id/quick-view (Leitura rápida de custo e estoque com cache volátil)
       const quickViewMatch = pathname.match(/^\/integrations\/bling\/products\/([^\/]+)\/quick-view$/);
       if (method === 'GET' && quickViewMatch) {
@@ -263,6 +274,11 @@ export class GatewayApp {
       if (method === 'GET' && productMatch) {
         const productId = decodeURIComponent(productMatch[1]);
         await this.handleGetBlingProduct(req, res, clientIp, productId);
+        return;
+      }
+      if (method === 'PATCH' && productMatch) {
+        const productId = decodeURIComponent(productMatch[1]);
+        await this.handleUpdateBlingProduct(req, res, clientIp, productId);
         return;
       }
 
@@ -738,7 +754,8 @@ export class GatewayApp {
     req: IncomingMessage,
     res: ServerResponse,
     clientIp: string,
-    productId: string
+    productId: string,
+    search?: { query: string; page: number; searchBy: 'name' | 'sku' }
   ): Promise<void> {
     // 1. Rate Limiting defensivo por IP
     const rateCheck = productReadLimiter.check(clientIp);
@@ -800,6 +817,14 @@ export class GatewayApp {
 
     // 4. Execução autenticada via BlingTokenManager (com auto-refresh se 401 do Bling)
     try {
+      if (search) {
+        const result = await this.tokenManager.executeWithBlingAuth(auth.connectionId,
+          token => this.productClient.searchProducts(search.query, search.page, search.searchBy, token));
+        const live = await this.authenticateWithGst(req, res);
+        if (!live) return;
+        this.sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
       const productResult = await this.tokenManager.executeWithBlingAuth(
         auth.connectionId,
         async (accessToken) => {
@@ -1076,6 +1101,68 @@ export class GatewayApp {
       });
     } finally {
       this.quickViewCache.endRead(ticket);
+    }
+  }
+
+  private async handleUpdateBlingProduct(
+    req: IncomingMessage,
+    res: ServerResponse,
+    clientIp: string,
+    productId: string
+  ): Promise<void> {
+    const trimmedId = productId.trim();
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(trimmedId)) {
+      this.sendJson(res, 400, { ok: false, error: 'INVALID_PRODUCT_ID', message: 'ID do produto inválido.' });
+      return;
+    }
+    const rateCheck = productReadLimiter.check(`write:${clientIp}`);
+    if (!rateCheck.allowed) {
+      this.sendJson(res, 429, { ok: false, error: 'BLING_RATE_LIMITED', message: 'Muitas atualizações de produto.', retryAfterMs: rateCheck.resetInMs });
+      return;
+    }
+    const auth = await this.authenticateWithGst(req, res);
+    if (!auth) return;
+    const connRateCheck = productReadLimiter.check(`write:conn:${auth.connectionId}`);
+    if (!connRateCheck.allowed) {
+      this.sendJson(res, 429, { ok: false, error: 'BLING_RATE_LIMITED', message: 'Muitas atualizações para esta conexão.', retryAfterMs: connRateCheck.resetInMs });
+      return;
+    }
+    const body = await this.readJsonBody(req) as BlingProductUpdatePatch | null;
+    if (!body) {
+      this.sendJson(res, 400, { ok: false, error: 'INVALID_PRODUCT_PATCH', message: 'Corpo JSON inválido.' });
+      return;
+    }
+    const connection = await this.repository.getConnection(auth.connectionId);
+    if (!connection || connection.status !== 'connected') {
+      this.sendJson(res, 401, { ok: false, error: connection?.status === 'requires_reauth' ? 'REQUIRES_REAUTH' : 'CONNECTION_DISCONNECTED', message: 'Conexão Bling indisponível.' });
+      return;
+    }
+
+    try {
+      const result = await this.tokenManager.executeWithBlingAuth(
+        auth.connectionId,
+        accessToken => this.productClient.updateProduct(trimmedId, body, accessToken)
+      );
+      const currentConnection = await this.repository.getConnection(auth.connectionId);
+      const currentSession = auth.sessionId ? await this.repository.getSession(auth.sessionId) : null;
+      if (currentConnection?.status !== 'connected' || !currentSession || currentSession.revokedAt || currentSession.connectionId !== auth.connectionId) {
+        this.sendJson(res, 401, { ok: false, error: 'SESSION_REVOKED', message: 'Sessão alterada durante a atualização; confirme o estado do produto no Bling.' });
+        return;
+      }
+      this.quickViewCache.invalidate(auth.connectionId, trimmedId);
+      this.sendJson(res, 200, result);
+    } catch (err: any) {
+      if (err instanceof BlingReauthRequiredError) {
+        this.sendJson(res, 401, { ok: false, error: 'REQUIRES_REAUTH', message: err.message });
+        return;
+      }
+      if (err instanceof BlingProductError) {
+        const status = err.status >= 500 && err.status !== 504 ? 502 : err.status;
+        this.sendJson(res, status, { ok: false, error: err.code, message: err.message, retryAfterMs: err.retryAfterMs });
+        return;
+      }
+      gatewayLogger.error(`[GatewayHttpApp] Erro ao atualizar produto #${trimmedId}:`, err?.message || err);
+      this.sendJson(res, 500, { ok: false, error: 'INTERNAL_ERROR', message: 'Erro interno ao atualizar produto no Bling.' });
     }
   }
 
