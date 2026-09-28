@@ -78,7 +78,6 @@ import type {
     const spaObserver = new BlingSpaObserver({
       debounceMs: 300,
       onContextDetected: (context) => {
-        costField.setTarget(context.pageType==='product_form_edit'?context.detectedProduct?.id:undefined);
         const domPayload: ContentToBackgroundEnvelope<BlingDomContextPayload> = {
           type: 'BLING_DOM_CONTEXT_DETECTED',
           pageInstanceId,
@@ -94,17 +93,31 @@ import type {
           console.debug('[Paulifest Copilot] Erro ao emitir contexto detectado:', err);
         });
 
-        // Ativação da coluna de Preço de Custo na Listagem de Produtos
-        if (context.pageType === 'product_list') {
-          listCostInjector.start();
-        } else {
-          listCostInjector.destroy();
+        try {
+          costField.setTarget(context.pageType === 'product_form_edit' ? context.detectedProduct?.id : undefined);
+        } catch (err) {
+          console.error('[Paulifest Copilot] Erro em costField:', err);
         }
 
-        if (context.pageType === 'product_form_edit' || context.pageType === 'product_form_new') {
-          formAssistant.start();
-        } else {
-          formAssistant.destroy();
+        try {
+          // Ativação da coluna de Preço de Custo na Listagem de Produtos
+          if (context.pageType !== 'product_form_edit' && context.pageType !== 'product_form_new') {
+            listCostInjector.start();
+          } else {
+            listCostInjector.destroy();
+          }
+        } catch (err) {
+          console.error('[Paulifest Copilot] Erro em listCostInjector:', err);
+        }
+
+        try {
+          if (context.pageType === 'product_form_edit' || context.pageType === 'product_form_new') {
+            formAssistant.start();
+          } else {
+            formAssistant.destroy();
+          }
+        } catch (err) {
+          console.error('[Paulifest Copilot] Erro em formAssistant:', err);
         }
 
 

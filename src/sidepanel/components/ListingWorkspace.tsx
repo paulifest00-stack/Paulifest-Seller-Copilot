@@ -6,14 +6,16 @@ import { ProductPhoto } from './ProductPhoto.tsx';
 import { PanelDialog } from './PanelDialog.tsx';
 import { loadSellerPreferences } from '../../core/storage/storage.ts';
 import { generateKeywords, applyKeywords, generateProductContent } from '../../core/services/product-content.ts';
+import { assignGeneratedEan } from '../../core/engines/identification/ean-generator.ts';
 import { prepareBlingSheetForMlExport } from '../../core/engines/identification/sheet-adapter.ts';
-import { Copy, Sparkles, Eye } from 'lucide-react';
+import { Copy, Check, Sparkles, Eye, Barcode } from 'lucide-react';
 
 export function ListingWorkspace({ sheet, onBack, onUpdateSheet }: {
   sheet: CentralProductSheet; onBack: () => void;
   onUpdateSheet: (fn: (sheet: CentralProductSheet) => CentralProductSheet) => void;
 }) {
   const [message, setMessage] = useState(''), [preview, setPreview] = useState(false), [busy, setBusy] = useState(false);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
   const live = useRef(sheet); live.current = sheet;
   const mounted = useRef(true), lock = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -27,9 +29,20 @@ export function ListingWorkspace({ sheet, onBack, onUpdateSheet }: {
     }
   }, [sheet.id]);
 
-  const copy = async (text: string, label = 'Copiado para a área de transferência.') => {
-    try { await navigator.clipboard.writeText(text); setMessage(label); }
-    catch { setMessage('Não foi possível copiar. Selecione o texto na ficha.'); }
+  const copy = async (text: string, label = 'Copiado para a área de transferência.', fieldKey?: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage(label);
+      if (fieldKey) {
+        setCopiedField(fieldKey);
+        setTimeout(() => {
+          if (mounted.current) setCopiedField(prev => (prev === fieldKey ? null : prev));
+        }, 1500);
+      }
+    } catch {
+      setMessage('Não foi possível copiar. Selecione o texto na ficha.');
+    }
   };
 
   const generate = async (mode: 'keywords' | 'bling' | 'complete') => {
@@ -77,28 +90,150 @@ export function ListingWorkspace({ sheet, onBack, onUpdateSheet }: {
   };
 
   return <section className="space-y-2.5 text-xs">
-    {/* Barra minimalista de resumo e exportação rápida */}
-    <div className="rounded-xl border border-black/[0.08] bg-white px-3 py-2 flex items-center justify-between gap-2">
-      <div className="min-w-0 text-[11px] text-[#6e6e73] truncate font-mono">
-        {sheet.sku.value || 'Sem SKU'}
-        {sheet.ncm.value ? ` · NCM ${sheet.ncm.value}` : ''}
-        {effectivePrice != null ? ` · R$ ${effectivePrice.toFixed(2).replace('.', ',')}` : ''}
+    {/* Painel de cópia rápida: SKU, Código de Barras (EAN) e NCM */}
+    <div className="rounded-xl border border-black/[0.08] bg-white p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Barcode className="w-3.5 h-3.5 text-[#0071e3] flex-shrink-0" />
+          <span className="font-semibold text-xs text-[#1d1d1f] truncate">
+            Códigos para Exportação ML
+          </span>
+          {effectivePrice != null && (
+            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/60 px-1.5 py-0.5 rounded">
+              R$ {effectivePrice.toFixed(2).replace('.', ',')}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <button
+            type="button"
+            onClick={() => void copy(buildCompleteExportText(), 'Pacote completo copiado!', 'all')}
+            className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold flex items-center gap-1"
+            title="Copiar Título ML, SKU, EAN, NCM, Ficha Técnica e Descrição"
+          >
+            {copiedField === 'all' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+            <span>{copiedField === 'all' ? 'Copiado!' : 'Copiar tudo'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPreview(true)}
+            className="px-2 py-1 rounded-lg border border-black/[0.1] bg-white hover:bg-slate-50 text-[11px] font-medium flex items-center gap-1"
+          >
+            <Eye className="w-3 h-3 text-[#0071e3]" />
+            <span>Prévia</span>
+          </button>
+        </div>
       </div>
-      <div className="flex items-center gap-1.5 flex-shrink-0">
+
+      <div className="grid grid-cols-3 gap-1.5">
+        {/* Card SKU */}
         <button
-          onClick={() => void copy(buildCompleteExportText(), 'Pacote completo copiado!')}
-          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold flex items-center gap-1"
-          title="Copiar Título ML, SKU, EAN, NCM, Ficha Técnica e Descrição"
+          type="button"
+          disabled={!sheet.sku.value}
+          onClick={() => void copy(sheet.sku.value, `SKU "${sheet.sku.value}" copiado!`, 'sku')}
+          title={sheet.sku.value ? `Clique para copiar o SKU: ${sheet.sku.value}` : 'SKU não preenchido'}
+          className="text-left rounded-lg border border-black/[0.08] bg-slate-50/70 hover:bg-blue-50/60 hover:border-[#0071e3]/40 disabled:opacity-50 disabled:hover:bg-slate-50/70 p-2 transition-all group"
         >
-          <Copy className="w-3 h-3" />
-          <span>Copiar tudo</span>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#6e6e73]">
+              SKU
+            </span>
+            <span className="text-[10px] text-[#0071e3] font-medium flex items-center gap-0.5">
+              {copiedField === 'sku' ? (
+                <>
+                  <Check className="w-2.5 h-2.5 text-emerald-600" />
+                  <span className="text-emerald-700 font-semibold">Copiado</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-2.5 h-2.5 opacity-70 group-hover:opacity-100" />
+                  <span>Copiar</span>
+                </>
+              )}
+            </span>
+          </div>
+          <div className="mt-1 font-mono text-[11px] font-bold text-[#1d1d1f] truncate select-text">
+            {sheet.sku.value || 'Sem SKU'}
+          </div>
         </button>
+
+        {/* Card Código de Barras (EAN/GTIN) */}
+        <div className="rounded-lg border border-black/[0.08] bg-slate-50/70 hover:bg-blue-50/60 hover:border-[#0071e3]/40 p-2 transition-all flex flex-col justify-between">
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#6e6e73] truncate" title="Código de Barras (EAN/GTIN)">
+              Cód. Barras
+            </span>
+            {sheet.ean.value ? (
+              <button
+                type="button"
+                onClick={() => void copy(sheet.ean.value, `Código de barras "${sheet.ean.value}" copiado!`, 'ean')}
+                className="text-[10px] text-[#0071e3] hover:underline font-medium flex items-center gap-0.5 flex-shrink-0"
+              >
+                {copiedField === 'ean' ? (
+                  <>
+                    <Check className="w-2.5 h-2.5 text-emerald-600" />
+                    <span className="text-emerald-700 font-semibold">Copiado</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-2.5 h-2.5" />
+                    <span>Copiar</span>
+                  </>
+                )}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  onUpdateSheet(prev => assignGeneratedEan({ ...prev, ean: createAuditedField('', 'user_manual', 0, 'missing') }));
+                  setMessage('EAN-13 gerado e pronto para copiar.');
+                }}
+                className="text-[10px] text-[#0071e3] hover:underline font-semibold flex-shrink-0"
+              >
+                Gerar EAN
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            disabled={!sheet.ean.value}
+            onClick={() => void copy(sheet.ean.value, `Código de barras "${sheet.ean.value}" copiado!`, 'ean')}
+            title={sheet.ean.value ? `Clique para copiar o Código de Barras: ${sheet.ean.value}` : 'Código de barras não preenchido'}
+            className="mt-1 text-left font-mono text-[11px] font-bold text-[#1d1d1f] truncate select-text disabled:text-[#86868b]"
+          >
+            {sheet.ean.value || 'Sem EAN'}
+          </button>
+        </div>
+
+        {/* Card NCM */}
         <button
-          onClick={() => setPreview(true)}
-          className="px-2 py-1 rounded-lg border border-black/[0.1] bg-white hover:bg-slate-50 text-[11px] font-medium flex items-center gap-1"
+          type="button"
+          disabled={!sheet.ncm.value}
+          onClick={() => void copy(sheet.ncm.value, `NCM "${sheet.ncm.value}" copiado!`, 'ncm')}
+          title={sheet.ncm.value ? `Clique para copiar o NCM: ${sheet.ncm.value}` : 'NCM não preenchido'}
+          className="text-left rounded-lg border border-black/[0.08] bg-slate-50/70 hover:bg-blue-50/60 hover:border-[#0071e3]/40 disabled:opacity-50 disabled:hover:bg-slate-50/70 p-2 transition-all group"
         >
-          <Eye className="w-3 h-3 text-[#0071e3]" />
-          <span>Prévia</span>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#6e6e73]">
+              NCM
+            </span>
+            <span className="text-[10px] text-[#0071e3] font-medium flex items-center gap-0.5">
+              {copiedField === 'ncm' ? (
+                <>
+                  <Check className="w-2.5 h-2.5 text-emerald-600" />
+                  <span className="text-emerald-700 font-semibold">Copiado</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-2.5 h-2.5 opacity-70 group-hover:opacity-100" />
+                  <span>Copiar</span>
+                </>
+              )}
+            </span>
+          </div>
+          <div className="mt-1 font-mono text-[11px] font-bold text-[#1d1d1f] truncate select-text">
+            {sheet.ncm.value || 'Sem NCM'}
+          </div>
         </button>
       </div>
     </div>
@@ -111,11 +246,21 @@ export function ListingWorkspace({ sheet, onBack, onUpdateSheet }: {
         </label>
         <div className="flex items-center gap-2">
           <button
-            disabled={sheet.title.status === 'conflict'}
-            onClick={() => void copy(sheet.title.value, 'Título ML copiado!')}
-            className="text-[10px] text-[#0071e3] hover:underline font-medium"
+            disabled={sheet.title.status === 'conflict' || !sheet.title.value}
+            onClick={() => void copy(sheet.title.value, 'Título ML copiado!', 'title')}
+            className="text-[10px] text-[#0071e3] hover:underline font-medium flex items-center gap-0.5 disabled:opacity-40"
           >
-            Copiar
+            {copiedField === 'title' ? (
+              <>
+                <Check className="w-2.5 h-2.5 text-emerald-600" />
+                <span className="text-emerald-700 font-semibold">Copiado!</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-2.5 h-2.5" />
+                <span>Copiar</span>
+              </>
+            )}
           </button>
           <span className={`font-mono text-[10px] px-1.5 py-0.5 rounded ${count > 60 ? 'bg-red-100 text-red-700 font-bold' : 'bg-slate-100 text-slate-600'}`}>
             {count}/60
@@ -220,6 +365,35 @@ export function ListingWorkspace({ sheet, onBack, onUpdateSheet }: {
               ? 'Sem preço'
               : effectivePrice.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
           </p>
+          <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+            <button
+              type="button"
+              disabled={!sheet.sku.value}
+              onClick={() => void copy(sheet.sku.value, `SKU "${sheet.sku.value}" copiado!`, 'sku')}
+              className="text-left rounded-lg border border-black/[0.08] bg-slate-50 p-2 hover:bg-blue-50 disabled:opacity-50"
+            >
+              <span className="text-[9.5px] font-semibold uppercase text-[#6e6e73] block">SKU</span>
+              <span className="font-mono font-bold text-[#1d1d1f] truncate block select-text">{sheet.sku.value || 'Sem SKU'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={!sheet.ean.value}
+              onClick={() => void copy(sheet.ean.value, `Código de barras "${sheet.ean.value}" copiado!`, 'ean')}
+              className="text-left rounded-lg border border-black/[0.08] bg-slate-50 p-2 hover:bg-blue-50 disabled:opacity-50"
+            >
+              <span className="text-[9.5px] font-semibold uppercase text-[#6e6e73] block">Cód. Barras</span>
+              <span className="font-mono font-bold text-[#1d1d1f] truncate block select-text">{sheet.ean.value || 'Sem EAN'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={!sheet.ncm.value}
+              onClick={() => void copy(sheet.ncm.value, `NCM "${sheet.ncm.value}" copiado!`, 'ncm')}
+              className="text-left rounded-lg border border-black/[0.08] bg-slate-50 p-2 hover:bg-blue-50 disabled:opacity-50"
+            >
+              <span className="text-[9.5px] font-semibold uppercase text-[#6e6e73] block">NCM</span>
+              <span className="font-mono font-bold text-[#1d1d1f] truncate block select-text">{sheet.ncm.value || 'Sem NCM'}</span>
+            </button>
+          </div>
           <p className="whitespace-pre-wrap select-text text-xs">{sheet.descriptionPlain.value}</p>
         </div>
       </PanelDialog>

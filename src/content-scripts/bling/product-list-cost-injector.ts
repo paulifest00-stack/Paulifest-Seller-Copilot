@@ -72,7 +72,27 @@ export function extractProductIdFromRow(row: HTMLElement): string | null {
     }
   }
 
-  // 6. Propriedades internas de frameworks (Vue / React / jQuery data) na linha <tr>
+  // 6. Qualquer atributo (id, value, onclick, href, data-*) na linha ou em seus elementos filhos contendo um ID numérico de 7 a 16 dígitos do Bling
+  try {
+    if (typeof row.querySelectorAll === 'function') {
+      const elements = [row, ...Array.from(row.querySelectorAll('*'))];
+      for (const el of elements) {
+        if (!el.attributes) continue;
+        for (let a = 0; a < el.attributes.length; a++) {
+          const attr = el.attributes[a];
+          if (!attr?.value) continue;
+          const n = attr.name.toLowerCase();
+          if (n === 'class' || n === 'style' || n === 'src' || n === 'viewbox' || n === 'd') continue;
+          const m = attr.value.match(/(?:^|[^0-9])([1-9]\d{6,15})(?:$|[^0-9])/);
+          if (m?.[1] && isValidProductId(m[1])) {
+            return m[1];
+          }
+        }
+      }
+    }
+  } catch {}
+
+  // 7. Propriedades internas de frameworks (Vue / React / jQuery data) na linha <tr>
   try {
     const anyRow = row as any;
     const candidates = [
@@ -118,6 +138,135 @@ function extractCleanCellText(cell: Element | undefined | null): string {
 }
 
 /**
+ * Localiza o cabeçalho e as linhas da listagem de produtos no Bling,
+ * suportando tanto <table> única quanto <table> separadas (scrollHead/scrollBody) ou grids baseados em <div>.
+ */
+interface DetectedProductGrid {
+  headerRow: HTMLElement;
+  bodyRows: HTMLElement[];
+  tableElement: HTMLTableElement | null;
+}
+
+function findHeaderRow(root: Document | HTMLElement): HTMLElement | null {
+  if (typeof root.querySelectorAll !== 'function') return null;
+  const allRows = root.querySelectorAll<HTMLElement>('thead tr, tr, [role="row"], .datatable-header, .table-header');
+  for (let i = 0; i < allRows.length; i++) {
+    const tr = allRows[i];
+    if (tr.querySelector(`#${HEADER_ID}`)) return tr;
+    const texts = Array.from(tr.children).map(c => (c.textContent || '').trim().toLowerCase());
+    const hasDesc = texts.some(t => t.includes('descri'));
+    const hasPriceOrCode = texts.some(t => t.includes('código') || t.includes('codigo') || t.includes('preço') || t.includes('preco') || t.includes('custo'));
+    if (hasDesc && hasPriceOrCode) {
+      return tr;
+    }
+  }
+
+  // Busca direta pelo elemento de texto "Preço de Custo" ou "Descrição" visível na página
+  const leafCandidates = root.querySelectorAll<HTMLElement>('th, td, div, span');
+  for (let i = 0; i < leafCandidates.length; i++) {
+    const el = leafCandidates[i];
+    if (el.children.length > 2) continue;
+    const txt = (el.textContent || '').trim().toLowerCase();
+    if (txt === 'preço de custo' || txt === 'preco de custo') {
+      let parent = el.parentElement;
+      for (let depth = 0; depth < 4 && parent; depth++) {
+        const childTexts = Array.from(parent.children).map(c => (c.textContent || '').trim().toLowerCase());
+        if (childTexts.some(t => t.includes('descri')) && childTexts.some(t => t.includes('custo'))) {
+          return parent;
+        }
+        parent = parent.parentElement;
+      }
+    }
+  }
+
+  return allRows[0] || null;
+}
+
+function detectProductGrid(root: Document | HTMLElement = document): DetectedProductGrid | null {
+  const tbl = findProductTable(root);
+  if (tbl) {
+    const headerRow = findHeaderRow(tbl) || findHeaderRow(root);
+    if (headerRow) {
+      const tbodyRows = Array.from(tbl.querySelectorAll<HTMLElement>('tbody tr'));
+      const rows = tbodyRows.length > 0
+        ? tbodyRows
+        : Array.from(tbl.querySelectorAll<HTMLElement>('tr')).filter(r => r !== headerRow);
+      if (rows.length > 0) {
+        return { headerRow, bodyRows: rows, tableElement: tbl };
+      }
+    }
+  }
+
+  // Fallback Universal: encontra a linha de cabeçalho ("Descrição" + "Preço" / "Preço de Custo") em qualquer estrutura DOM
+  const headerRow = findHeaderRow(root);
+  if (!headerRow) return null;
+  const headerTexts = Array.from(headerRow.children).map(c => (c.textContent || '').trim().toLowerCase());
+  const hasDesc = headerTexts.some(t => t.includes('descri'));
+  const hasPriceOrCost = headerTexts.some(t => t.includes('preço') || t.includes('preco') || t.includes('custo') || t.includes('código') || t.includes('codigo'));
+  if (!hasDesc || !hasPriceOrCost) return null;
+
+  // 1. Procura linhas <tr> em qualquer <tbody> da página que tenham células suficientes
+  const allTbodyTrs = Array.from(root.querySelectorAll<HTMLElement>('tbody tr')).filter(
+    tr => tr !== headerRow && tr.children.length >= 4
+  );
+  if (allTbodyTrs.length > 0) {
+    return { headerRow, bodyRows: allTbodyTrs, tableElement: allTbodyTrs[0].closest('table') };
+  }
+
+  // 2. Procura linhas baseadas em <div> ou <tr> que contenham checkbox de seleção de linha
+  const checkboxes = Array.from(root.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+  const detectedRows: HTMLElement[] = [];
+  const seen = new Set<HTMLElement>();
+  for (const cb of checkboxes) {
+    if (headerRow.contains(cb)) continue;
+    const rowCandidate = cb.closest<HTMLElement>('tr, [role="row"]') || (() => {
+      let p = cb.parentElement;
+      for (let d = 0; d < 4 && p; d++) {
+        if (p.children.length >= 5 && p !== document.body) return p;
+        p = p.parentElement;
+      }
+      return null;
+    })();
+    if (rowCandidate && !seen.has(rowCandidate) && !rowCandidate.contains(headerRow)) {
+      seen.add(rowCandidate);
+      detectedRows.push(rowCandidate);
+    }
+  }
+  if (detectedRows.length > 0) {
+    return { headerRow, bodyRows: detectedRows, tableElement: detectedRows[0].closest('table') };
+  }
+
+  return null;
+}
+
+function bindCostCellIsolation(td: HTMLElement): void {
+  if (td.getAttribute('data-paulifest-isolated') === 'true') return;
+  td.setAttribute('data-paulifest-isolated', 'true');
+  td.removeAttribute('onclick');
+  td.style.cursor = 'pointer';
+
+  for (const evtName of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'touchstart', 'touchend']) {
+    td.addEventListener(evtName, (e) => {
+      const target = e.target as HTMLElement | null;
+      if (!target || !target.closest('.paulifest-cost-editor')) {
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        if (evtName === 'click') {
+          e.preventDefault();
+          const editor = td.querySelector('.paulifest-cost-editor') as (HTMLElement & { openEditor?: () => void }) | null;
+          editor?.openEditor?.();
+        }
+      }
+    }, true);
+
+    td.addEventListener(evtName, (e) => {
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+    }, false);
+  }
+}
+
+/**
  * Encontra a tabela principal de produtos na página.
  */
 export function findProductTable(root: Document | HTMLElement = document): HTMLTableElement | null {
@@ -140,10 +289,9 @@ export function findProductTable(root: Document | HTMLElement = document): HTMLT
     }
   }
 
-  // Fallback para a listagem moderna do Bling (onde as linhas <tr> possuem Descrição/Código/Preço mas não expõem data-id inicialmente)
   for (let i = 0; i < candidates.length; i++) {
     const tbl = candidates[i];
-    const headerRow = tbl.querySelector('thead tr') || tbl.querySelector('tr');
+    const headerRow = findHeaderRow(tbl);
     if (!headerRow) continue;
     const headerTexts = Array.from(headerRow.children).map(th => (th.textContent || '').toLowerCase());
     const hasDesc = headerTexts.some(t => t.includes('descri'));
@@ -175,6 +323,7 @@ export class ProductListCostInjector {
   private pageInstanceId: string;
   private observer: MutationObserver | null = null;
   private debounceTimer: number | null = null;
+  private pollInterval: number | null = null;
   private knownCosts = new Map<string, number | null>();
   private costRevisions = new Map<string, number>();
   private pendingIds = new Set<string>();
@@ -193,16 +342,23 @@ export class ProductListCostInjector {
   start(): void {
     if (this.observer) return;
     this.isDestroyed = false;
-    this.scanAndInject();
+    try {
+      this.scanAndInject();
+    } catch (err) {
+      console.error('[Paulifest Copilot] Erro ao iniciar injetor de custo:', err);
+    }
 
-    // Observa mudanças de paginação AJAX ou filtros no DOM do Bling
     this.observer = new MutationObserver(() => {
       if (this.isDestroyed) return;
       if (this.debounceTimer !== null) {
         window.clearTimeout(this.debounceTimer);
       }
       this.debounceTimer = window.setTimeout(() => {
-        this.scanAndInject();
+        try {
+          this.scanAndInject();
+        } catch (err) {
+          console.error('[Paulifest Copilot] Erro ao atualizar custo na tabela:', err);
+        }
       }, 250);
     });
 
@@ -216,6 +372,14 @@ export class ProductListCostInjector {
         subtree: true
       });
     }
+
+    // Verificação periódica para capturar tabelas renderizadas em iframes ou após transições assíncronas do Bling
+    this.pollInterval = window.setInterval(() => {
+      if (this.isDestroyed) return;
+      try {
+        this.scanAndInject();
+      } catch {}
+    }, 1200);
   }
 
   /**
@@ -227,6 +391,10 @@ export class ProductListCostInjector {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    if (this.pollInterval !== null) {
+      window.clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
@@ -235,20 +403,216 @@ export class ProductListCostInjector {
     this.knownCosts.clear();
   }
 
+  private resolveCellByColIndexOrGeometry(
+    row: HTMLElement,
+    colIndex: number,
+    headerCell: HTMLElement | undefined,
+    totalHeaderCols: number
+  ): HTMLElement | null {
+    if (colIndex < 0) return null;
+    // Se a linha tiver a mesma contagem de colunas (ou próxima), usa o índice direto
+    if (colIndex < row.children.length && Math.abs(row.children.length - totalHeaderCols) <= 1) {
+      return row.children[colIndex] as HTMLElement;
+    }
+    // Fallback geométrico: encontra a célula na linha cujo eixo X está alinhado sob o cabeçalho
+    if (headerCell && typeof headerCell.getBoundingClientRect === 'function') {
+      const hRect = headerCell.getBoundingClientRect();
+      if (hRect.width > 0) {
+        const hCenter = (hRect.left + hRect.right) / 2;
+        let bestCell: HTMLElement | null = null;
+        let bestDist = Infinity;
+        for (let i = 0; i < row.children.length; i++) {
+          const cell = row.children[i] as HTMLElement;
+          const cRect = cell.getBoundingClientRect();
+          if (cRect.width === 0) continue;
+          const cCenter = (cRect.left + cRect.right) / 2;
+          const dist = Math.abs(cCenter - hCenter);
+          if (dist < bestDist && dist < Math.max(hRect.width, 90)) {
+            bestDist = dist;
+            bestCell = cell;
+          }
+        }
+        if (bestCell) return bestCell;
+      }
+    }
+    return (row.children[colIndex] as HTMLElement) || null;
+  }
+
+  /**
+   * Fallback Geométrico Universal:
+   * Localiza o texto visível "Preço de Custo" no cabeçalho pela coordenada X na tela (getBoundingClientRect)
+   * e transforma todas as células numéricas ("19,00", "20,00", "5,40", "0,00"...) alinhadas verticalmente abaixo dele,
+   * independentemente de o Bling usar <table>, múltiplas <table>s, CSS Grid ou <div>s aninhadas.
+   */
+  private scanByVisualColumnCoordinates(root: Document): number {
+    if (typeof root.querySelectorAll !== 'function') return 0;
+    const allElements = Array.from(root.querySelectorAll<HTMLElement>('th, td, div, span, label, p'));
+
+    let costHeaderEl: HTMLElement | null = null;
+    let costHeaderRect: DOMRect | null = null;
+
+    for (const el of allElements) {
+      if (el.children.length > 2) continue;
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (text === 'preço de custo' || text === 'preco de custo') {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 10 && rect.height > 8) {
+          costHeaderEl = el;
+          costHeaderRect = rect;
+          break;
+        }
+      }
+    }
+
+    if (!costHeaderEl || !costHeaderRect) return 0;
+
+    const costCenterX = (costHeaderRect.left + costHeaderRect.right) / 2;
+    const headerCenterY = (costHeaderRect.top + costHeaderRect.bottom) / 2;
+
+    // Localiza também as colunas "Código" e "Descrição" na mesma linha horizontal do cabeçalho
+    let skuHeaderRect: DOMRect | null = null;
+    let descHeaderRect: DOMRect | null = null;
+
+    for (const el of allElements) {
+      if (el.children.length > 2) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 10 || Math.abs((rect.top + rect.bottom) / 2 - headerCenterY) > 24) continue;
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!skuHeaderRect && (text === 'código' || text === 'codigo' || text === 'sku')) {
+        skuHeaderRect = rect;
+      } else if (!descHeaderRect && (text === 'descrição' || text === 'descricao')) {
+        descHeaderRect = rect;
+      }
+    }
+
+    // Encontra todas as células de valor de custo alinhadas abaixo de "Preço de Custo"
+    let transformed = 0;
+    for (const el of allElements) {
+      if (el === costHeaderEl || el.contains(costHeaderEl)) continue;
+      if (el.classList.contains(CELL_CLASS) || el.closest(`.${CELL_CLASS}, .paulifest-cost-editor`)) continue;
+      // Prefere o elemento mais específico (folha) que contém o número
+      if (el.children.length > 0) continue;
+
+      const rawText = (el.textContent || '').trim();
+      if (!/^(?:R\$\s*)?\d+(?:\.\d{3})*,\d{2}$/.test(rawText) && rawText !== '-') continue;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8 || rect.top <= costHeaderRect.bottom) continue;
+
+      const elCenterX = (rect.left + rect.right) / 2;
+      if (Math.abs(elCenterX - costCenterX) > Math.max(costHeaderRect.width * 0.85, 65)) continue;
+
+      const elCenterY = (rect.top + rect.bottom) / 2;
+
+      // Localiza o container da linha e extrai Código (SKU) e Descrição na mesma linha horizontal (Y)
+      const rowContainer = el.closest<HTMLElement>('tr, [role="row"]') || (() => {
+        let p = el.parentElement;
+        for (let d = 0; d < 6 && p; d++) {
+          const r = p.getBoundingClientRect();
+          if (r.width > 400 && r.height < 110) return p;
+          p = p.parentElement;
+        }
+        return el.parentElement || el;
+      })();
+
+      let rowSku = '';
+      let rowName = '';
+
+      if (skuHeaderRect || descHeaderRect) {
+        const skuCenterX = skuHeaderRect ? (skuHeaderRect.left + skuHeaderRect.right) / 2 : -9999;
+        const descCenterX = descHeaderRect ? (descHeaderRect.left + descHeaderRect.right) / 2 : -9999;
+        const rowCandidates = Array.from(rowContainer.querySelectorAll<HTMLElement>('td, div, span, a, p'));
+        for (const cand of rowCandidates) {
+          if (cand === el || cand.contains(el) || cand.children.length > 2) continue;
+          const cRect = cand.getBoundingClientRect();
+          if (cRect.width < 5 || Math.abs((cRect.top + cRect.bottom) / 2 - elCenterY) > 28) continue;
+          const cText = extractCleanCellText(cand);
+          if (!cText) continue;
+          if (!rowSku && skuHeaderRect && Math.abs(cRect.left - skuHeaderRect.left) < 90 && Math.abs((cRect.left + cRect.right) / 2 - skuCenterX) < 110) {
+            rowSku = cText;
+          } else if (!rowName && descHeaderRect && Math.abs(cRect.left - descHeaderRect.left) < 120 && Math.abs((cRect.left + cRect.right) / 2 - descCenterX) < 220) {
+            rowName = cText;
+          }
+        }
+      }
+
+      let productId = extractProductIdFromRow(rowContainer);
+      if (!productId && rowSku && this.skuToProductId.has(rowSku.toUpperCase())) {
+        productId = this.skuToProductId.get(rowSku.toUpperCase()) || null;
+      }
+      if (!productId && rowName && this.nameToProductId.has(rowName.toUpperCase())) {
+        productId = this.nameToProductId.get(rowName.toUpperCase()) || null;
+      }
+      if (productId) {
+        rowContainer.setAttribute('data-product-id', productId);
+      } else {
+        void this.preloadCatalogIds();
+      }
+
+      const rowKey = productId || (rowSku ? `sku:${rowSku.toUpperCase()}` : rowName ? `name:${rowName.toUpperCase()}` : `y:${Math.round(elCenterY)}`);
+      const initialCost = parseCellBrlNumber(rawText);
+      if (initialCost !== null && !this.knownCosts.has(rowKey)) {
+        this.knownCosts.set(rowKey, initialCost);
+        if (productId) this.knownCosts.set(productId, initialCost);
+      }
+
+      const targetCell = (el.tagName.toLowerCase() === 'td' ? el : (el.closest('td') || el)) as HTMLElement;
+      targetCell.classList.add(CELL_CLASS);
+      if (productId) targetCell.setAttribute('data-product-id', productId);
+      targetCell.textContent = '';
+      bindCostCellIsolation(targetCell);
+
+      const span = document.createElement('span');
+      span.className = 'paulifest-cost-text';
+      span.style.display = 'none';
+      this.applyCostToElement(span, this.knownCosts.get(productId || rowKey) ?? initialCost);
+      targetCell.appendChild(span);
+
+      this.mountCostEditor(targetCell, rowContainer, rowKey, rowSku, rowName);
+      transformed++;
+    }
+
+    return transformed;
+  }
+
   /**
    * Realiza a varredura da tabela, inserção/reuso da coluna Preço de Custo e ativação da edição inline.
    */
   scanAndInject(): InjectionResult {
-    const table = findProductTable();
-    if (!table) {
-      return { injectedCount: 0, productIds: [] };
+    // 1. Executa primeiro o pareamento geométrico visual da coluna "Preço de Custo" se ela já estiver visível na tela
+    let visualCount = 0;
+    if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
+      try {
+        visualCount += this.scanByVisualColumnCoordinates(document);
+        const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe');
+        for (let i = 0; i < iframes.length; i++) {
+          try {
+            if (iframes[i].contentDocument) {
+              visualCount += this.scanByVisualColumnCoordinates(iframes[i].contentDocument!);
+            }
+          } catch {}
+        }
+      } catch {}
     }
 
-    const headerRow = table.querySelector('thead tr') || table.querySelector('tr');
-    if (!headerRow) {
-      return { injectedCount: 0, productIds: [] };
+    let grid = detectProductGrid(document);
+    if (!grid && typeof document.querySelectorAll === 'function') {
+      const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe');
+      for (let i = 0; i < iframes.length; i++) {
+        try {
+          const subDoc = iframes[i].contentDocument;
+          if (subDoc) {
+            grid = detectProductGrid(subDoc);
+            if (grid) break;
+          }
+        } catch {}
+      }
+    }
+    if (!grid) {
+      return { injectedCount: visualCount, productIds: [] };
     }
 
+    const { headerRow, bodyRows: rowsToProcess } = grid;
     const ths = Array.from(headerRow.children) as HTMLElement[];
     let descColIndex = -1;
     let skuColIndex = -1;
@@ -285,7 +649,8 @@ export class ProductListCostInjector {
         }
       }
 
-      const th = document.createElement('th');
+      const headerTag = headerRow.tagName.toLowerCase() === 'tr' ? 'th' : 'div';
+      const th = document.createElement(headerTag);
       th.id = HEADER_ID;
       th.className = refTh?.className ? `${refTh.className} paulifest-cost-th` : 'paulifest-cost-th';
       th.style.textAlign = 'right';
@@ -314,31 +679,32 @@ export class ProductListCostInjector {
       }
     }
 
-    const bodyRows = table.querySelectorAll('tbody tr');
-    const rowsToProcess = bodyRows.length > 0 ? Array.from(bodyRows) : Array.from(table.querySelectorAll('tr')).slice(1);
-
     const idsNeedingCost: string[] = [];
     let injectedCount = 0;
     let needsCatalogPreload = false;
 
     for (let rowIndex = 0; rowIndex < rowsToProcess.length; rowIndex++) {
       const htmlRow = rowsToProcess[rowIndex] as HTMLElement;
-      const rowSku = skuColIndex >= 0 ? extractCleanCellText(htmlRow.children[skuColIndex]) : '';
-      const rowName = descColIndex >= 0 ? extractCleanCellText(htmlRow.children[descColIndex]) : '';
+      const skuCell = this.resolveCellByColIndexOrGeometry(htmlRow, skuColIndex, ths[skuColIndex], ths.length);
+      const descCell = this.resolveCellByColIndexOrGeometry(htmlRow, descColIndex, ths[descColIndex], ths.length);
+      const rowSku = extractCleanCellText(skuCell);
+      const rowName = extractCleanCellText(descCell);
 
       let productId = extractProductIdFromRow(htmlRow);
       if (!productId && rowSku && this.skuToProductId.has(rowSku.toUpperCase())) {
         productId = this.skuToProductId.get(rowSku.toUpperCase()) || null;
-        if (productId) htmlRow.setAttribute('data-product-id', productId);
       }
       if (!productId && rowName && this.nameToProductId.has(rowName.toUpperCase())) {
         productId = this.nameToProductId.get(rowName.toUpperCase()) || null;
-        if (productId) htmlRow.setAttribute('data-product-id', productId);
+      }
+      if (productId) {
+        htmlRow.setAttribute('data-product-id', productId);
       }
 
       if (!productId && !rowSku && !rowName) {
         if (!reusedNativeColumn && targetColIndex >= 0 && !htmlRow.querySelector(`.${CELL_CLASS}`)) {
-          const emptyTd = document.createElement('td');
+          const cellTag = htmlRow.tagName.toLowerCase() === 'tr' ? 'td' : 'div';
+          const emptyTd = document.createElement(cellTag);
           emptyTd.className = CELL_CLASS;
           if (targetColIndex < htmlRow.children.length) {
             htmlRow.insertBefore(emptyTd, htmlRow.children[targetColIndex]);
@@ -355,29 +721,36 @@ export class ProductListCostInjector {
 
       const rowKey = productId || (rowSku ? `sku:${rowSku.toUpperCase()}` : `name:${rowName.toUpperCase()}`);
 
-      let td = htmlRow.querySelector<HTMLTableCellElement>(`.${CELL_CLASS}`);
-      if (!td && reusedNativeColumn && targetColIndex >= 0 && targetColIndex < htmlRow.children.length) {
-        td = htmlRow.children[targetColIndex] as HTMLTableCellElement;
-        td.classList.add(CELL_CLASS);
-        const initialCellCost = parseCellBrlNumber(extractCleanCellText(td));
-        if (initialCellCost !== null && !this.knownCosts.has(rowKey)) {
-          this.knownCosts.set(rowKey, initialCellCost);
-          if (productId) this.knownCosts.set(productId, initialCellCost);
+      let td = htmlRow.querySelector<HTMLElement>(`.${CELL_CLASS}`);
+      if (!td && reusedNativeColumn) {
+        const nativeCell = this.resolveCellByColIndexOrGeometry(htmlRow, targetColIndex, ths[targetColIndex], ths.length);
+        if (nativeCell) {
+          td = nativeCell;
+          td.classList.add(CELL_CLASS);
+          const initialCellCost = parseCellBrlNumber(extractCleanCellText(td));
+          if (initialCellCost !== null && !this.knownCosts.has(rowKey)) {
+            this.knownCosts.set(rowKey, initialCellCost);
+            if (productId) this.knownCosts.set(productId, initialCellCost);
+          }
+          td.textContent = '';
+          bindCostCellIsolation(td);
+
+          const span = document.createElement('span');
+          span.className = 'paulifest-cost-text';
+          span.style.display = 'none';
+          this.applyCostToElement(span, this.knownCosts.get(productId || rowKey) ?? initialCellCost);
+          td.appendChild(span);
+          injectedCount++;
         }
-        // Limpa o texto estático original para substituir pelo editor inline idêntico ao Preço de venda
-        td.textContent = '';
-        const span = document.createElement('span');
-        span.className = 'paulifest-cost-text';
-        span.style.display = 'none';
-        this.applyCostToElement(span, this.knownCosts.get(productId || rowKey) ?? initialCellCost);
-        td.appendChild(span);
-        injectedCount++;
-      } else if (!td) {
-        td = document.createElement('td');
+      }
+      if (!td) {
+        const cellTag = htmlRow.tagName.toLowerCase() === 'tr' ? 'td' : 'div';
+        td = document.createElement(cellTag);
         td.className = CELL_CLASS;
         td.style.textAlign = 'right';
         td.style.whiteSpace = 'nowrap';
         td.style.verticalAlign = 'middle';
+        bindCostCellIsolation(td);
 
         const refCell = (targetColIndex > 0 ? htmlRow.children[targetColIndex - 1] : htmlRow.children[0]) as HTMLElement | undefined;
         if (refCell && typeof window.getComputedStyle === 'function') {
@@ -413,6 +786,7 @@ export class ProductListCostInjector {
         }
         injectedCount++;
       } else {
+        bindCostCellIsolation(td);
         if (productId && this.knownCosts.has(productId)) {
           const span = td.querySelector<HTMLElement>('.paulifest-cost-text');
           if (span) this.applyCostToElement(span, this.knownCosts.get(productId));
