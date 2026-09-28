@@ -64,8 +64,67 @@ export class BlingShadowUi {
   // Fase 4C.4B: Estado de conexão Bling — não persistido, hidratado via query/broadcast
   private blingConnectionStatus: BlingConnectionStatus = 'disconnected';
 
+  private isMinimized = true;
+  private readonly onViewportResize = () => this.applyPosition();
+  private dragOffset: { x: number; y: number } | null = null;
+  private customPos: { x: number; y: number } | null = null;
+
   constructor(options: ShadowUiOptions) {
     this.onAction = options.onAction;
+    this.loadSavedUiPrefs();
+  }
+
+  private loadSavedUiPrefs(): void {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const raw = window.localStorage.getItem('paulifest_dock_ui_state');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (typeof parsed.minimized === 'boolean') this.isMinimized = parsed.minimized;
+          if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+            this.customPos = { x: parsed.x, y: parsed.y };
+          }
+        }
+      }
+    } catch {
+      // Ignora caso localStorage esteja indisponível
+    }
+  }
+
+  private saveUiPrefs(): void {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(
+          'paulifest_dock_ui_state',
+          JSON.stringify({
+            minimized: this.isMinimized,
+            x: this.customPos?.x,
+            y: this.customPos?.y
+          })
+        );
+      }
+    } catch {
+      // Ignora caso localStorage esteja indisponível
+    }
+  }
+
+  private applyPosition(): void {
+    if (!this.host || typeof window === 'undefined') return;
+    if (this.customPos) {
+      const maxX = Math.max(8, (window.innerWidth || 1200) - (this.host.getBoundingClientRect?.().width || 340) - 16);
+      const maxY = Math.max(16, (window.innerHeight || 800) - (this.host.getBoundingClientRect?.().height || 80));
+      const clampedX = Math.min(Math.max(8, this.customPos.x), maxX);
+      const clampedY = Math.min(Math.max(8, this.customPos.y), maxY);
+      this.host.style.left = `${clampedX}px`;
+      this.host.style.top = `${clampedY}px`;
+      this.host.style.right = 'auto';
+      this.host.style.bottom = 'auto';
+    } else {
+      this.host.style.left = 'auto';
+      this.host.style.top = 'auto';
+      this.host.style.right = '20px';
+      this.host.style.bottom = '20px';
+    }
   }
 
   mount(): void {
@@ -87,9 +146,23 @@ export class BlingShadowUi {
     }
 
     this.render();
+    if (typeof window !== 'undefined') window.addEventListener?.('resize', this.onViewportResize);
+  }
+
+  minimizeForWorkspace(): void {
+    this.isMinimized = true;
+    this.shadow?.getElementById('dock-card')?.classList.add('is-minimized');
+    const button = this.shadow?.getElementById('btn-toggle-minimize');
+    if (button) { button.textContent = '+'; button.title = 'Expandir painel'; }
+    this.applyPosition();
   }
 
   unmount(): void {
+    if (typeof window !== 'undefined') window.removeEventListener?.('resize', this.onViewportResize);
+    if (typeof document !== 'undefined') {
+      const badge = document.getElementById('paulifest-inline-cost-badge');
+      if (badge) badge.remove();
+    }
     if (this.host && this.host.parentElement) {
       this.host.parentElement.removeChild(this.host);
     }
@@ -152,227 +225,98 @@ export class BlingShadowUi {
     // canImport só é true se Bling connected + uiState.canImport + produto com ID
     const canImport = isConnected && this.currentUiState.canImport && hasId;
 
+    this.applyPosition();
+
     // Se o esqueleto ainda não foi criado no shadow root, inicializa a estrutura estática
     let dockRoot = this.shadow.getElementById('dock-root');
     if (!dockRoot) {
       this.shadow.innerHTML = `
         <style>
-          :host {
-            all: initial;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            z-index: 999999;
-            position: fixed;
-            bottom: 24px;
-            right: 24px;
-            pointer-events: none;
-          }
-
-          .dock-container {
-            pointer-events: auto;
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 8px;
-            animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-          }
-
-          @keyframes slideUp {
-            from { opacity: 0; transform: translateY(12px) scale(0.96); }
-            to { opacity: 1; transform: translateY(0) scale(1); }
-          }
-
-          .dock-card {
-            background: rgba(23, 23, 23, 0.88);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.14);
-            border-radius: 14px;
-            padding: 10px 14px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            min-width: 270px;
-            color: #ededed;
-          }
-
-          .dock-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            padding-bottom: 6px;
-          }
-
-          .dock-title {
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.04em;
-            text-transform: uppercase;
-            color: #a1a1aa;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-          }
-
-          .dock-badge {
-            background: rgba(59, 130, 246, 0.2);
-            color: #60a5fa;
-            border: 1px solid rgba(59, 130, 246, 0.3);
-            font-size: 9px;
-            font-weight: 700;
-            padding: 2px 6px;
-            border-radius: 6px;
-            letter-spacing: 0.03em;
-          }
-
-          .product-info {
-            font-size: 11px;
-            color: #d4d4d8;
-            line-height: 1.4;
-          }
-
-          .product-id-tag {
-            color: #38bdf8;
-            font-weight: 600;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-          }
-
-          .quick-view-info {
-            font-size: 11px;
-            color: #a1a1aa;
-            display: flex;
-            flex-direction: column;
-            gap: 3px;
-            padding-top: 4px;
-            border-top: 1px dashed rgba(255, 255, 255, 0.12);
-          }
-
-          .quick-view-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-          }
-
-          .quick-view-item {
-            color: #e4e4e7;
-          }
-
-          .dock-actions {
-            display: flex;
-            gap: 6px;
-            margin-top: 2px;
-          }
-
-          .btn {
-            flex: 1;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            font-size: 11px;
-            font-weight: 500;
-            padding: 7px 10px;
-            border-radius: 8px;
-            border: 1px solid transparent;
-            cursor: pointer;
-            transition: all 0.15s ease;
-            user-select: none;
-          }
-
-          .btn-primary {
-            background: #2563eb;
-            color: #ffffff;
-            border-color: #3b82f6;
-          }
-          .btn-primary:hover:not(:disabled) {
-            background: #1d4ed8;
-          }
-
-          .btn-secondary {
-            background: rgba(255, 255, 255, 0.08);
-            color: #f4f4f5;
-            border-color: rgba(255, 255, 255, 0.12);
-          }
-          .btn-secondary:hover:not(:disabled) {
-            background: rgba(255, 255, 255, 0.14);
-          }
-
-          .btn:disabled {
-            opacity: 0.45;
-            cursor: not-allowed;
-            filter: grayscale(1);
-          }
-
-          .tooltip-notice {
-            font-size: 9.5px;
-            color: #fbbf24;
-            background: rgba(245, 158, 11, 0.12);
-            border: 1px solid rgba(245, 158, 11, 0.25);
-            border-radius: 6px;
-            padding: 4px 6px;
-            margin-top: 2px;
-          }
-
-          .feedback-badge {
-            font-size: 11px;
-            padding: 6px 12px;
-            border-radius: 8px;
-            backdrop-filter: blur(12px);
-            animation: slideUp 0.2s ease;
-          }
-          .feedback-success {
-            background: rgba(16, 185, 129, 0.9);
-            color: #fff;
-          }
-          .feedback-info {
-            background: rgba(59, 130, 246, 0.9);
-            color: #fff;
-          }
-          .feedback-warning {
-            background: rgba(245, 158, 11, 0.9);
-            color: #fff;
-          }
-          .feedback-error {
-            background: rgba(239, 68, 68, 0.9);
-            color: #fff;
-          }
-          .feedback-loading {
-            background: rgba(79, 70, 229, 0.9);
-            color: #fff;
-          }
-          .feedback-auth_required {
-            background: rgba(220, 38, 38, 0.95);
-            color: #fff;
-          }
+          :host { all: initial; font: 13px/1.5 system-ui, sans-serif; color: #17243a; position: fixed; right: 20px; bottom: 20px; z-index: 999999; pointer-events: none; }
+          * { box-sizing: border-box; }
+          [hidden] { display:none!important; }
+          .dock-container { pointer-events: auto; display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+          .dock-card { background:#fff; border:1px solid #dbe3ee; border-radius:18px; box-shadow:0 8px 32px #17243a26; width:min(340px,calc(100vw - 32px)); max-height:calc(100dvh - 32px); overflow:auto; }
+          .dock-header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px; border-bottom:1px solid #e9edf3; cursor:grab; touch-action:none; }
+          .dock-header:active { cursor:grabbing; }
+          .dock-title { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:700; }
+          .dock-logo { width:22px; height:22px; object-fit:contain; display:none; }
+          .drag-grip { color:#98a2b3; }
+          .header-controls { display:flex; align-items:center; gap:8px; }
+          .dock-badge { border-radius:6px; padding:3px 7px; background:#edf4ff; color:#2458d3; font-size:10px; font-weight:600; }
+          .icon-btn { width:30px; height:30px; border:1px solid #dbe3ee; background:#fff; color:#475467; border-radius:8px; font-size:18px; cursor:pointer; }
+          .icon-btn:hover { background:#edf4ff; }
+          button:focus-visible { outline:3px solid #3483fa; outline-offset:2px; }
+          .dock-body { display:flex; flex-direction:column; gap:14px; padding:16px; }
+          .context-label { color:#667085; font-size:10px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:5px; }
+          .product-info { font-size:15px; font-weight:650; overflow-wrap:anywhere; }
+          .product-id-tag { color:#2458d3; }
+          .context-help { margin:0; color:#667085; font-size:12px; }
+          .quick-view-info { display:grid; gap:8px; }
+          .quick-view-info:empty { display:none; }
+          .quick-view-row { background:#f3f6fc; border:1px solid #e9edf3; border-radius:10px; padding:11px 12px; }
+          .quick-view-item { color:#17243a; font-size:13px; font-weight:600; }
+          .dock-actions { display:flex; flex-direction:column; gap:8px; }
+          .btn { font:600 13px/1.4 system-ui,sans-serif; border:1px solid transparent; border-radius:10px; padding:11px 14px; cursor:pointer; }
+          .btn-primary { background:#2458d3; color:white; order:-1; }
+          .btn-primary:hover:not(:disabled) { background:#1948b5; }
+          .btn-secondary { background:white; border-color:#dbe3ee; color:#344054; }
+          .btn-secondary:hover { background:#f3f6fc; }
+          .btn:disabled { opacity:.5; cursor:not-allowed; }
+          .tooltip-notice { color:#854d0e; background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:10px; font-size:12px; }
+          .feedback-badge { max-width:340px; background:#edf4ff; color:#2458d3; border:1px solid #dbe3ee; border-radius:10px; padding:10px 14px; font-size:12px; }
+          .feedback-success { background:#ecfdf3; color:#067647; }
+          .feedback-warning,.feedback-error,.feedback-auth_required { background:#fff3ed; color:#b93815; }
+          .dock-card.is-minimized { width:auto; border-radius:999px; background:#2458d3; color:white; }
+          .is-minimized .dock-body { display:none; }
+          .is-minimized .dock-header { border:0; padding:8px 12px; }
+          .is-minimized .dock-badge { display:none; }
+          .is-minimized .icon-btn { border:0; color:#2458d3; }
+          .is-minimized .drag-grip { color:#b6ccff; }
         </style>
 
         <div id="dock-root" class="dock-container">
           <div id="feedback-container"></div>
-          <div class="dock-card">
-            <div class="dock-header">
+          <div id="dock-card" class="dock-card">
+            <div id="dock-drag-handle" class="dock-header" title="Arraste para mover para qualquer lugar da tela">
               <div class="dock-title">
-                <span>✦ Paulifest Copilot</span>
+                <span class="drag-grip" aria-hidden="true">⠿</span>
+                <img id="dock-brand-logo" class="dock-logo" alt="" />
+                <span>Copilot</span>
               </div>
-              <div id="dock-badge" class="dock-badge">${this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4D.2'}</div>
+              <div class="header-controls">
+                <div id="dock-badge" class="dock-badge">${this.currentUiState.isSimulatedMock ? 'Prévia' : 'Bling'}</div>
+                <button id="btn-toggle-minimize" class="icon-btn" type="button" aria-label="Expandir ou recolher Copilot" title="Expandir ou recolher painel">
+                  —
+                </button>
+              </div>
             </div>
 
-            <div id="product-info-container" class="product-info"></div>
-            <div id="quick-view-container" class="quick-view-info"></div>
+            <div class="dock-body">
+              <div><div class="context-label">Seu espaço de trabalho</div><div id="product-info-container" class="product-info"></div></div>
+              <p id="context-help" class="context-help"></p>
+              <div id="quick-view-container" class="quick-view-info"></div>
 
-            <div class="dock-actions">
-              <button id="btn-open-copilot" class="btn btn-secondary">
-                ✦ Abrir no Copilot
-              </button>
-              <button id="btn-prepare-ml" class="btn btn-primary">
-                🛍️ Preparar para ML
-              </button>
+              <div class="dock-actions">
+                <button id="btn-open-copilot" class="btn btn-secondary">
+                  Abrir painel lateral
+                </button>
+                <button id="btn-prepare-ml" class="btn btn-primary">
+                  Preparar anúncio no Mercado Livre
+                </button>
+              </div>
+
+              <div id="tooltip-container"></div>
             </div>
-
-            <div id="tooltip-container"></div>
           </div>
         </div>
       `;
+
+      const dockLogo = this.shadow.getElementById('dock-brand-logo') as HTMLImageElement | null;
+      if (dockLogo && typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
+        dockLogo.src = chrome.runtime.getURL('icons/icon32.png');
+        dockLogo.style.display = 'inline-block';
+      }
 
       // Registra listeners fixos apenas uma vez na criação da árvore
       const btnOpen = this.shadow.getElementById('btn-open-copilot');
@@ -390,13 +334,76 @@ export class BlingShadowUi {
           }
         });
       }
+
+      const btnMinimize = this.shadow.getElementById('btn-toggle-minimize');
+      const dockCard = this.shadow.getElementById('dock-card');
+      if (btnMinimize && dockCard) {
+        if (this.isMinimized) {
+          dockCard.classList?.add?.('is-minimized');
+          btnMinimize.textContent = '+';
+          btnMinimize.title = 'Expandir painel';
+        }
+        if (typeof btnMinimize.addEventListener === 'function') {
+          btnMinimize.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.isMinimized = !this.isMinimized;
+            if (this.isMinimized) {
+              dockCard.classList?.add?.('is-minimized');
+              btnMinimize.textContent = '+';
+              btnMinimize.title = 'Expandir painel';
+            } else {
+              dockCard.classList?.remove?.('is-minimized');
+              btnMinimize.textContent = '—';
+              btnMinimize.title = 'Minimizar painel';
+            }
+            this.saveUiPrefs();
+            this.applyPosition();
+          });
+        }
+      }
+
+      // Arraste livre (Drag-and-Drop) pelo cabeçalho do Dock
+      const dragHandle = this.shadow.getElementById('dock-drag-handle');
+      if (dragHandle && typeof dragHandle.addEventListener === 'function' && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+        dragHandle.addEventListener('pointerdown', (e: any) => {
+          if (e.target && (e.target as HTMLElement).id === 'btn-toggle-minimize') return;
+          if (!this.host) return;
+          const rect = this.host.getBoundingClientRect ? this.host.getBoundingClientRect() : { left: window.innerWidth - 280, top: window.innerHeight - 140 };
+          this.dragOffset = {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top
+          };
+        });
+
+        window.addEventListener('pointermove', (e: any) => {
+          if (!this.dragOffset || !this.host) return;
+          this.customPos = {
+            x: e.clientX - this.dragOffset.x,
+            y: e.clientY - this.dragOffset.y
+          };
+          this.applyPosition();
+        });
+
+        window.addEventListener('pointerup', () => {
+          if (this.dragOffset) {
+            this.dragOffset = null;
+            this.saveUiPrefs();
+          }
+        });
+      }
     }
 
     // Atualiza badge de modo se a estrutura já foi montada
     const dockBadge = this.shadow.getElementById('dock-badge') || (typeof this.shadow.querySelector === 'function' ? this.shadow.querySelector('.dock-badge') : null);
     if (dockBadge) {
-      dockBadge.textContent = this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4D.2';
+      dockBadge.textContent = this.currentUiState.isSimulatedMock ? 'Prévia' : 'Bling';
     }
+
+    const openButton = this.shadow.getElementById('btn-open-copilot');
+    if (openButton) openButton.textContent = this.currentPageType === 'product_form_new' ? 'Criar ficha do novo produto' : 'Abrir painel lateral';
+
+    const contextHelp = this.shadow.getElementById('context-help');
+    if (contextHelp) contextHelp.textContent = isNew ? 'Monte a ficha no painel lateral e traga os dados para este cadastro.' : hasId ? 'Confira os dados do produto e prepare seu anúncio a partir desta ficha.' : 'Abra um produto para ver seus dados ou use o painel lateral para começar uma ficha.';
 
     // 1. Renderiza Feedback com textContent (anti-XSS)
     const feedbackContainer = this.shadow.getElementById('feedback-container');
@@ -484,6 +491,7 @@ export class BlingShadowUi {
     const btnPrepare = this.shadow.getElementById('btn-prepare-ml') as HTMLButtonElement | null;
     if (btnPrepare) {
       btnPrepare.disabled = !canImport;
+      btnPrepare.hidden = !hasId || isNew;
     }
 
     // 4. Renderiza tooltip/notice com textContent (anti-XSS)
@@ -516,7 +524,7 @@ export class BlingShadowUi {
       } else if (isNew) {
         const notice = document.createElement('div');
         notice.className = 'tooltip-notice';
-        notice.textContent = '⚠️ Importação bloqueada: produto novo ainda não possui ID no Bling.';
+        notice.textContent = 'Novo cadastro: clique em Criar ficha para começar, sem precisar de ID.';
         tooltipContainer.appendChild(notice);
       }
     }

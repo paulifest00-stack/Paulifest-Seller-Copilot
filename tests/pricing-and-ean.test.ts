@@ -19,6 +19,7 @@ import type {
 } from '../src/core/schema/pricing.ts';
 import { createAuditedField } from '../src/core/schema/product.ts';
 import { isCostPriceComputable } from '../src/sidepanel/components/steps/StepPricing.tsx';
+import { DEFAULT_PREFERENCES } from '../src/core/storage/storage.ts';
 
 /**
  * Provedor Fake Controlado para Testes Unitários:
@@ -563,6 +564,39 @@ async function runAll() {
 
     const negativeField = createAuditedField<number | null>(-15, 'user_manual', 1.0, 'approved');
     assert.strictEqual(isCostPriceComputable(negativeField), false);
+  });
+
+  // 6.6 Embalagem pré-selecionada a R$ 1,50 por padrão
+  await runTest('6.6 Embalagem padrão pré-selecionada em R$ 1,50 nas preferências', () => {
+    assert.strictEqual(DEFAULT_PREFERENCES.defaultPackagingCost, 1.50);
+  });
+
+  // 6.7 Cálculo reverso pelo Valor Líquido a Receber (incluindo embalagem de R$ 1,50, taxas e frete)
+  await runTest('6.7 Modo Valor Líquido a Receber: calcula o valor do anúncio para sobrar exatamente o líquido desejado', async () => {
+    const netTarget = 45.00;
+    const res = await calculateReversePricing({
+      costPrice: 0,
+      taxRatePercent: 6.0,
+      packagingCost: 1.50,
+      otherOperationalCost: 0,
+      listingType: 'gold_special',
+      categoryId: 'MLB1051',
+      packageWeightKg: 0.5,
+      mode: 'target_profit',
+      targetProfitAmount: netTarget
+    });
+
+    const netReceived = Number(
+      (
+        res.salePrice -
+        res.marketplaceFees.totalMarketplaceRetention -
+        res.taxAmount -
+        res.packagingCost
+      ).toFixed(2)
+    );
+    assert.strictEqual(res.packagingCost, 1.50);
+    assert.ok(netReceived >= netTarget, `Valor líquido recebido (${netReceived}) deve ser >= ${netTarget}`);
+    assert.ok(netReceived - netTarget <= 0.05, `Valor líquido recebido (${netReceived}) deve ser exato ao centavo para ${netTarget}`);
   });
 
   console.log('\n======================================================');

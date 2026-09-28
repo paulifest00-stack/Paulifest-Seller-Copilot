@@ -40,6 +40,11 @@ export async function runGatewayPostgresTests() {
 
   const databaseUrl = process.env.DATABASE_URL?.trim() || 'postgresql://postgres:postgres@127.0.0.1:5432/paulifest_test';
 
+  const targetDatabase = new URL(databaseUrl);
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(targetDatabase.hostname) || targetDatabase.pathname !== '/paulifest_test') {
+    throw new Error('Testes destrutivos exigem banco local descartável paulifest_test.');
+  }
+
   // Verificação estrita de conectividade: NÃO pular se o banco não estiver disponível
   let testPool: pg.Pool;
   try {
@@ -65,6 +70,7 @@ export async function runGatewayPostgresTests() {
   // Helper para limpar banco antes dos testes de migração
   async function dropAllGatewayTables() {
     await testPool.query(`
+      DROP TABLE IF EXISTS ml_operations, ml_pictures, ml_oauth_states, ml_connections CASCADE;
       DROP TABLE IF EXISTS gateway_refresh_tokens CASCADE;
       DROP TABLE IF EXISTS gateway_sessions CASCADE;
       DROP TABLE IF EXISTS gateway_pairings CASCADE;
@@ -82,7 +88,7 @@ export async function runGatewayPostgresTests() {
       await dropAllGatewayTables();
 
       const result = await migrator.runMigrations();
-      assert.strictEqual(result.applied.length, 1, 'Deve aplicar exatamente 1 migration');
+      assert.strictEqual(result.applied.length, loadMigrationDefinitions().length, 'Deve aplicar todas as migrations');
       assert.strictEqual(result.applied[0], '001_gateway_schema');
 
       // Valida existência das 4 tabelas e da tabela de controle
@@ -100,7 +106,7 @@ export async function runGatewayPostgresTests() {
       assert.ok(result.alreadyApplied.includes('001_gateway_schema'), 'Deve constar como já aplicada');
 
       const appliedList = await migrator.getAppliedMigrations();
-      assert.strictEqual(appliedList.length, 1);
+      assert.strictEqual(appliedList.length, loadMigrationDefinitions().length);
     });
 
     await runTest('3. Rollback de migration com erro: reverte DDL e não registra na tabela de controle', async () => {
@@ -144,11 +150,11 @@ export async function runGatewayPostgresTests() {
       ]);
 
       const totalApplied = res1.applied.length + res2.applied.length;
-      assert.strictEqual(totalApplied, 1, 'Exatamente 1 instância deve aplicar a migração');
+      assert.strictEqual(totalApplied, loadMigrationDefinitions().length, 'Exatamente 1 instância deve aplicar a migração');
 
       // Ambas instâncias devem ter conhecimento da migração aplicada
       const appliedInDb = await migrator.getAppliedMigrations();
-      assert.strictEqual(appliedInDb.length, 1);
+      assert.strictEqual(appliedInDb.length, loadMigrationDefinitions().length);
       assert.strictEqual(appliedInDb[0], '001_gateway_schema');
 
       // Garante que a tabela não tem duplicação

@@ -5,8 +5,17 @@
     "noUnusedParameters": false
   },
   "include": [
+    "tests/mercadolivre-integration.test.ts",
+    "tests/unification.test.ts",
+    "tests/product-workspace.test.ts",
+    "tests/catalog-workflow.test.ts",
+    "tests/seller-workflow.test.ts",
     "tests/quick-view-and-stock.test.ts",
     "tests/quick-view-corrections.test.ts",
-    "tests/import-context-race.test.ts"
+    "tests/import-context-race.test.ts",
+    "tests/bling-product-update.test.ts",
+    "tests/sku-generator.test.ts",
+    "tests/ean-generator.test.ts",
+    "tests/product-list-cost-injector.test.ts"
   ]
 }

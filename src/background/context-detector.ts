@@ -19,6 +19,7 @@ export function detectPageContext(url?: string, title: string = '', tabId?: numb
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();
     const path = parsed.pathname.toLowerCase();
+    const hash = parsed.hash.toLowerCase();
 
     // 1. Mercado Livre
     if (host.includes('mercadolivre.com.br') || host.includes('mercadolibre.com')) {
@@ -95,7 +96,11 @@ export function detectPageContext(url?: string, title: string = '', tabId?: numb
 
     // 2. Bling ERP
     if (host === 'bling.com.br' || host.endsWith('.bling.com.br')) {
-      if (path.includes('/produtos/novo') || path.includes('/produtos/editar')) {
+      if (
+        path.includes('/produtos/novo') ||
+        path.includes('/produtos/editar') ||
+        ((path.includes('/produto') || path.includes('/cadastros')) && /^#(?:edit|editar|alterar|view|add|new|novo)(?:\/|$)/.test(hash))
+      ) {
         return {
           platform: 'bling',
           contextType: 'bling_product_form',
@@ -107,7 +112,7 @@ export function detectPageContext(url?: string, title: string = '', tabId?: numb
         };
       }
 
-      if (path.includes('/produtos')) {
+      if (path.includes('/produtos') || path.includes('/cadastros') || path.endsWith('/produtos.php')) {
         return {
           platform: 'bling',
           contextType: 'bling_product_list',

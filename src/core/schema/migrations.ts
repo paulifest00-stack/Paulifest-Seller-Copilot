@@ -1,3 +1,4 @@
+import { validateWorkbench } from './workbench-validator.ts';
 import type { CentralProductSheet, ProductPreparationStatus } from './product.ts';
 import { createAuditedField, evaluatePreparationStatus } from './product.ts';
 
@@ -241,6 +242,10 @@ export function validateSheetV3(sheet: unknown): ValidationResult {
     }
   }
 
+  if (sheet.titleBling !== undefined && !isValidAuditedFieldV3(sheet.titleBling)) {
+    errors.push('Campo auditado opcional inválido: "titleBling"');
+  }
+
   if (!Array.isArray(sheet.images)) {
     errors.push('images deve ser um array.');
   }
@@ -261,6 +266,8 @@ export function validateSheetV3(sheet: unknown): ValidationResult {
       }
     }
   }
+
+  if (sheet.workbench !== undefined) errors.push(...validateWorkbench(sheet.workbench, isValidAuditedFieldV3));
 
   // Validação de stockInfo quando presente
   if (sheet.stockInfo !== undefined && sheet.stockInfo !== null) {

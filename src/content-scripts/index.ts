@@ -1,5 +1,14 @@
+import { BlingCostField } from './bling/cost-field.ts';
+import { classifyBlingUrl } from './bling/dom-identifier.ts';
+import { extractProductIdFromRow } from './bling/product-list-cost-injector.ts';
+import { installMarketCompanion } from './mercadolivre/companion.ts';
+import { installMarketReader } from './mercadolivre/page-reader.ts';
+import { isMlHost } from '../integrations/mercadolivre/market.ts';
+import { fillNewBlingProduct } from './bling/fill-new-product.ts';
 import { BlingSpaObserver } from './bling/spa-observer.ts';
 import { BlingShadowUi } from './bling/shadow-ui.ts';
+import { ProductListCostInjector } from './bling/product-list-cost-injector.ts';
+import { BlingFormAssistant } from './bling/form-assistant.ts';
 import { isBlingDomain } from '../shared/tab-context-contracts.ts';
 import type { 
   ContentToBackgroundEnvelope, 
@@ -18,12 +27,12 @@ import type {
     : `inst_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
   let lastAcceptedRevision = 0;
+  if (isMlHost(host)) { installMarketReader(); installMarketCompanion(); }
 
   // 1. Ativação no Bling ERP com validação estrita de domínio (Requisito 6)
   if (isBlingDomain(host)) {
     // Inicializa a UI contextual isolada no Shadow DOM (mode: 'open')
-    const shadowUi = new BlingShadowUi({
-      onAction: (action: ContextualActionType) => {
+    const onContextAction = (action: ContextualActionType) => {
         const actionPayload: ContentToBackgroundEnvelope<BlingActionTriggeredPayload> = {
           type: 'BLING_ACTION_TRIGGERED',
           pageInstanceId,
@@ -34,8 +43,8 @@ import type {
         chrome.runtime.sendMessage(actionPayload).catch((err) => {
           console.debug('[Paulifest Copilot] Erro ao enviar ação contextual:', err);
         });
-      }
-    });
+    };
+    const shadowUi = new BlingShadowUi({onAction:onContextAction});
 
     shadowUi.mount();
 
@@ -60,10 +69,16 @@ import type {
       });
     }
 
+    // Injetor de coluna de Preço de Custo na listagem de produtos (produtos.php)
+    const listCostInjector = new ProductListCostInjector(pageInstanceId);
+    const formAssistant = new BlingFormAssistant();
+    const costField = new BlingCostField(pageInstanceId);
+
     // Inicializa o observador de rotas e DOM SPA
     const spaObserver = new BlingSpaObserver({
       debounceMs: 300,
       onContextDetected: (context) => {
+        costField.setTarget(context.pageType==='product_form_edit'?context.detectedProduct?.id:undefined);
         const domPayload: ContentToBackgroundEnvelope<BlingDomContextPayload> = {
           type: 'BLING_DOM_CONTEXT_DETECTED',
           pageInstanceId,
@@ -78,6 +93,20 @@ import type {
         chrome.runtime.sendMessage(domPayload).catch((err) => {
           console.debug('[Paulifest Copilot] Erro ao emitir contexto detectado:', err);
         });
+
+        // Ativação da coluna de Preço de Custo na Listagem de Produtos
+        if (context.pageType === 'product_list') {
+          listCostInjector.start();
+        } else {
+          listCostInjector.destroy();
+        }
+
+        if (context.pageType === 'product_form_edit' || context.pageType === 'product_form_new') {
+          formAssistant.start();
+        } else {
+          formAssistant.destroy();
+        }
+
 
         // Solicitação explícita de Quick View (Fase 4D.2)
         if (context.pageType === 'product_form_edit' && context.detectedProduct?.id) {
@@ -96,6 +125,24 @@ import type {
 
     spaObserver.start();
 
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message?.type !== 'BLING_FILL_NEW_PRODUCT') return;
+      if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('sidepanel.html') ||
+          message.pageInstanceId !== pageInstanceId || message.url !== window.location.href) {
+        sendResponse({ ok: false, error: 'Documento alterado ou remetente inválido. Abra a ficha novamente.' }); return;
+      }
+      sendResponse(fillNewBlingProduct(message.values, message.url));
+    });
+
+    chrome.runtime.onMessage.addListener((message,sender,sendResponse)=>{
+      if(message?.type!=='BLING_VERIFY_COST_TARGET')return;
+      if(sender.id!==chrome.runtime.id || message.pageInstanceId!==pageInstanceId || message.expectedUrl!==location.href){sendResponse({ok:false});return;}
+      const context=classifyBlingUrl(location.href);
+      const ok=context.pageType==='product_form_edit'?context.detectedId===message.productId:
+        context.pageType==='product_list' && Array.from(document.querySelectorAll<HTMLElement>('tbody tr')).some(row=>extractProductIdFromRow(row)===message.productId);
+      sendResponse({ok});
+    });
+
     // Escuta comandos de atualização de UI vindos do Background
     chrome.runtime.onMessage.addListener((message: any) => {
       if (message && message.type === 'APPLY_UI_STATE') {
@@ -103,6 +150,7 @@ import type {
         if (message.contextRevision >= lastAcceptedRevision) {
           lastAcceptedRevision = message.contextRevision;
           shadowUi.update(message.uiState, message.pageType, message.detectedProduct);
+          costField.update(message.uiState);
         }
       }
 

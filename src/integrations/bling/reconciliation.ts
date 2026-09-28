@@ -2,6 +2,7 @@ import type {
   CentralProductSheet, 
   AuditedField 
 } from '../../core/schema/product.ts';
+import { createAuditedField } from '../../core/schema/product.ts';
 import type { ProductStockInfo } from '../../shared/gateway-contracts.ts';
 import type { BlingMappingOutput, BlingSheetPatch } from './bling-to-sheet.mapper.ts';
 
@@ -182,6 +183,7 @@ export function reconcileBlingPatch(
     ean: reconcileSingleField(sheet.ean, patch.ean, 'ean', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     sku: reconcileSingleField(sheet.sku, patch.sku, 'sku', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     title: reconcileSingleField(sheet.title, patch.title, 'title', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
+    titleBling: reconcileSingleField(sheet.titleBling || createAuditedField('', 'user_manual', 0.0, 'missing'), patch.titleBling, 'titleBling', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     brand: reconcileSingleField(sheet.brand, patch.brand, 'brand', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     model: reconcileSingleField(sheet.model, patch.model, 'model', appliedFields, corroboratedFields, conflictedFields, unalteredFields),
     ncm: reconcileSingleField(sheet.ncm, patch.ncm, 'ncm', appliedFields, corroboratedFields, conflictedFields, unalteredFields),

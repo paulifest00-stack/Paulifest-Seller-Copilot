@@ -1,5 +1,9 @@
+import { REGRA_OURO } from '../engines/identification/prompts.ts';
+import { sanitizeName } from '../engines/identification/sanitizer.ts';
+import { GEMINI_MODEL, requestGeminiJson, limitMlTitle } from './gemini-client.ts';
 // Gateway de IA Desacoplado (AIProvider) para Identificação de Produtos
 import type { FieldSource } from '../schema/product.ts';
+import { generateSkuFromTitle } from '../engines/identification/sku-generator.ts';
 
 export interface AIIdentificationRequest {
   imageBase64?: string;       // Imagem em formato data:image/... ou base64 puro
@@ -21,7 +25,9 @@ export interface AIIdentificationResponse {
   detectedEan?: RawIdentifiedAttribute;
   brand?: RawIdentifiedAttribute;
   model?: RawIdentifiedAttribute;
-  title?: RawIdentifiedAttribute;
+  title?: RawIdentifiedAttribute;       // Título otimizado para Mercado Livre (máx 60 caracteres)
+  titleBling?: RawIdentifiedAttribute;  // Título descritivo completo para o Bling ERP
+  generatedSku?: RawIdentifiedAttribute;// SKU padronizado gerado automaticamente
   categoryML?: RawIdentifiedAttribute;
   categoryPath?: RawIdentifiedAttribute;
   packageWeightKg?: RawIdentifiedAttribute;
@@ -84,6 +90,18 @@ export class MockAIProvider implements IAIProvider {
             confidence: 0.85,
             source: 'ai_generated'
           },
+          titleBling: {
+            value: 'Furadeira de Impacto Bosch GSB 13 RE',
+            evidence: 'Nome preliminar para cadastro no Bling',
+            confidence: 0.85,
+            source: 'ai_generated'
+          },
+          generatedSku: {
+            value: generateSkuFromTitle('Furadeira Bosch GSB 13 RE', 'Bosch', 'GSB 13 RE'),
+            evidence: 'SKU gerado automaticamente pelo padrão do nome no Bling',
+            confidence: 0.95,
+            source: 'rule_engine'
+          },
           categoryML: {
             value: 'MLB1051',
             evidence: 'Classificação preliminar por palavras-chave',
@@ -112,6 +130,8 @@ export class MockAIProvider implements IAIProvider {
       }
 
       // Se houver imagem ou EAN disponível
+      const boschBlingTitle = 'Furadeira de Impacto Bosch GSB 13 RE 750W 127V com Maleta';
+      const boschMlTitle = 'Furadeira Impacto Bosch Gsb 13 Re 750w 127v Maleta';
       return {
         identified: true,
         productSummary: 'Furadeira de Impacto Bosch GSB 13 RE 750W 127V',
@@ -134,10 +154,22 @@ export class MockAIProvider implements IAIProvider {
           source: 'ai_generated'
         },
         title: {
-          value: 'Furadeira de Impacto Bosch GSB 13 RE 750W 127V com Maleta',
-          evidence: 'Composição de marca, modelo, potência (750W) e voltagem (127V) visíveis',
+          value: boschMlTitle,
+          evidence: 'Composição de marca, modelo e especificações otimizada para ML (máx 60 chars)',
           confidence: 0.90,
           source: 'ai_generated'
+        },
+        titleBling: {
+          value: boschBlingTitle,
+          evidence: 'Composição técnica completa para ERP Bling',
+          confidence: 0.90,
+          source: 'ai_generated'
+        },
+        generatedSku: {
+          value: generateSkuFromTitle(boschBlingTitle, 'Bosch', 'GSB 13 RE'),
+          evidence: 'SKU gerado automaticamente a partir do nome no Bling',
+          confidence: 0.95,
+          source: 'rule_engine'
         },
         categoryML: {
           value: 'MLB1051',
@@ -224,10 +256,22 @@ export class MockAIProvider implements IAIProvider {
           source: 'ai_generated'
         },
         title: {
-          value: 'Refrigerante Coca-Cola Original Garrafa Pet 2 Litros',
-          evidence: 'Composição de marca e volume padrão de embalagem',
+          value: 'Refrigerante Coca-Cola 2 Litros Pet Original',
+          evidence: 'Composição otimizada para Mercado Livre (máx 60 caracteres)',
           confidence: 0.95,
           source: 'ai_generated'
+        },
+        titleBling: {
+          value: 'Refrigerante Coca-Cola Original Garrafa Pet 2 Litros Sabor Tradicional',
+          evidence: 'Composição descritiva completa para Bling ERP',
+          confidence: 0.95,
+          source: 'ai_generated'
+        },
+        generatedSku: {
+          value: generateSkuFromTitle('Refrigerante Coca-Cola Garrafa Pet 2 Litros Original', 'Coca-Cola', '2 Litros'),
+          evidence: 'SKU gerado automaticamente pelo padrão do nome no Bling',
+          confidence: 0.95,
+          source: 'rule_engine'
         },
         categoryML: {
           value: 'MLB1403',
@@ -305,9 +349,21 @@ export class MockAIProvider implements IAIProvider {
       } : undefined,
       title: fallbackTitle ? {
         value: fallbackTitle.slice(0, 60),
-        evidence: 'Extraído do nome preliminar do vendedor',
+        evidence: 'Título para Mercado Livre (máx 60 caracteres)',
         confidence: 0.75,
         source: 'ai_generated'
+      } : undefined,
+      titleBling: fallbackTitle ? {
+        value: fallbackTitle,
+        evidence: 'Título completo para cadastro no Bling',
+        confidence: 0.75,
+        source: 'ai_generated'
+      } : undefined,
+      generatedSku: fallbackTitle ? {
+        value: generateSkuFromTitle(fallbackTitle, fallbackBrand),
+        evidence: 'SKU gerado automaticamente pelo padrão do nome no Bling',
+        confidence: 0.90,
+        source: 'rule_engine'
       } : undefined,
       categoryML: {
         value: 'MLB1051',
@@ -353,7 +409,7 @@ export class AIProviderConfigError extends Error {
 }
 
 export class GeminiAIProvider implements IAIProvider {
-  readonly providerId = 'gemini-2.0-flash';
+  readonly providerId = GEMINI_MODEL;
 
   constructor(private apiKey?: string) {}
 
@@ -372,11 +428,13 @@ export class GeminiAIProvider implements IAIProvider {
 
     // Adiciona imagem caso fornecida
     if (request.imageBase64) {
-      const cleanBase64 = request.imageBase64.replace(/^data:image\/\w+;base64,/, '');
+      const dataUrl = request.imageBase64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s);
+      const cleanBase64 = dataUrl?.[2] || request.imageBase64;
+      if (/^https?:/i.test(cleanBase64)) throw new Error('Envie a foto pelo botão de upload antes de identificar.');
       parts.push({
         inlineData: {
           data: cleanBase64,
-          mimeType: request.mimeType || 'image/jpeg'
+          mimeType: dataUrl?.[1] || request.mimeType || 'image/jpeg'
         }
       });
     }
@@ -387,114 +445,102 @@ REGRAS INEGOCIÁVEIS:
 1. FACT-OR-OMIT: Preencha apenas dados com EVIDÊNCIA VISÍVEL na imagem ou texto fornecido. NUNCA INVENTE ou faça suposições.
 2. Se um atributo não estiver explícito na imagem ou texto, NÃO o inclua nos atributos principais; liste-o em "unsupportedFields".
 3. Para cada campo preenchido, você DEVE fornecer uma "evidence" (exata citação visual ou trecho de texto).
-4. O título sugerido deve ser otimizado para Mercado Livre (máximo 60 caracteres), objetivo, sem palavras subjetivas (como "lindo", "promoção").
+4. TÍTULOS:
+   - "title" (Mercado Livre): deve ser rigorosamente otimizado para o Mercado Livre com no MÁXIMO 60 caracteres (Produto + Marca + Modelo + Especificação principal), sem palavras subjetivas (como "lindo", "promoção", "oferta", "frete grátis").
+   - "titleBling" (Bling ERP): nome curto e simples para identificar o produto no Bling, SEMPRE EM MAIÚSCULAS. Use tipo + marca e apenas a medida ou característica essencial conhecida. Não use frases comerciais ou palavras-chave extras.
 5. Se houver código de barras ou EAN legível na embalagem, extraia em detectedEan e confira o checksum.`;
 
     const userText = `Identifique o produto com base nos dados disponíveis.
-Nome preliminar: ${request.rawName || 'Não informado'}
+Nome preliminar: ${sanitizeName(request.rawName || '') || 'Não informado'}
 EAN fornecido: ${request.ean || 'Não informado'}
 
-Retorne estritamente um JSON compatível com o formato estruturado requisitado.`;
+Retorne um objeto JSON neste formato (campos sem evidência devem ser omitidos):
+{"productSummary":"resumo","title":{"value":"Título ML","evidence":"trecho fornecido","confidence":0.8},"titleBling":{"value":"NOME SIMPLES","evidence":"trecho fornecido","confidence":0.8},"attributes":{},"unsupportedFields":[]}
+Os campos opcionais brand, model, detectedEan, packageWeightKg, warrantyDays, ncmSuggested usam objetos com value, evidence e confidence. dimensionsCm contém height, width, length no mesmo formato. attributes é um mapa de atributos nesse formato. Não adivinhe IDs de categoria do Mercado Livre.`;
 
     parts.push({ text: userText });
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${this.apiKey}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemInstruction }] },
-        contents: [{ role: 'user', parts }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1 // Baixa temperatura para determinismo e ausência de alucinação
-        }
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Gemini API retornou erro HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const json = await response.json();
-    const rawText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) {
-      throw new Error('Gemini API não retornou conteúdo estruturado na resposta.');
-    }
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      throw new Error('Falha ao decodificar JSON retornado pelo Gemini.');
-    }
+    const parsed = await requestGeminiJson(this.apiKey, REGRA_OURO + systemInstruction, parts);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Gemini retornou uma ficha inválida.');
+    const brandName = parsed.brand ? String(parsed.brand.value || '') : undefined;
+    const modelName = parsed.model ? String(parsed.model.value || '') : undefined;
+    const mlTitleStr = parsed.title ? limitMlTitle(typeof parsed.title === 'string' ? parsed.title : String(parsed.title.value || '')) : undefined;
+    const blingTitleStr = parsed.titleBling ? (typeof parsed.titleBling === 'string' ? parsed.titleBling : String(parsed.titleBling.value || '')) : (mlTitleStr || '');
+    const autoSku = generateSkuFromTitle(blingTitleStr || mlTitleStr || '', brandName, modelName);
 
     // Normaliza para AIIdentificationResponse
     return {
-      identified: Boolean(parsed.brand || parsed.title || parsed.model),
-      productSummary: parsed.productSummary || parsed.title || 'Produto identificado via Gemini',
+      identified: Boolean(parsed.brand || parsed.title || parsed.model || parsed.titleBling),
+      productSummary: parsed.productSummary || blingTitleStr || mlTitleStr || 'Produto identificado via Gemini',
       detectedEan: parsed.detectedEan ? {
         value: String(parsed.detectedEan.value || ''),
-        evidence: parsed.detectedEan.evidence || 'Identificado na imagem',
+        evidence: parsed.detectedEan.evidence || '',
         confidence: Number(parsed.detectedEan.confidence || 0.9),
         source: 'ai_generated'
       } : undefined,
       brand: parsed.brand ? {
         value: String(parsed.brand.value || ''),
-        evidence: parsed.brand.evidence || 'Texto na embalagem',
+        evidence: parsed.brand.evidence || '',
         confidence: Number(parsed.brand.confidence || 0.9),
         source: 'ai_generated'
       } : undefined,
       model: parsed.model ? {
         value: String(parsed.model.value || ''),
-        evidence: parsed.model.evidence || 'Modelo impresso no item',
+        evidence: parsed.model.evidence || '',
         confidence: Number(parsed.model.confidence || 0.85),
         source: 'ai_generated'
       } : undefined,
-      title: parsed.title ? {
-        value: String(parsed.title.value || '').slice(0, 60),
-        evidence: parsed.title.evidence || 'Construído a partir de atributos visíveis',
-        confidence: Number(parsed.title.confidence || 0.85),
+      title: mlTitleStr ? {
+        value: mlTitleStr,
+        evidence: parsed.title?.evidence || 'Título otimizado para Mercado Livre (máx 60 caracteres)',
+        confidence: Number(parsed.title?.confidence || 0.85),
         source: 'ai_generated'
       } : undefined,
+      titleBling: blingTitleStr ? {
+        value: blingTitleStr.toUpperCase(),
+        evidence: parsed.titleBling?.evidence || 'Título completo para o ERP Bling',
+        confidence: Number(parsed.titleBling?.confidence || 0.85),
+        source: 'ai_generated'
+      } : undefined,
+      generatedSku: {
+        value: autoSku,
+        evidence: `SKU padronizado gerado a partir do nome no Bling`,
+        confidence: 0.95,
+        source: 'rule_engine'
+      },
       categoryML: parsed.categoryML ? {
-        value: String(parsed.categoryML.value || 'MLB1051'),
-        evidence: parsed.categoryML.evidence || 'Classificação visual',
+        value: String(parsed.categoryML.value || ''),
+        evidence: parsed.categoryML.evidence || '',
         confidence: Number(parsed.categoryML.confidence || 0.8),
         source: 'ai_generated'
       } : undefined,
       categoryPath: parsed.categoryPath ? {
-        value: String(parsed.categoryPath.value || 'Geral'),
-        evidence: parsed.categoryPath.evidence || 'Árvore de categoria',
+        value: String(parsed.categoryPath.value || ''),
+        evidence: parsed.categoryPath.evidence || '',
         confidence: Number(parsed.categoryPath.confidence || 0.8),
         source: 'ai_generated'
       } : undefined,
       packageWeightKg: parsed.packageWeightKg ? {
-        value: Number(parsed.packageWeightKg.value || 0.5),
-        evidence: parsed.packageWeightKg.evidence || 'Peso indicado',
+        value: Number(parsed.packageWeightKg.value),
+        evidence: parsed.packageWeightKg.evidence || '',
         confidence: Number(parsed.packageWeightKg.confidence || 0.8),
         source: 'ai_generated'
       } : undefined,
       dimensionsCm: parsed.dimensionsCm,
       attributes: parsed.attributes || {},
       warrantyDays: parsed.warrantyDays ? {
-        value: Number(parsed.warrantyDays.value || 90),
-        evidence: parsed.warrantyDays.evidence || 'Garantia',
+        value: Number(parsed.warrantyDays.value),
+        evidence: parsed.warrantyDays.evidence || '',
         confidence: Number(parsed.warrantyDays.confidence || 0.9),
         source: 'ai_generated'
       } : undefined,
-      ncmSuggested: parsed.ncmSuggested ? {
-        value: String(parsed.ncmSuggested.value || ''),
-        evidence: parsed.ncmSuggested.evidence || 'NCM correspondente',
-        confidence: Number(parsed.ncmSuggested.confidence || 0.8),
-        source: 'rule_engine'
-      } : undefined,
+      // NCM suggestions are obtained separately and checked against the official table.
+      ncmSuggested: undefined,
       unsupportedFields: Array.isArray(parsed.unsupportedFields) ? parsed.unsupportedFields : [],
       isSimulated: false,
-      providerName: 'Google Gemini 2.0 Flash'
+      providerName: GEMINI_MODEL
     };
   }
 }
 
 export const defaultAIProvider = new GeminiAIProvider();
-

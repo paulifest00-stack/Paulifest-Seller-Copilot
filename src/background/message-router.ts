@@ -1,3 +1,5 @@
+import { validCost } from '../shared/cost.ts';
+import { ML_ACTIONS } from '../shared/mercadolivre-contracts.ts';
 import { importCommitGate } from './import-commit-gate.ts';
 import { 
   extractVerifiedSenderTabId,
@@ -10,17 +12,19 @@ import {
   type TabContextSyncMessage,
   type TabContextState
 } from '../shared/tab-context-contracts.ts';
-import type { BlingProductQuickView } from '../shared/gateway-contracts.ts';
+import type { BlingProductQuickView, BlingUpdateProductMessageResponse } from '../shared/gateway-contracts.ts';
 import { tabContextManager } from './tab-context-manager.ts';
-import { loadSheet, commitImportedSheet } from '../core/storage/storage.ts';
+import { loadSheet, saveSheet, commitImportedSheet } from '../core/storage/storage.ts';
 import { createInitialSheet, type CentralProductSheet } from '../core/schema/product.ts';
 import { validateBlingProductInput } from '../integrations/bling/runtime-validator.ts';
 import { mapBlingProductToSheetPatch } from '../integrations/bling/bling-to-sheet.mapper.ts';
 import { reconcileBlingPatch } from '../integrations/bling/reconciliation.ts';
+import { buildBlingProductUpdatePatch } from '../integrations/bling/sheet-to-bling-patch.ts';
 import { classifyBlingUrl } from '../content-scripts/bling/dom-identifier.ts';
 import {
   GatewayClient,
   gatewayClient,
+  GatewayProductError,
   GatewayAuthRequiredError,
   GatewayTransientError
 } from './gateway-client.ts';
@@ -36,6 +40,13 @@ export interface RouteMessageResult {
 }
 
 class StaleImportError extends Error {}
+class StaleWriteError extends Error {
+  public remoteUpdateMayHaveCompleted: boolean;
+  constructor(message: string, remoteUpdateMayHaveCompleted = false) {
+    super(message);
+    this.remoteUpdateMayHaveCompleted = remoteUpdateMayHaveCompleted;
+  }
+}
 
 export class MessageRouter {
   private gatewayClient: GatewayClient;
@@ -43,6 +54,8 @@ export class MessageRouter {
   private inFlightRequests = new Map<string, Promise<any>>();
   private mockMode: boolean = false;
   private importResponders = new Map<string, Set<(response: any) => void>>();
+  private costWrites = new Set<string>();
+  private inFlightProductWrites = new Map<string, Promise<BlingUpdateProductMessageResponse>>();
 
   constructor(
     gatewayClientInstance?: GatewayClient,
@@ -77,6 +90,37 @@ export class MessageRouter {
   ): Promise<boolean> {
     if (!message || typeof message !== 'object') {
       return false;
+    }
+
+    if (message.type === 'ML_ACTION') {
+      const panelUrl = typeof chrome !== 'undefined' ? chrome.runtime?.getURL?.('sidepanel.html') : '';
+      const trusted = typeof chrome !== 'undefined' && sender.id === chrome.runtime.id && Boolean(panelUrl && sender.url?.startsWith(panelUrl));
+      if (!trusted) { sendResponse({ ok: false, error: 'Operação ML disponível somente no painel da extensão.' }); return true; }
+      try {
+        if (!ML_ACTIONS.includes(message.action) || !message.payload || typeof message.payload !== 'object' || Array.isArray(message.payload) || JSON.stringify(message.payload).length > (message.action === 'picture' ? 6_100_000 : 65000)) throw new Error('Operação Mercado Livre inválida.');
+        sendResponse(await this.gatewayClient.mercadoLivre(message.action, message.payload));
+      } catch (e) { sendResponse({ ok: false, error: e instanceof Error ? e.message : 'Falha na integração ML.' }); }
+      return true;
+    }
+    if (message.type === 'BLING_SEARCH_PRODUCTS' || message.type === 'BLING_CATALOG_PRODUCT') {
+      const panelUrl = typeof chrome !== 'undefined' ? chrome.runtime?.getURL?.('sidepanel.html') : '';
+      const trusted = typeof chrome !== 'undefined' && Boolean(panelUrl) && sender.id === chrome.runtime.id && Boolean(sender.url?.startsWith(panelUrl));
+      if (!trusted) { sendResponse({ ok: false, error: 'Consulta permitida apenas no painel da extensão.' }); return true; }
+      const generation = this.gatewayClient.getAuthGeneration();
+      try {
+        let result;
+        if (message.type === 'BLING_SEARCH_PRODUCTS') {
+          if (typeof message.query !== 'string' || message.query.length > 120 || !Number.isSafeInteger(message.page) || message.page < 1 || message.page > 100000 || !['name', 'sku'].includes(message.searchBy)) throw new Error('Busca inválida.');
+          result = await this.gatewayClient.searchBlingProducts(message.query, message.page, message.searchBy);
+        } else {
+          if (!isValidProductId(message.productId)) throw new Error('Produto inválido.');
+          result = await this.gatewayClient.fetchBlingProduct(message.productId);
+          if (!result.ok || String(result.product?.id) !== message.productId) throw new Error('O produto retornado não corresponde ao solicitado.');
+        }
+        if (generation !== this.gatewayClient.getAuthGeneration()) throw new Error('A conexão mudou durante a consulta. Tente novamente.');
+        sendResponse(result);
+      } catch (error) { sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Falha ao consultar o Bling.' }); }
+      return true;
     }
 
     // 0. Mensagens de Autenticação / Conexão Bling (Fase 4C.4A)
@@ -150,6 +194,11 @@ export class MessageRouter {
       const sheetId = message.sheetId;
       const targetTabId = await this.resolveTargetTab(sender, message.tabId, message.windowId);
       if (targetTabId && sheetId) {
+        const current = tabContextManager.peekTabState(targetTabId);
+        if ((message.expectedPageInstanceId !== undefined && current?.pageInstanceId !== message.expectedPageInstanceId) ||
+            (message.expectedUrl !== undefined && current?.url !== message.expectedUrl)) {
+          sendResponse({ ok: false, error: 'A aba mudou enquanto a ficha era aberta. Clique novamente em Iniciar Novo Produto.' }); return true;
+        }
         const updated = await tabContextManager.linkSheetToTab(targetTabId, sheetId);
         if (updated) {
           this.notifyActiveTabToSidebar(targetTabId, updated);
@@ -174,6 +223,99 @@ export class MessageRouter {
       const envelope = message as ContentToBackgroundEnvelope<any>;
       const payload = envelope.payload || message;
       await this.handleBlingGetQuickView(targetTabId, envelope.pageInstanceId, payload, sendResponse);
+      return true;
+    }
+
+    // Operação de busca de custos em lote para listagem de produtos (produtos.php)
+    if (message.type === 'BLING_GET_PRODUCTS_COST_LIST') {
+      const targetTabId = await this.resolveTargetTab(sender);
+
+      if (!targetTabId) {
+        sendResponse({ ok: false, error: 'Remetente sem tabId confiável da plataforma.' });
+        return true;
+      }
+
+      const envelope = message as ContentToBackgroundEnvelope<any>;
+      const payload = envelope.payload || message;
+      await this.handleBlingGetProductsCostList(payload, sendResponse, targetTabId, envelope.pageInstanceId);
+      return true;
+    }
+
+    if (message.type === 'BLING_UPDATE_COST') {
+      const tabId=sender.tab?.id;
+      const state=tabId!==undefined?tabContextManager.peekTabState(tabId):undefined;
+      const trusted=sender.id===chrome.runtime.id && sender.frameId===0 && isBlingDomain(sender.url||'');
+      const validSupplier=message.supplierId===undefined || (typeof message.supplierId==='string' && /^[1-9]\d{0,19}$/.test(message.supplierId));
+      if(!trusted || tabId===undefined || !state || state.platform!=='bling' ||
+          !['product_list','product_form_edit'].includes(state.pageType) || state.pageInstanceId!==message.pageInstanceId ||
+          state.url!==message.expectedUrl || !isValidProductId(message.productId) || message.confirmed!==true ||
+          !validCost(message.value) || (message.expected!==null && !validCost(message.expected)) || !validSupplier ||
+          (state.pageType==='product_form_edit' && state.detectedProduct?.id!==message.productId)) {
+        sendResponse({ok:false,error:'Página ou produto mudou. Atualize antes de editar o custo.'});return true;
+      }
+      const generation=this.gatewayClient.getAuthGeneration();
+      const key=JSON.stringify([generation,message.productId]);
+      if(this.costWrites.has(key)){sendResponse({ok:false,error:'Já existe uma gravação de custo em andamento para este produto.'});return true;}
+      this.costWrites.add(key);let dispatched=false;
+      try {
+        const proof=await chrome.tabs.sendMessage(tabId,{type:'BLING_VERIFY_COST_TARGET',productId:message.productId,pageInstanceId:state.pageInstanceId,expectedUrl:state.url},{frameId:0});
+        const fresh=tabContextManager.peekTabState(tabId);
+        if(!proof?.ok || fresh?.contextRevision!==state.contextRevision || fresh?.pageInstanceId!==state.pageInstanceId || this.gatewayClient.getAuthGeneration()!==generation)throw new Error('A página mudou antes de salvar. Confira o produto e tente novamente.');
+        dispatched=true;
+        const costUpdate=message.supplierId?{value:message.value,expected:message.expected,supplierId:message.supplierId}:{value:message.value,expected:message.expected};
+        await this.gatewayClient.updateBlingProduct(message.productId,{costUpdate});
+        this.gatewayClient.assertAuthGeneration(generation);
+        sendResponse({ok:true,productId:message.productId,cost:message.value});
+        if (tabContextManager.peekTabState(tabId)?.pageType === 'product_form_edit') {
+          void this.handleBlingGetQuickView(tabId,message.pageInstanceId,{productId:message.productId},()=>{});
+        }
+      } catch(error:any){
+        const preWriteRejected = error instanceof GatewayProductError && (
+          error.status === 400 || error.status === 403 || error.status === 404 ||
+          ['INVALID_PRODUCT_PATCH', 'INVALID_PRODUCT_ID', 'COST_SUPPLIER_REQUIRED', 'COST_CHANGED', 'COST_IDENTITY_MISMATCH'].includes(error.code)
+        );
+        sendResponse({ok:false,code:error?.code,status:error?.status,remoteUpdateMayHaveCompleted:dispatched && !preWriteRejected,error:error?.message||'Não foi possível salvar o custo.'});
+      }
+      finally{this.costWrites.delete(key);}
+      return true;
+    }
+
+    if (message.type === 'BLING_UPDATE_PRODUCT') {
+      const trustedSidepanel = typeof chrome !== 'undefined' && chrome.runtime?.getURL &&
+        sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL('sidepanel.html');
+      if (!trustedSidepanel) {
+        sendResponse({ ok: false, error: 'Atualizações do Bling só podem ser confirmadas pela sidebar da extensão.' });
+        return true;
+      }
+      const targetTabId = await this.resolveTargetTab(sender, message.tabId, message.windowId);
+      if (!targetTabId) {
+        sendResponse({ ok: false, error: 'A aba solicitada não é a aba ativa autorizada.' });
+        return true;
+      }
+      const current = tabContextManager.peekTabState(targetTabId);
+      if (!current || message.confirmed !== true || typeof message.confirmedPatch !== 'string' || current.platform !== 'bling' ||
+          current.pageType !== 'product_form_edit' || current.pageInstanceId !== message.pageInstanceId ||
+          current.contextRevision !== message.contextRevision || current.detectedProduct?.id !== message.productId ||
+          current.activeSheetId !== message.sheetId || !isValidProductId(message.productId)) {
+        sendResponse({ ok: false, stale: true, error: 'Atualização rejeitada: produto, documento, revisão ou ficha não correspondem ao contexto ativo.' });
+        return true;
+      }
+      const authGeneration = this.gatewayClient.getAuthGeneration();
+      const key = JSON.stringify([authGeneration, targetTabId, message.pageInstanceId, message.contextRevision, message.productId, message.sheetId]);
+      let operation = this.inFlightProductWrites.get(key);
+      if (!operation) {
+        operation = this.executeBlingProductUpdate(targetTabId, current, message.productId, message.sheetId, authGeneration, message.confirmedPatch)
+          .finally(() => this.inFlightProductWrites.delete(key));
+        this.inFlightProductWrites.set(key, operation);
+      }
+      try { sendResponse(await operation); }
+      catch (err: any) {
+        if (err instanceof StaleWriteError) {
+          sendResponse({ ok: false, stale: true, remoteUpdateMayHaveCompleted: err.remoteUpdateMayHaveCompleted, error: err.message });
+        } else {
+          sendResponse({ ok: false, error: err?.message || 'Falha ao atualizar produto no Bling.' });
+        }
+      }
       return true;
     }
 
@@ -208,6 +350,60 @@ export class MessageRouter {
     const [active] = await chrome.tabs.query(Number.isInteger(windowId) ? { active: true, windowId } : { active: true, currentWindow: true });
     if (!active?.id || (requestedTabId !== undefined && requestedTabId !== active.id)) return null;
     return active.id;
+  }
+
+  private async executeBlingProductUpdate(
+    tabId: number,
+    expected: TabContextState,
+    productId: string,
+    sheetId: string,
+    authGeneration: number,
+    confirmedPatch: string
+  ): Promise<BlingUpdateProductMessageResponse> {
+    const assertCurrent = (remoteUpdateMayHaveCompleted = false): TabContextState => {
+      try { this.gatewayClient.assertAuthGeneration(authGeneration); }
+      catch { throw new StaleWriteError('Sessão alterada durante a atualização.', remoteUpdateMayHaveCompleted); }
+      const live = tabContextManager.peekTabState(tabId);
+      if (!live || live !== expected || live.platform !== 'bling' || live.pageType !== 'product_form_edit' ||
+          live.pageInstanceId !== expected.pageInstanceId || live.contextRevision !== expected.contextRevision ||
+          live.detectedProduct?.id !== productId || live.activeSheetId !== sheetId) {
+        throw new StaleWriteError('Contexto alterado durante a atualização do produto.', remoteUpdateMayHaveCompleted);
+      }
+      return live;
+    };
+
+    assertCurrent();
+    const sheet = await loadSheet(sheetId);
+    assertCurrent();
+    if (!sheet || sheet.id !== sheetId) throw new Error('Ficha Central vinculada não foi encontrada.');
+    if (sheet.externalReferences.some(ref => ref.system === 'bling' && String(ref.externalId) !== productId)) {
+      throw new Error('A Ficha Central está vinculada a outro produto do Bling.');
+    }
+    const patch = buildBlingProductUpdatePatch(sheet);
+    if (JSON.stringify(patch) !== confirmedPatch) {
+      throw new StaleWriteError('A ficha mudou desde a revisão. Revise os valores novamente antes de atualizar o Bling.');
+    }
+    assertCurrent();
+    let result;
+    try { result = await this.gatewayClient.updateBlingProduct(productId, patch); }
+    catch (err) {
+      if (err instanceof GatewayProductError && err.code === 'SESSION_REVOKED') {
+        throw new StaleWriteError('Sessão alterada durante a atualização; confirme o produto no Bling.', true);
+      }
+      throw err;
+    }
+    assertCurrent(true);
+
+    const updated = await tabContextManager.registerOrUpdateTab(tabId, {
+      uiState: {
+        quickView: null,
+        quickViewError: null,
+        actionFeedback: { type: 'success', message: `Produto #${productId} atualizado no Bling.` }
+      }
+    });
+    this.dispatchUiStateToContentScript(tabId, updated);
+    this.notifyActiveTabToSidebar(tabId, updated);
+    return { ok: true, productId, updatedFields: result.updatedFields };
   }
 
   /**
@@ -305,6 +501,20 @@ export class MessageRouter {
       }
 
       if (payload.action === 'open_in_copilot') {
+        if (currentTab.pageType === 'product_form_new' && !currentTab.activeSheetId) {
+          const draft = createInitialSheet();
+          await saveSheet(draft);
+          const live = tabContextManager.peekTabState(tabId);
+          if (!live || live.pageInstanceId !== currentTab.pageInstanceId || live.url !== currentTab.url || live.pageType !== 'product_form_new') {
+            sendResponse({ ok: false, error: 'A tela mudou. Abra o cadastro novamente.' }); return;
+          }
+          const linked = await tabContextManager.linkSheetToTab(tabId, draft.id);
+          if (linked) {
+            this.notifyActiveTabToSidebar(tabId, linked);
+            this.dispatchUiStateToContentScript(tabId, linked);
+          }
+        }
+
         if (typeof chrome !== 'undefined' && chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
           chrome.sidePanel.open({ tabId }).catch((err) => {
             console.debug('[Paulifest Copilot] sidePanel.open:', err);
@@ -661,6 +871,86 @@ export class MessageRouter {
     } catch (err: any) {
       console.error('[Paulifest Copilot] Erro em handleBlingGetQuickView:', err);
       sendResponse({ ok: false, error: err?.message || 'Erro ao processar Quick View.' });
+    }
+  }
+
+  /**
+   * Processa a busca de preços de custo para uma lista de produtos (ex: produtos.php).
+   * O background não mantém cache; resultados transitórios ficam isolados no Gateway.
+   */
+  async handleBlingGetProductsCostList(
+    payload: any,
+    sendResponse: (res: any) => void,
+    targetTabId?: number,
+    pageInstanceId?: string
+  ): Promise<void> {
+    try {
+      const rawIds = Array.isArray(payload?.productIds) ? payload.productIds : [];
+      const validIds: string[] = Array.from(new Set<string>(
+        rawIds
+          .map((id: any) => String(id || '').trim())
+          .filter((id: string) => isValidProductId(id))
+      ));
+
+      const contextIsCurrent = async (): Promise<boolean> => {
+        if (targetTabId === undefined) return true;
+        const state = await tabContextManager.getTabState(targetTabId);
+        return Boolean(state && state.platform === 'bling' && state.pageType === 'product_list' &&
+          (!pageInstanceId || state.pageInstanceId === pageInstanceId));
+      };
+      if (!(await contextIsCurrent())) {
+        sendResponse({ ok: false, stale: true, costs: {}, error: 'Contexto da listagem mudou.' });
+        return;
+      }
+
+      const costs: Record<string, number | null> = {};
+
+      if (this.mockMode) {
+        for (const id of validIds) {
+          let hash = 0;
+          for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) & 0xffffffff;
+          const mockCost = Number((15 + (Math.abs(hash) % 2500) / 10).toFixed(2));
+          costs[id] = mockCost;
+        }
+        if (!(await contextIsCurrent())) {
+          sendResponse({ ok: false, stale: true, costs: {}, error: 'Contexto da listagem mudou.' });
+          return;
+        }
+        sendResponse({ ok: true, costs });
+        return;
+      }
+
+      // O cache de resultados pertence exclusivamente ao Gateway e é isolado por conexão.
+      // Uma falha de transporte não é convertida em custo ausente (Fact-or-Omit).
+      let lastError: any = null;
+      let anySucceeded = false;
+      for (let i = 0; i < validIds.length; i += 3) {
+        const chunk = validIds.slice(i, i + 3);
+        const results = await Promise.allSettled(chunk.map(async (id) => {
+          const qv = await this.gatewayClient.fetchBlingProductQuickView(id);
+          return [id, qv.costPrice === undefined ? null : qv.costPrice] as const;
+        }));
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            costs[r.value[0]] = r.value[1];
+            anySucceeded = true;
+          } else {
+            lastError = r.reason;
+          }
+        }
+      }
+      if (validIds.length > 0 && !anySucceeded && lastError) {
+        throw lastError;
+      }
+      if (!(await contextIsCurrent())) {
+        sendResponse({ ok: false, stale: true, costs: {}, error: 'Contexto da listagem mudou.' });
+        return;
+      }
+
+      sendResponse({ ok: true, costs });
+    } catch (err: any) {
+      console.error('[Paulifest Copilot] Erro em handleBlingGetProductsCostList:', err);
+      sendResponse({ ok: false, error: err?.message || 'Falha ao processar lista de custos.' });
     }
   }
 

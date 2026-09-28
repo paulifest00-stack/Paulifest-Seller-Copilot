@@ -105,6 +105,8 @@ export function validateAIResponse(rawJson: any): ValidationResult<AIIdentificat
   const brand = validateNamedField('brand');
   const model = validateNamedField('model');
   const title = validateNamedField('title');
+  const titleBling = validateNamedField('titleBling');
+  const generatedSku = validateNamedField('generatedSku');
   const categoryML = validateNamedField('categoryML');
   const categoryPath = validateNamedField('categoryPath');
   const packageWeightKg = validateNamedField('packageWeightKg');
@@ -128,12 +130,14 @@ export function validateAIResponse(rawJson: any): ValidationResult<AIIdentificat
   const allUnsupported = Array.from(new Set([...existingUnsupported, ...droppedFields]));
 
   const sanitized: AIIdentificationResponse = {
-    identified: Boolean(brand || model || title || detectedEan),
-    productSummary: String(rawJson.productSummary || title?.value || 'Produto identificado'),
+    identified: Boolean(brand || model || title || titleBling || generatedSku || detectedEan),
+    productSummary: String(rawJson.productSummary || titleBling?.value || title?.value || 'Produto identificado'),
     detectedEan,
     brand,
     model,
     title,
+    titleBling,
+    generatedSku,
     categoryML,
     categoryPath,
     packageWeightKg,

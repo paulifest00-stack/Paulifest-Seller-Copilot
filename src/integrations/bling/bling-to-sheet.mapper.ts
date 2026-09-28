@@ -19,6 +19,7 @@ export interface BlingSheetPatch {
   ean?: AuditedField<string>;
   sku?: AuditedField<string>;
   title?: AuditedField<string>;
+  titleBling?: AuditedField<string>;
   brand?: AuditedField<string>;
   model?: AuditedField<string>;
   ncm?: AuditedField<string>;
@@ -116,8 +117,16 @@ export function mapBlingProductToSheetPatch(
 
   // 1. Título / Nome
   if (dto.nome && typeof dto.nome === 'string' && dto.nome.trim()) {
+    const rawNome = dto.nome.trim();
     patch.title = createAuditedField(
-      dto.nome.trim(),
+      rawNome.length > 60 ? rawNome.slice(0, 60).trim() : rawNome,
+      'bling_erp',
+      0.95,
+      'pending_review',
+      createBlingEvidence(externalId, 'nome', timestamp, context?.sourceName, dto.nome)
+    );
+    patch.titleBling = createAuditedField(
+      rawNome.toUpperCase(),
       'bling_erp',
       0.95,
       'pending_review',
@@ -287,14 +296,15 @@ export function mapBlingProductToSheetPatch(
   }
 
   // 10. Descrição
-  const rawDesc = dto.descricaoCurta || dto.descricaoComplementar;
+  const descriptionKey = dto.descricaoComplementar?.trim() ? 'descricaoComplementar' : 'descricaoCurta';
+  const rawDesc = dto[descriptionKey];
   if (rawDesc && typeof rawDesc === 'string' && rawDesc.trim()) {
     patch.descriptionPlain = createAuditedField(
       rawDesc.trim(),
       'bling_erp',
       0.85,
       'pending_review',
-      createBlingEvidence(externalId, 'descricaoCurta', timestamp, context?.sourceName, rawDesc.trim().substring(0, 100))
+      createBlingEvidence(externalId, descriptionKey, timestamp, context?.sourceName, rawDesc.trim().substring(0, 100))
     );
   }
 

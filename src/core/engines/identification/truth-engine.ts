@@ -190,14 +190,7 @@ export class TruthAndConflictEngine {
       const isUserLocked = currentField.status === 'edited' || 
         (currentField.status === 'approved' && currentField.source === 'user_manual');
 
-      if (fieldCandidates.length === 0) {
-        if (isUserLocked) return currentField;
-        return {
-          ...currentField,
-          status: 'missing',
-          confidence: 0.0
-        };
-      }
+      if (fieldCandidates.length === 0) return currentField;
 
       // Ordenação estrita por nível de fonte (Tier menor = maior autoridade de catálogo)
       // Tier 1 (Fabricante) < Tier 2 (Marca) < Tier 3 (Ficha Técnica) < Tier 4 (Distribuidor) < Tier 5 (GS1) < Tier 6 (Marketplace)
@@ -307,6 +300,11 @@ export class TruthAndConflictEngine {
     const updatedBrand = resolveFieldCandidates(baseSheet.brand, 'brand');
     const updatedModel = resolveFieldCandidates(baseSheet.model, 'model');
     const updatedTitle = resolveFieldCandidates(baseSheet.title, 'title');
+    const updatedTitleBling = resolveFieldCandidates(
+      baseSheet.titleBling || createAuditedField('', 'user_manual', 0.0, 'missing'),
+      'titleBling'
+    );
+    const updatedSku = resolveFieldCandidates(baseSheet.sku, 'sku');
     const updatedWeight = resolveFieldCandidates(baseSheet.packageWeightKg, 'packageWeightKg');
     const updatedHeight = resolveFieldCandidates(baseSheet.packageHeightCm, 'packageHeightCm');
     const updatedWidth = resolveFieldCandidates(baseSheet.packageWidthCm, 'packageWidthCm');
@@ -318,9 +316,9 @@ export class TruthAndConflictEngine {
     const updatedEan = resolveFieldCandidates(baseSheet.ean, 'detectedEan');
 
     // Atributos técnicos adicionais (dinâmicos)
-    const newAttributes: TechnicalAttribute[] = [...baseSheet.attributes];
+    const newAttributes: TechnicalAttribute[] = baseSheet.attributes.map(attribute => ({ ...attribute }));
     const standardKeys = new Set([
-      'brand', 'model', 'title', 'packageWeightKg', 'packageHeightCm', 
+      'brand', 'model', 'title', 'titleBling', 'sku', 'packageWeightKg', 'packageHeightCm',
       'packageWidthCm', 'packageLengthCm', 'ncmSuggested', 'warrantyDays', 
       'detectedEan', 'categoryML', 'categoryPath'
     ]);
@@ -389,9 +387,11 @@ export class TruthAndConflictEngine {
       ...baseSheet,
       updatedAt: now,
       ean: updatedEan.value ? updatedEan : baseSheet.ean,
+      sku: updatedSku.value ? updatedSku : baseSheet.sku,
       brand: updatedBrand,
       model: updatedModel,
       title: updatedTitle,
+      titleBling: updatedTitleBling.value ? updatedTitleBling : (baseSheet.titleBling || updatedTitle),
       packageWeightKg: updatedWeight,
       packageHeightCm: updatedHeight,
       packageWidthCm: updatedWidth,

@@ -229,7 +229,7 @@ export async function runQuickViewCorrectionTests() {
     const source=fs.readFileSync('src/content-scripts/bling/shadow-ui.ts','utf8');
     const templates=[...source.matchAll(/innerHTML\s*=\s*`([\s\S]*?)`/g)];assert.equal(templates.length,1);
     const expressions=[...templates[0][1].matchAll(/\$\{([^}]+)\}/g)].map(match=>match[1]);
-    assert.deepEqual(expressions,["this.currentUiState.isSimulatedMock ? 'SIMULAÇÃO 4B' : 'REAL 4D.2'"]);
+    assert.deepEqual(expressions,["this.currentUiState.isSimulatedMock ? 'Prévia' : 'Bling'"]);
     assert.match(source,/stockSpan\.textContent = stockText/);assert.match(source,/costSpan\.textContent = costText/);assert.match(source,/badge\.textContent = this\.currentUiState\.actionFeedback\.message/);
     assert.doesNotMatch(source,/outerHTML\s*=|insertAdjacentHTML\(/);
     assert.doesNotMatch(fs.readFileSync('src/sidepanel/App.tsx','utf8'),/dangerouslySetInnerHTML/);

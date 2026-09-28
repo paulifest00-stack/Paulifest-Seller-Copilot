@@ -1,3 +1,4 @@
+import { isMlHost } from '../integrations/mercadolivre/market.ts';
 import { restrictCredentialStorage } from './storage-access.ts';
 const credentialStorageReady = restrictCredentialStorage(chrome.storage);
 void credentialStorageReady.catch(() => console.error('[Paulifest] Isolamento de storage indisponível; autenticação bloqueada.'));
@@ -38,25 +39,31 @@ void backgroundReady.catch((err) => {
   console.debug('[Paulifest Copilot] Erro na reidratação do TabContextManager:', err);
 });
 
-// 3. Listener nativo de navegação SPA: chrome.webNavigation.onHistoryStateUpdated
-if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
-  chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-    // Filtra apenas frames principais (frameId === 0)
-    if (details.frameId === 0 && details.tabId > 0 && details.url) {
-      if (isBlingDomain(details.url)) {
-        const classified = classifyBlingUrl(details.url);
-        tabContextManager.registerOrUpdateTab(details.tabId, {
-          platform: 'bling',
-          url: details.url,
-          pageType: classified.pageType,
-          detectedProduct: classified.detectedId ? { id: classified.detectedId } : undefined
-        }).then((updatedState) => {
-          messageRouter.dispatchUiStateToContentScript(details.tabId, updatedState);
-          messageRouter.notifyActiveTabToSidebar(details.tabId, updatedState);
-        }).catch(() => {});
-      }
+// 3. Listener nativo de navegação SPA: onHistoryStateUpdated e onReferenceFragmentUpdated (para rotas com hash #edit)
+const handleWebNavigationEvent = (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => {
+  if (details.frameId === 0 && details.tabId > 0 && details.url) {
+    if (isBlingDomain(details.url)) {
+      const classified = classifyBlingUrl(details.url);
+      tabContextManager.registerOrUpdateTab(details.tabId, {
+        platform: 'bling',
+        url: details.url,
+        pageType: classified.pageType,
+        detectedProduct: classified.detectedId ? { id: classified.detectedId } : undefined
+      }).then((updatedState) => {
+        messageRouter.dispatchUiStateToContentScript(details.tabId, updatedState);
+        messageRouter.notifyActiveTabToSidebar(details.tabId, updatedState);
+      }).catch(() => {});
     }
-  });
+  }
+};
+
+if (chrome.webNavigation) {
+  if (chrome.webNavigation.onHistoryStateUpdated) {
+    chrome.webNavigation.onHistoryStateUpdated.addListener(handleWebNavigationEvent);
+  }
+  if (chrome.webNavigation.onReferenceFragmentUpdated) {
+    chrome.webNavigation.onReferenceFragmentUpdated.addListener(handleWebNavigationEvent);
+  }
 }
 
 // 4. Listeners de ciclo de vida das abas
@@ -125,6 +132,18 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // 6. Roteamento centralizado de mensagens tipadas
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'ML_OPEN_SIDE_PANEL') {
+    let trusted = false;
+    try { trusted = sender.id === chrome.runtime.id && sender.frameId === 0 && isMlHost(new URL(sender.url || '').hostname); } catch { /* Invalid origin. */ }
+    if (!trusted || !sender.tab?.id) { sendResponse({ok:false}); return false; }
+    chrome.sidePanel.open({tabId:sender.tab.id}).then(() => sendResponse({ok:true})).catch(() => sendResponse({ok:false}));
+    return true;
+  }
+  // Open synchronously from the click message: storage awaits can lose Chrome's user gesture.
+  if (message?.type === 'BLING_ACTION_TRIGGERED' && message.payload?.action === 'open_in_copilot' &&
+      sender.id === chrome.runtime.id && sender.frameId === 0 && sender.tab?.id && isBlingDomain(sender.url || '')) {
+    void chrome.sidePanel.open({ tabId: sender.tab.id }).catch(() => {});
+  }
   backgroundReady.then(() => messageRouter.handleMessage(message, sender, sendResponse)).catch((err) => {
     sendResponse({ ok: false, error: 'Operação bloqueada: inicialização segura indisponível.' });
     console.error('[Paulifest Copilot] Erro no roteador de mensagens:', err);

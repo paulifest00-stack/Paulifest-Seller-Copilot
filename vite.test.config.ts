@@ -3,6 +3,12 @@ import { resolve } from 'path';
 
 export default defineConfig({
   mode: 'test',
+  // Testes não herdam endpoints de produção do .env local.
+  envDir: false,
+  define: {
+    'import.meta.env.VITE_GATEWAY_URL': JSON.stringify(''),
+    'import.meta.env.VITE_APP_ENV': JSON.stringify('test')
+  },
   build: {
     outDir: 'dist-test',
     emptyOutDir: true,

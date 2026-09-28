@@ -34,22 +34,34 @@ export function classifyBlingUrl(urlStr: string): { pageType: BlingPageType; det
     const parsed = new URL(urlStr);
     const rawPathname = parsed.pathname;
     const pathname = rawPathname.toLowerCase();
+    const rawHash = parsed.hash;
+    const hash = rawHash.toLowerCase();
 
     // 1. Novo Produto (sem ID de produto existente)
     if (
       pathname.includes('/produtos/novo') || 
       pathname.endsWith('/produto/novo') || 
+      ((pathname.includes('/produto') || pathname.includes('/cadastros')) && /^#(?:add|new|novo)(?:\/|$)/i.test(rawHash)) ||
       parsed.searchParams.get('action') === 'novo'
     ) {
       return { pageType: 'product_form_new' };
     }
 
-    // 2. Edição de Produto via Rota: /produtos/editar/123456 ou /produtos/123456
+    // 2. Edição de Produto via rota moderna ou hash legado atual do Bling:
+    //    /produtos/editar/123456 ou /produtos.php#edit/123456
     const editPathMatch = rawPathname.match(/\/produtos?\/(?:editar|alterar|view)\/([a-zA-Z0-9_-]{1,64})/i);
     if (editPathMatch && editPathMatch[1] && isValidProductId(editPathMatch[1])) {
       return {
         pageType: 'product_form_edit',
         detectedId: editPathMatch[1]
+      };
+    }
+
+    const editHashMatch = rawHash.match(/^#(?:edit|editar|alterar|view)\/([a-zA-Z0-9_-]{1,64})(?:\/|$)/i);
+    if ((pathname.includes('/produto') || pathname.includes('/cadastros')) && editHashMatch?.[1] && isValidProductId(editHashMatch[1])) {
+      return {
+        pageType: 'product_form_edit',
+        detectedId: editHashMatch[1]
       };
     }
 
@@ -67,7 +79,7 @@ export function classifyBlingUrl(urlStr: string): { pageType: BlingPageType; det
       pathname === '/produtos' || 
       pathname === '/produtos/' || 
       pathname.startsWith('/produtos/lista') ||
-      pathname.includes('/produtos.php')
+      ((pathname.includes('/produto') || pathname.includes('/cadastros')) && (!hash || hash === '#list' || hash === '#' || hash === '#todos'))
     ) {
       return { pageType: 'product_list' };
     }

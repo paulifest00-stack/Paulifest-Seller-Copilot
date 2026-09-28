@@ -113,7 +113,16 @@ import type {
 } from '../../shared/gateway-contracts.ts';
 export type { ProductStockInfo, ProductPreparationStatus, PreparationStatusEvaluation };
 
+export interface PricingDraft {
+  mode: 'target_profit' | 'target_margin' | 'free_price';
+  listingType: 'gold_special' | 'gold_pro';
+  targetMargin: number; targetNetReceive: number; freePrice: number;
+  taxRate: number; packagingCost: number; weightKg: number;
+}
+
 export interface CentralProductSheet {
+  workbench?: import('./workbench.ts').ProductWorkbench;
+  pricingDraft?: PricingDraft;
   schemaVersion: number;
   id: string;
   createdAt: string;
@@ -125,6 +134,7 @@ export interface CentralProductSheet {
   ean: AuditedField<string>;
   sku: AuditedField<string>;
   title: AuditedField<string>;
+  titleBling?: AuditedField<string>;
   brand: AuditedField<string>;
   model: AuditedField<string>;
 
@@ -191,6 +201,7 @@ export function createInitialSheet(): CentralProductSheet {
     ean: createAuditedField('', 'user_manual', 0.0, 'missing'),
     sku: createAuditedField('', 'user_manual', 0.0, 'missing'),
     title: createAuditedField('', 'user_manual', 0.0, 'missing'),
+    titleBling: createAuditedField('', 'user_manual', 0.0, 'missing'),
     brand: createAuditedField('', 'user_manual', 0.0, 'missing'),
     model: createAuditedField('', 'user_manual', 0.0, 'missing'),
     categoryIdML: createAuditedField('', 'rule_engine', 0.0, 'missing'),

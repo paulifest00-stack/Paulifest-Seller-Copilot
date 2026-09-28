@@ -1,3 +1,9 @@
+import { runMlIntegrationTests } from './mercadolivre-integration.test.ts';
+import { runUnificationTests } from './unification.test.ts';
+import { runProductWorkspaceTests } from './product-workspace.test.ts';
+import { runCatalogWorkflowTests } from './catalog-workflow.test.ts';
+import { runSellerWorkflowTests } from './seller-workflow.test.ts';
+import { runEanGeneratorTests } from './ean-generator.test.ts';
 import { runImportContextRaceTests } from './import-context-race.test.ts';
 import { runQuickViewCorrectionTests } from './quick-view-corrections.test.ts';
 // Test Runner Principal para todas as Suítes de Testes do Copilot
@@ -17,6 +23,9 @@ import { runExtensionProductIntegrationTests } from './extension-product-integra
 import { runGatewayAuthOrchestrationTests } from './gateway-auth-orchestration.test.ts';
 import { runBlingConnectionUxTests } from './bling-connection-ux.test.ts';
 import { runQuickViewAndStockTests } from './quick-view-and-stock.test.ts';
+import { runProductListCostInjectorTests } from './product-list-cost-injector.test.ts';
+import { runSkuGeneratorTests } from './sku-generator.test.ts';
+import { runBlingProductUpdateTests } from './bling-product-update.test.ts';
 
 interface SuiteDefinition {
   name: string;
@@ -25,6 +34,12 @@ interface SuiteDefinition {
 }
 
 const SUITES: SuiteDefinition[] = [
+  { name: 'Mercado Livre: OAuth, publicação e concorrência PostgreSQL', phase: 'ML', fn: runMlIntegrationTests },
+  { name: 'Unificação: conteúdo, kits, mercado e publicação', phase: 'Unificação', fn: runUnificationTests },
+  { name: 'Biblioteca e continuidade do produto', phase: 'Workspace', fn: runProductWorkspaceTests },
+  { name: 'SKU pai/filho, descrição e NCM', phase: 'Catálogo', fn: runCatalogWorkflowTests },
+  { name: 'IA e cadastro novo', phase: 'Fluxo seller', fn: runSellerWorkflowTests },
+  { name: 'Geração EAN-13 interno', phase: 'Identificação', fn: runEanGeneratorTests },
   { name: 'Motor de Precificação e EAN-13', phase: 'Fase 2', fn: runPricingTests },
   { name: 'Auditoria de IA e Identificação', phase: 'Fase 3', fn: runIdentificationTests },
   { name: 'Mapper Bling', phase: 'Fase 4A', fn: runBlingMapperTests },
@@ -33,6 +48,9 @@ const SUITES: SuiteDefinition[] = [
   { name: 'TabContextManager', phase: 'Fase 4B', fn: runTabContextManagerTests },
   { name: 'SPA Detector Bling', phase: 'Fase 4B', fn: runSpaDetectorTests },
   { name: 'MessageRouter & Mock 4A', phase: 'Fase 4B', fn: runMessageRouterTests },
+  { name: 'Injetor de Custo na Listagem Bling', phase: 'Fase 4D.3', fn: runProductListCostInjectorTests },
+  { name: 'Gerador de SKU', phase: 'Fase 4D.3', fn: runSkuGeneratorTests },
+  { name: 'Atualização Segura de Produto Bling', phase: 'Base funcional', fn: runBlingProductUpdateTests },
   { name: 'Gateway Security Foundation', phase: 'Fase 4C.1', fn: runGatewaySecurityTests },
   { name: 'Gateway PostgreSQL Durable Persistence', phase: 'Fase 4C.2A', fn: runGatewayPostgresTests },
   { name: 'Gateway Bling Real OAuth2 Integration', phase: 'Fase 4C.2B', fn: runGatewayOAuthRealTests },
@@ -47,6 +65,11 @@ const SUITES: SuiteDefinition[] = [
 
 async function main() {
   console.log('🚀 INICIANDO TESTES DO PAULIFEST SELLER COPILOT...\n');
+  // Todas as suítes de integração compartilham este destino descartável.
+  const database = new URL(process.env.DATABASE_URL?.trim() || 'postgresql://postgres:postgres@127.0.0.1:5432/paulifest_test');
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(database.hostname) || database.pathname !== '/paulifest_test') {
+    throw new Error('Testes destrutivos exigem banco local descartável paulifest_test.');
+  }
 
   let totalPass = 0;
   let totalFail = 0;
@@ -78,7 +101,12 @@ async function main() {
   try {
     for (const suite of SUITES) {
       currentSuiteCount = 0;
-      await suite.fn();
+      try {
+        await suite.fn();
+      } catch (error) {
+        console.error(`  ✗ FAIL: Suíte ${suite.name} interrompida: ${error instanceof Error ? error.message : String(error)}`);
+        process.exitCode = 1;
+      }
       suiteStats.push({
         phase: suite.phase,
         name: suite.name,

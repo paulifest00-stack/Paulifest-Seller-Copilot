@@ -4,13 +4,15 @@ Extensão Chrome Manifest V3 para ficha central auditável, precificação e int
 
 ## Estado atual
 
-Patch corretivo da fase 4D.2 reauditado localmente e aprovado para commit em 2026-09-22. A execução final aprovou 430 testes; os checks de TypeScript, builds e isolamento do pacote passaram. Homologação autenticada no Bling e visual no Chrome permanecem pendências futuras. A fase 4D.3 não foi iniciada.
+Revisão de 25/09/2026: ficha de trabalho preservada ao trocar de aba, biblioteca para retomar produtos, busca paginada no catálogo Bling, preparação de anúncio e correções no preenchimento por IA. Parâmetros da calculadora persistem por produto.
 
-Quick View consulta custo e estoque sem salvar a ficha. Há um único cache de resultados no Gateway, isolado por conexão/produto, com TTL padrão de 60 segundos e limite de 1.000 entradas. Background deduplica somente requisições simultâneas. Estado é invalidado por navegação e mudanças de autenticação; Sidepanel consulta a aba ativa da própria janela.
+499 verificações aprovadas com PostgreSQL local descartável; TypeScript, builds e isolamento do pacote aprovados. A interface compilada foi conferida no navegador local. Gemini e Bling reais ainda precisam de validação na sessão da usuária. A busca no catálogo exige publicar a atualização do Gateway.
 
-A integração de taxas do Mercado Livre continua simulada, mesmo quando um token é configurado. Publicação no marketplace e escrita de produtos no Bling não fazem parte deste patch. Pesquisa técnica usa MockResearchProvider; pesquisa externa real permanece futura.
+- [Mudanças, validação e ativação desta revisão](docs/FLUXO_2026-09-25.md)
+- [Histórico detalhado anterior](docs/STATUS_ATUAL.md)
+- [Visão do produto](docs/VISAO_DO_PRODUTO.md)
 
-Detalhes de correções, arquivos, evidências oficiais do Bling, testes e limitações: [relatório 4D.2](docs/phase-4d2-corrections.md).
+Taxas do Mercado Livre continuam simuladas. Publicação automática, pesquisa externa real, criação completa via API e edição de custo/estoque permanecem pendentes.
 
 ## Validação e build
 
@@ -77,3 +79,9 @@ connectionId presente no JWT é legível e não deve ser tratado como segredo. O
 - src/gateway/: OAuth, PostgreSQL, integrações e cache.
 - tests/: testes unitários e de integração.
 - docs/: especificações, auditorias e evidências.
+
+## Unificação com cadastro, imagens e Mercado Livre
+
+A implementação acrescenta abas para visão geral, Bling, anúncio ML, preço, imagens, referências e mercado; kits, matriz de variações/EAN, pesquisa com fontes, geração de conteúdo e imagem, histórico de concorrentes e publicação revisada por API. Consulte [implementação, ativação e limites](docs/UNIFICACAO.md).
+
+Para ativar ML no Gateway, configure `ML_CLIENT_ID`, `ML_CLIENT_SECRET` e `ML_REDIRECT_URI=https://SEU_GATEWAY/auth/mercadolivre/callback`, publique o build atualizado e conecte a conta pelo painel. Segredos ML permanecem no servidor. A integração depende da sessão Gateway/Bling existente e ainda requer homologação com uma conta real.

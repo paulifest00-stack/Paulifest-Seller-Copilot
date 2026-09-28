@@ -49,10 +49,22 @@ export interface ContentToBackgroundEnvelope<T = unknown> {
     | 'BLING_DOM_CONTEXT_DETECTED'
     | 'BLING_ACTION_TRIGGERED'
     | 'BLING_GET_QUICK_VIEW'
+    | 'BLING_GET_PRODUCTS_COST_LIST'
     | 'CONTENT_SCRIPT_PING';
   pageInstanceId: string;
   payload: T;
   clientTimestamp: string;
+}
+
+export interface BlingGetProductsCostListPayload {
+  productIds: string[];
+}
+
+export interface BlingGetProductsCostListResponse {
+  ok: boolean;
+  costs: Record<string, number | null>;
+  stale?: boolean;
+  error?: string;
 }
 
 export interface BlingDomContextPayload {

@@ -1,3 +1,4 @@
+import { MlService, loadMlConfig } from './integrations/mercadolivre/ml-service.ts';
 import type { Pool } from 'pg';
 import { loadGatewayConfig, type GatewayConfig } from './config.ts';
 import { closePool, getPool } from './database/connection.ts';
@@ -23,6 +24,7 @@ export async function startGateway(
   env: Record<string, string | undefined> = process.env
 ): Promise<GatewayRuntime> {
   const config = loadGatewayConfig(env);
+  const mlConfig = loadMlConfig(env);
 
   if (!config.databaseUrl) {
     throw new Error('DATABASE_URL é obrigatória para iniciar o Gateway operacional.');
@@ -45,6 +47,7 @@ export async function startGateway(
     app = new GatewayApp({
       config,
       repository,
+      mlService: mlConfig ? new MlService(pool, mlConfig, config.encryptionKey) : undefined,
       healthCheck: async () => {
         const result = await pool.query('SELECT 1 AS alive');
         return result.rows[0]?.alive === 1;

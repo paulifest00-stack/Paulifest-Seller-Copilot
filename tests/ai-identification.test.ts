@@ -570,7 +570,8 @@ export async function runIdentificationTests() {
       sheet.categoryIdML, sheet.categoryPathML, sheet.ncm,
       sheet.packageWeightKg, sheet.packageHeightCm, sheet.packageWidthCm, sheet.packageLengthCm,
       sheet.costPrice, sheet.suggestedSalePrice, sheet.descriptionPlain,
-      sheet.warrantyDays
+      sheet.warrantyDays,
+      ...(sheet.titleBling ? [sheet.titleBling] : [])
     ];
     for (const f of fields) {
       if (!f.evidence) {
@@ -578,6 +579,33 @@ export async function runIdentificationTests() {
         assert.strictEqual(f.status, 'missing', `Campo possui status "${f.status}" sem evidência`);
       }
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // 19. Geração Automática: Título ML (SEO 60), Título Bling e SKU Padronizado
+  // ---------------------------------------------------------------------------
+  await runTest('19. Geração Automática: IA gera título ML (máx 60), título Bling e SKU determinístico', async () => {
+    const sheet = createInitialSheet();
+    const res = await runProductIdentification(
+      {
+        rawName: 'Furadeira Bosch GSB 13 RE 750W 127V'
+      },
+      sheet,
+      aiProvider
+    );
+
+    // Título ML estritamente limitado a 60 caracteres
+    assert.ok(res.sheet.title.value);
+    assert.ok(res.sheet.title.value.length <= 60);
+
+    // Título Bling descritivo e completo
+    assert.ok(res.sheet.titleBling?.value);
+    assert.ok(res.sheet.titleBling.value.includes('BOSCH GSB 13 RE'));
+
+    // SKU determinístico e limpo
+    assert.ok(res.sheet.sku.value);
+    assert.ok(res.sheet.sku.value.length <= 20);
+    assert.ok(res.sheet.sku.value.startsWith('BOS'));
   });
 
   console.log('\n================================================================');

@@ -29,7 +29,9 @@
   "host_permissions": [
     "*://*.mercadolivre.com.br/*",
     "*://*.bling.com.br/*",
-    "https://paulifest-seller-copilot-gateway.onrender.com/*"
+    "https://paulifest-seller-copilot-gateway.onrender.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://portalunico.siscomex.gov.br/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -48,6 +50,17 @@
         "content-script.js"
       ],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/*.png"
+      ],
+      "matches": [
+        "*://*.mercadolivre.com.br/*",
+        "*://*.bling.com.br/*"
+      ]
     }
   ],
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA24llIG53du2Ab2Z7epnbVJ0e4VGA6tQyzIu6RDSZCasagzIHQ7Ca2TRk5lv1TsuR1WFDduMCRQ5DlU5AHHV2IrZMl15rtzEi080u8nZeNc6xmxxB5YlAY+u3Tqk6FPS/iFIeHhJrYox8kUbNX4JI9LthlofJYFYOyVi/m1BnHtR9Y3Hm1bPjzqd1uAtQJZohkcKnWN0PkTskHRJ3I17iH+1zzwrC7u+qL6n23HOfP9GEBiOclIn+50nKwRM2tPfj1RPiVVI8uOxYLWRpIceyRMTmRbCpeizXAhV6gs9pmk9zUWn9BtkUO2QX6T7JetsBmzeCa6pjz+jVsf/Fu6PDFQIDAQAB"

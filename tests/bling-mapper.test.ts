@@ -244,4 +244,21 @@ export async function runBlingMapperTests() {
     // Alerta explícito emitido
     assert.ok(result.warnings.some(w => w.includes('Identificador externo ausente')));
   });
+
+  // 17. Separação de Título Bling vs Título Mercado Livre (SEO 60 chars)
+  await runTest('17. Títulos: titleBling preserva nome descritivo completo e title é limitado a 60 chars para ML', () => {
+    const longName = 'Furadeira e Parafusadeira de Impacto Profissional 750W 127V com Maleta e 50 Acessórios Exclusivos';
+    const input = {
+      id: 888777,
+      nome: longName,
+      preco: 299.90
+    };
+
+    const result = mapBlingProductToSheetPatch(input);
+
+    assert.strictEqual(result.patch.titleBling?.value, longName.toUpperCase());
+    assert.ok(result.patch.title?.value);
+    assert.ok(result.patch.title.value.length <= 60);
+    assert.strictEqual(result.patch.title.value, longName.slice(0, 60).trim());
+  });
 }

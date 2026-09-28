@@ -1,3 +1,6 @@
+import { MlService } from '../integrations/mercadolivre/ml-service.ts';
+import { MlApiError } from '../integrations/mercadolivre/api-client.ts';
+import { ML_ACTIONS } from '../../shared/mercadolivre-contracts.ts';
 // Aplicação HTTP do Integration Gateway (Fase 4C.1 e Fase 4C.2B)
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import { createServer } from 'node:http';
@@ -30,6 +33,7 @@ import type {
 import type { BlingProductUpdatePatch } from '../../shared/gateway-contracts.ts';
 
 export interface GatewayAppOptions {
+  mlService?: MlService;
   config?: GatewayConfig;
   repository?: IGatewayRepository;
   oauthClient?: BlingOAuthClient;
@@ -40,6 +44,7 @@ export interface GatewayAppOptions {
 }
 
 export class GatewayApp {
+  private mlService?: MlService;
   private config: GatewayConfig;
   private repository: IGatewayRepository;
   private oauthClient: BlingOAuthClient;
@@ -50,6 +55,7 @@ export class GatewayApp {
   private server?: Server;
 
   constructor(options: GatewayAppOptions = {}) {
+    this.mlService = options.mlService;
     this.config = options.config || loadGatewayConfig();
     this.repository = options.repository || gatewayRepository;
     this.oauthClient = options.oauthClient || new BlingOAuthClient({
@@ -194,6 +200,48 @@ export class GatewayApp {
     }
 
     try {
+      if (pathname === '/auth/mercadolivre/callback' && method === 'GET') {
+        res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+        try {
+          if (!this.mlService || !startAuthLimiter.check('ml-callback:' + clientIp).allowed) throw new Error('Indisponível');
+          await this.mlService.callback(parsedUrl.searchParams.get('code') || '', parsedUrl.searchParams.get('state') || '');
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Mercado Livre conectado</title><h1>Mercado Livre conectado</h1><p>Volte ao Paulifest Copilot e atualize a conexão.</p></html>');
+        } catch { res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' }); res.end('<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Conexão não concluída</title><h1>Conexão não concluída</h1><p>Volte ao Paulifest Copilot e inicie a conexão novamente.</p></html>'); }
+        return;
+      }
+      if (pathname.startsWith('/integrations/mercadolivre/')) {
+        if (origin && !isAllowed) { this.sendJson(res, 403, { ok: false, message: 'Origem não autorizada.' }); return; }
+        const auth = await this.authenticateWithGst(req, res); if (!auth) return;
+        const action = pathname.slice('/integrations/mercadolivre/'.length);
+        if (!ML_ACTIONS.includes(action as any) || (action === 'status' ? method !== 'GET' : method !== 'POST')) { this.sendJson(res, 404, { ok: false, message: 'Operação ML desconhecida.' }); return; }
+        if (!this.mlService) { this.sendJson(res, action === 'status' ? 200 : 503, { ok: action === 'status', configured: false, connected: false, message: 'Configure ML_CLIENT_ID, ML_CLIENT_SECRET e ML_REDIRECT_URI no Gateway.' }); return; }
+        const rate = productReadLimiter.check('ml:' + auth.connectionId);
+        if (!rate.allowed) { this.sendJson(res, 429, { ok: false, message: 'Muitas operações. Aguarde um minuto.' }); return; }
+        const body = action === 'status' ? {} : await this.readJsonBody(req, action === 'picture' ? 6_100_000 : 65536);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) { this.sendJson(res, 400, { ok: false, message: 'Corpo inválido.' }); return; }
+        try {
+          let result: any;
+          switch (action) {
+            case 'status': result = await this.mlService.status(auth.connectionId); break;
+            case 'start': result = await this.mlService.start(auth.connectionId, auth.sessionId!); break;
+            case 'disconnect': result = await this.mlService.disconnect(auth.connectionId); break;
+            case 'category': result = await this.mlService.category(auth.connectionId, body.categoryId); break;
+            case 'quote': result = await this.mlService.quote(auth.connectionId, body.categoryId, body.price, body.listingType); break;
+            case 'picture': result = await this.mlService.upload(auth.connectionId, body.dataUrl); break;
+            case 'prepare': result = await this.mlService.prepare(auth.connectionId, auth.sessionId!, body.draft); break;
+            case 'publish':
+              if (body.confirmed !== true) throw new Error('Confirme a revisão antes de publicar.');
+              result = await this.mlService.publish(auth.connectionId, auth.sessionId!, body.id, body.hash); break;
+            case 'item': result = await this.mlService.item(auth.connectionId, body.itemId); break;
+            case 'sync': result = await this.mlService.sync(auth.connectionId, auth.sessionId!, body); break;
+          }
+          this.sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          this.sendJson(res, error instanceof MlApiError ? (error.status === 401 ? 409 : error.status) : 422, { ok: false, message: error instanceof Error ? error.message : 'Falha na operação Mercado Livre.', uncertain: error instanceof MlApiError && error.uncertain });
+        }
+        return;
+      }
       // 1. GET /health
       if (method === 'GET' && pathname === '/health') {
         if (this.healthCheck) {
@@ -210,6 +258,7 @@ export class GatewayApp {
         this.sendJson(res, 200, {
           status: 'ok',
           environment: this.config.environment,
+            capabilities: ['bling-cost-update-v1'],
           timestamp: new Date().toISOString()
         });
         return;
@@ -1139,6 +1188,7 @@ export class GatewayApp {
     }
 
     try {
+      if (body.costUpdate) this.quickViewCache.invalidate(auth.connectionId, trimmedId);
       const result = await this.tokenManager.executeWithBlingAuth(
         auth.connectionId,
         accessToken => this.productClient.updateProduct(trimmedId, body, accessToken)
@@ -1257,12 +1307,12 @@ export class GatewayApp {
     res.end(payload);
   }
 
-  private async readJsonBody(req: IncomingMessage): Promise<any> {
+  private async readJsonBody(req: IncomingMessage, maxBytes = 65536): Promise<any> {
     return new Promise((resolve) => {
       let body = '';
       req.on('data', (chunk) => {
         body += chunk;
-        if (body.length > 65536) {
+        if (Buffer.byteLength(body) > maxBytes) {
           // Limite defensivo de 64KB no payload JSON
           req.destroy();
           resolve(null);

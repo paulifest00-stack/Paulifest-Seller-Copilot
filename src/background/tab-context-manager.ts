@@ -209,7 +209,9 @@ export class TabContextManager {
       // 1. Se detectedProduct.id mudar de um ID válido para outro ID válido diferente
       const isProductSwitch = Boolean(currentId && targetDetectedId && currentId !== targetDetectedId);
       // 2. Ao entrar em product_form_new
-      const isEnteringNewProduct = targetPageType === 'product_form_new';
+      const isEnteringNewProduct = targetPageType === 'product_form_new' &&
+        (current.pageType !== 'product_form_new' || targetUrl !== current.url ||
+          Boolean(update.pageInstanceId && update.pageInstanceId !== current.pageInstanceId));
       // 3. Ao sair de contexto de produto para other
       const isLeavingToOther = targetPageType === 'other' && (targetPlatform === 'bling' || current.platform === 'bling');
 

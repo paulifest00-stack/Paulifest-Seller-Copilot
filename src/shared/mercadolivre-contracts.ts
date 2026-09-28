@@ -1,0 +1,14 @@
+export interface MlAttribute { id: string; value_name?: string; value_id?: string }
+export interface MlListingDraft {
+  sheetId: string; title: string; familyName: string; categoryId: string;
+  price: number; quantity: number; listingType: 'gold_special' | 'gold_pro';
+  condition: 'new' | 'used'; sku: string; description: string;
+  attributes: MlAttribute[]; pictureIds: string[];
+  shippingMode: 'me2' | 'custom'; freeShipping: boolean; localPickup: boolean;
+}
+export interface MlPreparedListing {
+  id: string; hash: string; payload: Record<string, unknown>; description: string;
+  account: { id: string; nickname: string }; warnings: string[]; expiresAt: string;
+}
+export type MlAction = 'status' | 'start' | 'disconnect' | 'category' | 'quote' | 'picture' | 'prepare' | 'publish' | 'item' | 'sync';
+export const ML_ACTIONS: MlAction[] = ['status', 'start', 'disconnect', 'category', 'quote', 'picture', 'prepare', 'publish', 'item', 'sync'];

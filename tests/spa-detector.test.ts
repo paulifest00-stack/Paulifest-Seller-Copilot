@@ -40,6 +40,19 @@ export async function runSpaDetectorTests() {
     assert.strictEqual(res.detectedId, '998877');
   });
 
+  await runTest('2b. Edição real do Bling: identifica /produtos.php#edit/:id com ID extraído', () => {
+    const res = classifyBlingUrl('https://www.bling.com.br/produtos.php#edit/16709078436');
+    assert.strictEqual(res.pageType, 'product_form_edit');
+    assert.strictEqual(res.detectedId, '16709078436');
+
+    const context = detectBlingScreenContext(
+      'https://www.bling.com.br/produtos.php#edit/16709078436',
+      { querySelector: () => null }
+    );
+    assert.strictEqual(context.pageType, 'product_form_edit');
+    assert.strictEqual(context.detectedProduct?.id, '16709078436');
+  });
+
   // 3. Classificação de Novo Produto (Regra 6: Nunca inventar ID)
   await runTest('3. Novo Produto: identifica /produtos/novo como product_form_new sem inventar ID', () => {
     const res = classifyBlingUrl('https://www.bling.com.br/produtos/novo');
@@ -49,6 +62,10 @@ export async function runSpaDetectorTests() {
     const context = detectBlingScreenContext('https://www.bling.com.br/produtos/novo');
     assert.strictEqual(context.pageType, 'product_form_new');
     assert.strictEqual(context.detectedProduct?.id, undefined);
+
+    const hashRoute = classifyBlingUrl('https://www.bling.com.br/produtos.php#new');
+    assert.strictEqual(hashRoute.pageType, 'product_form_new');
+    assert.strictEqual(hashRoute.detectedId, undefined);
   });
 
   // 4. Classificação de Outras Telas
@@ -132,6 +149,10 @@ export async function runSpaDetectorTests() {
 
     const resValid = classifyBlingUrl('https://www.bling.com.br/cadastros.produtos.php?id=889977');
     assert.strictEqual(resValid.detectedId, '889977');
+
+    const resHashXss = classifyBlingUrl('https://www.bling.com.br/produtos.php#edit/%3Cscript%3E');
+    assert.strictEqual(resHashXss.pageType, 'other');
+    assert.strictEqual(resHashXss.detectedId, undefined);
   });
 
   // 10. Sanitização do Shadow DOM e Renderização Segura (Requisito 5)
@@ -216,4 +237,3 @@ export async function runSpaDetectorTests() {
     assert.strictEqual(tagSpan.children.length, 0, 'Nenhum nó script deve ter sido instanciado');
   });
 }
-

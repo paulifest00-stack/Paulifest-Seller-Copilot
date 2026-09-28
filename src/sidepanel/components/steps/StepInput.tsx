@@ -1,9 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import { resolveImageAsset } from '../../../core/storage/image-assets.ts';
+import { parseApiKeys } from '../../../core/services/key-manager.ts';
+import { SkuEditor } from '../SkuEditor.tsx';
+import { generateSkuFromTitle } from '../../../core/engines/identification/sku-generator.ts';
+import { limitMlTitle } from '../../../core/services/gemini-client.ts';
+import { assignGeneratedEan, isGeneratedEan } from '../../../core/engines/identification/ean-generator.ts';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Camera,
   Barcode,
   DollarSign,
-  Tag,
   CheckCircle2,
   AlertCircle,
   X,
@@ -39,11 +44,17 @@ interface StepInputProps {
 }
 
 export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNext }) => {
-  const [eanValidation, setEanValidation] = useState(validateEan(sheet.ean.value));
-  const [rawName, setRawName] = useState<string>(sheet.title.value || '');
+  const liveSheet = useRef(sheet);
+  liveSheet.current = sheet;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const eanValidation = validateEan(sheet.ean.value);
+  const [rawName, setRawName] = useState<string>((sheet.titleBling?.value || sheet.title.value || '').toUpperCase());
   const [photoPreview, setPhotoPreview] = useState<string | null>(
-    sheet.images.length > 0 ? sheet.images[0].url : null
+    sheet.images[0]?.url.startsWith('data:') ? sheet.images[0].url : null
   );
+
+  useEffect(() => { let active = true; const url = sheet.images[0]?.url; if (!url) { setPhotoPreview(null); return; } void resolveImageAsset(url).then(value => { if (active) setPhotoPreview(value); }).catch(() => { if (active) setPhotoPreview(null); }); return () => { active = false; }; }, [sheet.images[0]?.url]);
 
   // Estados de IA e Identificação
   const [isIdentifying, setIsIdentifying] = useState<boolean>(false);
@@ -56,6 +67,8 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
   const [identError, setIdentError] = useState<string | null>(null);
   const [showSummaryDetails, setShowSummaryDetails] = useState<boolean>(true);
 
+  useEffect(() => { setRawName((sheet.titleBling?.value || sheet.title.value || '').toUpperCase()); }, [sheet.titleBling?.value, sheet.title.value]);
+
   // Carrega chave Gemini do storage se existir
   useEffect(() => {
     loadSellerPreferences().then((prefs) => {
@@ -64,7 +77,7 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
         setApiKeyInput(prefs.geminiApiKey);
         setUseDemoMode(false);
       } else {
-        setUseDemoMode(true);
+        setUseDemoMode(false);
       }
     });
   }, []);
@@ -72,7 +85,6 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
   const handleEanChange = (val: string) => {
     const clean = val.replace(/\D/g, '');
     const validation = validateEan(clean);
-    setEanValidation(validation);
 
     if (!clean) {
       onUpdateSheet((prev) => ({
@@ -100,19 +112,13 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
     }));
   };
 
-  const handleSkuChange = (val: string) => {
-    onUpdateSheet((prev) => ({
-      ...prev,
-      sku: createAuditedField(val.trim(), 'user_manual', 1.0, val.trim() ? 'approved' : 'missing')
-    }));
-  };
-
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
         const url = event.target?.result as string;
+        if (!mounted.current || liveSheet.current.id !== sheet.id) return;
         setPhotoPreview(url);
         onUpdateSheet((prev) => ({
           ...prev,
@@ -122,7 +128,8 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
               url,
               isMain: true,
               status: createAuditedField('approved', 'user_manual', 1.0, 'approved')
-            }
+            },
+            ...prev.images.map(image => ({ ...image, isMain: false }))
           ]
         }));
       };
@@ -134,17 +141,16 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
     setPhotoPreview(null);
     onUpdateSheet((prev) => ({
       ...prev,
-      images: []
+      images: prev.images.filter(image => image.id !== sheet.images[0]?.id).map((image, index) => ({ ...image, isMain: index === 0 }))
     }));
   };
 
-  const handleSaveApiKey = () => {
+  const handleSaveApiKey = async () => {
     const cleanKey = apiKeyInput.trim();
-    saveSellerPreferences({ geminiApiKey: cleanKey });
+    try { parseApiKeys(cleanKey); await saveSellerPreferences({ geminiApiKey: cleanKey }); }
+    catch { setIdentError("Não foi possível salvar a chave neste navegador. Tente novamente."); return; }
     setSavedApiKey(cleanKey);
-    if (cleanKey) {
-      setUseDemoMode(false);
-    }
+    setUseDemoMode(false);
     setShowApiKeyModal(false);
     setIdentError(null);
   };
@@ -152,12 +158,14 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
   // Disparo da Identificação Inteligente com IA & Pesquisa Confiável
   const handleRunIdentification = async () => {
     setIdentError(null);
+    if (photoPreview && !photoPreview.startsWith('data:') && !rawName.trim()) { setIdentError('Informe o nome ou envie uma foto para identificar este produto.'); return; }
 
     if (!useDemoMode && !savedApiKey) {
       setShowApiKeyModal(true);
       return;
     }
 
+    const snapshot = structuredClone(sheet);
     setIsIdentifying(true);
     setIdentStep(1);
 
@@ -165,18 +173,20 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
       ? new MockAIProvider()
       : new GeminiAIProvider(savedApiKey);
 
+    let timer1: ReturnType<typeof setTimeout> | undefined;
+    let timer2: ReturnType<typeof setTimeout> | undefined;
     try {
       // Feedback visual fluído das etapas do pipeline
-      const timer1 = setTimeout(() => setIdentStep(2), 500);
-      const timer2 = setTimeout(() => setIdentStep(3), 1100);
+      timer1 = setTimeout(() => setIdentStep(2), 500);
+      timer2 = setTimeout(() => setIdentStep(3), 1100);
 
       const result = await runProductIdentification(
         {
-          imageBase64: photoPreview || undefined,
-          ean: sheet.ean.value || undefined,
+          imageBase64: photoPreview?.startsWith('data:') ? photoPreview : undefined,
+          ean: isGeneratedEan(sheet.ean) ? undefined : sheet.ean.value || undefined,
           rawName: rawName || undefined
         },
-        sheet,
+        snapshot,
         provider
       );
 
@@ -185,18 +195,23 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
       setIdentStep(4);
 
       // Atualiza a Ficha Central no estado global
-      onUpdateSheet(() => result.sheet);
+      if (JSON.stringify(liveSheet.current) !== JSON.stringify(snapshot)) throw new Error('A ficha foi editada durante a identificação. Seus dados foram preservados. Identifique novamente.');
+      if (!result.sheet.title.value && !result.sheet.titleBling?.value) throw new Error('A IA não conseguiu extrair um nome. Envie uma foto mais nítida ou informe o nome do produto.');
+      onUpdateSheet(prev => prev.id === snapshot.id && JSON.stringify(prev) === JSON.stringify(snapshot) ? result.sheet : prev);
+      if (!mounted.current) return;
+      setRawName(result.sheet.titleBling?.value || result.sheet.title.value);
+      onNext();
       setIdentSummary(result.summary);
       setIsIdentifying(false);
     } catch (err: any) {
       console.error('Erro na identificação do produto:', err);
+      if (!mounted.current) return;
       setIdentError(err?.message || 'Falha ao comunicar com o provedor de IA.');
       setIsIdentifying(false);
-    }
+    } finally { clearTimeout(timer1); clearTimeout(timer2); }
   };
 
   const hasAnyInput = Boolean(photoPreview || sheet.ean.value || rawName.trim());
-  const isFormReady = sheet.costPrice.value !== null && sheet.costPrice.status !== 'missing';
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -204,20 +219,10 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
       <div className="flex items-center justify-between px-1">
         <span className="text-[10px] text-[#86868b] flex items-center gap-1">
           <Sparkles className="w-3 h-3 text-[#0071e3]" />
-          <span>Visão & Fato Auditável</span>
+          <span>Identificar produto</span>
         </span>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setUseDemoMode(!useDemoMode)}
-            className={`text-[10px] px-2 py-0.5 rounded-full font-medium transition-all ${
-              useDemoMode
-                ? 'bg-amber-100 text-amber-800 border border-amber-300/60'
-                : 'bg-blue-50 text-blue-700 border border-blue-200/60'
-            }`}
-          >
-            {useDemoMode ? 'Modo Demonstração' : 'Gemini 2.0 Flash'}
-          </button>
+          <span className="text-xs text-slate-500">{savedApiKey ? 'IA configurada' : 'IA opcional'}</span>
           <button
             type="button"
             onClick={() => setShowApiKeyModal(!showApiKeyModal)}
@@ -237,7 +242,7 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
             <span>Modo Demonstração Ativo (Offline/Simulado)</span>
           </div>
           <p className="text-[10px] text-amber-700 leading-tight">
-            Utilizando catálogo de dados controlados com fontes rastreáveis. Para executar visão e OCR reais com sua própria chave, desative a demonstração.
+            Dados de demonstração. Configure a chave para usar IA real.
           </p>
         </div>
       )}
@@ -263,7 +268,7 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
             </button>
           </div>
           <p className="text-[10px] text-[#86868b]">
-            Insira sua chave do Google AI Studio para usar visão real e Fact-or-Omit em nuvem. A chave é armazenada localmente neste navegador via chrome.storage.local.
+            Até 5 chaves próprias do Google AI Studio, separadas por vírgula. Salvas somente neste navegador; fallback automático em indisponibilidade.
           </p>
           <div className="flex gap-1.5">
             <input
@@ -311,81 +316,28 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
         )}
       </div>
 
+      {photoPreview && !photoPreview.startsWith('data:') && <p className="text-xs text-slate-600">A identificação usará o nome informado. Para analisar a imagem importada, envie a foto pelo seletor.</p>}
       {/* 2. Nome Básico ou Palavras-chave (Opcional) */}
       <div className="apple-glass-card rounded-2xl p-3.5 space-y-1.5">
         <div className="flex items-center justify-between">
           <label className="flex items-center gap-1.5 text-xs font-semibold text-[#1d1d1f]">
             <Search className="w-3.5 h-3.5 text-[#0071e3]" />
-            <span>Nome ou Descrição Rápida</span>
+            <span>Nome do produto</span>
           </label>
-          <span className="text-[10px] text-[#86868b]">Opcional</span>
+          <span className="text-[10px] text-[#86868b]">Ou envie uma foto</span>
         </div>
         <input
           type="text"
+          aria-label="Nome do produto"
           value={rawName}
           onChange={(e) => {
-            setRawName(e.target.value);
-            onUpdateSheet((prev) => ({
-              ...prev,
-              title: prev.title.status === 'edited' || prev.title.status === 'approved'
-                ? prev.title
-                : createAuditedField(e.target.value, 'user_manual', 0.5, 'pending_review')
-            }));
+            const name = e.target.value.toUpperCase();
+            setRawName(name);
+            onUpdateSheet(prev => ({ ...prev, titleBling: createAuditedField(name, 'user_manual', 1, name.trim() ? 'edited' : 'missing') }));
           }}
-          placeholder="Ex: Furadeira Bosch 750W ou Coca-Cola 2L"
+          placeholder="Ex: LUVA NITRILICA BOMPACK PRETA 100UN"
           className="w-full px-3 py-2 bg-white rounded-xl border border-black/[0.1] focus:border-[#0071e3] focus:ring-2 focus:ring-[#0071e3]/20 text-xs outline-none"
         />
-      </div>
-
-      {/* 3. Código EAN / GTIN com Validação em Tempo Real */}
-      <div className="apple-glass-card rounded-2xl p-4 space-y-2.5">
-        <div className="flex items-center justify-between">
-          <label className="flex items-center gap-1.5 text-xs font-semibold text-[#1d1d1f]">
-            <Barcode className="w-3.5 h-3.5 text-[#0071e3]" />
-            <span>Código de Barras (EAN / GTIN)</span>
-          </label>
-          <span className="text-[10px] font-medium text-[#86868b]">Opcional</span>
-        </div>
-
-        <div className="space-y-1.5">
-          <input
-            type="text"
-            inputMode="numeric"
-            maxLength={14}
-            value={sheet.ean.value}
-            onChange={(e) => handleEanChange(e.target.value)}
-            placeholder="Ex: 7894900011517 (ou deixe vazio se não tiver)"
-            className={`w-full px-3 py-2 bg-white rounded-xl border text-xs font-mono transition-all outline-none ${
-              sheet.ean.value
-                ? eanValidation.valid
-                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
-                  : 'border-rose-400 ring-2 ring-rose-400/20'
-                : 'border-black/[0.1] focus:border-[#0071e3] focus:ring-2 focus:ring-[#0071e3]/20'
-            }`}
-          />
-
-          {/* Feedback de Validação Visual */}
-          {sheet.ean.value ? (
-            <div
-              className={`flex items-center gap-1.5 text-[11px] font-medium px-2 py-1 rounded-lg ${
-                eanValidation.valid
-                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/60'
-                  : 'bg-rose-50 text-rose-700 border border-rose-200/60'
-              }`}
-            >
-              {eanValidation.valid ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
-              ) : (
-                <AlertCircle className="w-3.5 h-3.5 text-rose-500 flex-shrink-0" />
-              )}
-              <span>{eanValidation.message}</span>
-            </div>
-          ) : (
-            <p className="text-[10px] text-[#86868b]">
-              Deixe em branco caso o produto não possua código de barras (marcado como "Sem GTIN").
-            </p>
-          )}
-        </div>
       </div>
 
       {/* Botão Primário de Identificação Automática com IA */}
@@ -401,7 +353,7 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
           }`}
         >
           <Sparkles className={`w-4 h-4 ${isIdentifying ? 'animate-spin' : ''}`} />
-          <span>{isIdentifying ? 'Identificando Produto...' : 'Identificar Produto com IA'}</span>
+          <span>{isIdentifying ? 'Identificando produto…' : savedApiKey ? 'Identificar e continuar com IA' : 'Configurar IA para identificar'}</span>
         </button>
       </div>
 
@@ -535,21 +487,71 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
         </div>
       )}
 
-      {/* 4. SKU e Custo de Aquisição (CMV) */}
-      <div className="grid grid-cols-2 gap-3">
-        <div className="apple-glass-card rounded-2xl p-3.5 space-y-1.5">
+      <details className="rounded-xl border bg-white p-3 text-xs space-y-3"><summary className="cursor-pointer text-slate-600 font-medium">Código de barras, SKU e custo (opcional)</summary>      {/* 3. Código EAN / GTIN com Validação em Tempo Real */}
+      <div className="apple-glass-card rounded-2xl p-4 space-y-2.5">
+        <div className="flex items-center justify-between">
           <label className="flex items-center gap-1.5 text-xs font-semibold text-[#1d1d1f]">
-            <Tag className="w-3.5 h-3.5 text-[#0071e3]" />
-            <span>Código SKU</span>
+            <Barcode className="w-3.5 h-3.5 text-[#0071e3]" />
+            <span>Código de Barras (EAN / GTIN)</span>
           </label>
+          <button type="button" disabled={Boolean(sheet.ean.value.trim())}
+            onClick={() => onUpdateSheet(prev => assignGeneratedEan(prev))}
+            className="text-[11px] font-semibold text-[#0071e3] disabled:opacity-40"
+            title="Cria um número aleatório com dígito verificador; não substitui código existente">
+            Gerar EAN-13
+          </button>
+        </div>
+
+        <div className="space-y-1.5">
           <input
             type="text"
-            value={sheet.sku.value}
-            onChange={(e) => handleSkuChange(e.target.value)}
-            placeholder="Ex: PLF-1029"
-            className="w-full px-3 py-2 bg-white rounded-xl border border-black/[0.1] focus:border-[#0071e3] focus:ring-2 focus:ring-[#0071e3]/20 text-xs font-mono uppercase outline-none"
+            inputMode="numeric"
+            maxLength={14}
+            value={sheet.ean.value}
+            onChange={(e) => handleEanChange(e.target.value)}
+            placeholder="Ex: 7894900011517 (ou deixe vazio se não tiver)"
+            className={`w-full px-3 py-2 bg-white rounded-xl border text-xs font-mono transition-all outline-none ${
+              sheet.ean.value
+                ? eanValidation.valid
+                  ? 'border-emerald-500 ring-2 ring-emerald-500/20'
+                  : 'border-rose-400 ring-2 ring-rose-400/20'
+                : 'border-black/[0.1] focus:border-[#0071e3] focus:ring-2 focus:ring-[#0071e3]/20'
+            }`}
           />
+
+          {/* Feedback de Validação Visual */}
+          {sheet.ean.value ? (
+            <div
+              className={`flex items-center gap-1.5 text-[11px] font-medium px-2 py-1 rounded-lg ${
+                eanValidation.valid
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/60'
+                  : 'bg-rose-50 text-rose-700 border border-rose-200/60'
+              }`}
+            >
+              {eanValidation.valid ? (
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+              ) : (
+                <AlertCircle className="w-3.5 h-3.5 text-rose-500 flex-shrink-0" />
+              )}
+              <span>{isGeneratedEan(sheet.ean) ? 'EAN-13 gerado · dígito verificador correto · uso interno' : eanValidation.message}</span>
+            </div>
+          ) : (
+            <p className="text-[10px] text-[#86868b]">
+
+            </p>
+          )}
         </div>
+      </div>
+
+      {isGeneratedEan(sheet.ean) && (
+        <p className="text-[10px] text-[#6e6e73] px-2">
+          Código EAN-13 de circulação interna (prefixo 20) pronto para uso na ficha e no Bling.
+        </p>
+      )}
+
+      {/* 4. SKU e Custo de Aquisição (CMV — usado na precificação) */}
+      <div className="grid grid-cols-2 gap-3">
+        <SkuEditor sheet={sheet} onUpdateSheet={onUpdateSheet} />
 
         <div className="apple-glass-card rounded-2xl p-3.5 space-y-1.5">
           <label className="flex items-center gap-1.5 text-xs font-semibold text-[#1d1d1f]">
@@ -568,25 +570,36 @@ export const StepInput: React.FC<StepInputProps> = ({ sheet, onUpdateSheet, onNe
         </div>
       </div>
 
+</details>
+      {!rawName.trim() && <p className="text-xs text-slate-500">Para continuar sem IA, digite o nome do produto.</p>}
       {/* 5. Botão de Avanço */}
       <div className="pt-2">
         <button
-          onClick={onNext}
-          disabled={!isFormReady}
-          className={`w-full py-3 px-4 rounded-xl text-xs font-semibold apple-press-spring flex items-center justify-center gap-2 shadow-sm transition-all ${
-            isFormReady
-              ? 'bg-[#0071e3] hover:bg-[#0077ed] text-white'
-              : 'bg-black/10 text-black/40 cursor-not-allowed'
-          }`}
+          disabled={isIdentifying || !rawName.trim()}
+          onClick={() => {
+            if (rawName.trim()) {
+              onUpdateSheet(prev => {
+                const cleanName = rawName.trim().toUpperCase();
+                const autoSku = !prev.sku.value.trim()
+                  ? generateSkuFromTitle(cleanName, prev.brand.value)
+                  : prev.sku.value;
+                return {
+                  ...prev,
+                  title: prev.title.value ? prev.title : createAuditedField(limitMlTitle(rawName), 'user_manual', 1, 'approved'),
+                  titleBling: prev.titleBling?.value ? prev.titleBling : createAuditedField(cleanName, 'user_manual', 1, 'approved'),
+                  sku: !prev.sku.value.trim() && autoSku
+                    ? createAuditedField(autoSku, 'rule_engine', 1, 'approved')
+                    : prev.sku
+                };
+              });
+            }
+            onNext();
+          }}
+          className="w-full py-3 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 bg-white border border-slate-300 text-blue-700 disabled:opacity-40 apple-press-spring"
         >
-          <span>Avançar para Ficha do Produto</span>
+          <span>Continuar com preenchimento manual</span>
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
-        {!isFormReady && (
-          <p className="text-center text-[10px] text-[#86868b] mt-1.5">
-            Informe ao menos o Custo (CMV) para liberar o fluxo de precificação.
-          </p>
-        )}
       </div>
     </div>
   );

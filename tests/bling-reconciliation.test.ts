@@ -162,4 +162,17 @@ export async function runBlingReconciliationTests() {
     assert.strictEqual(snapshotBefore, snapshotAfter, 'O objeto originalSheet foi mutado!');
     assert.notStrictEqual(result.sheet, originalSheet, 'Retornou a mesma referência de memória!');
   });
+
+  // 9. Reconciliação de Título Bling (ERP)
+  await runTest('9. Título Bling: reconcilia titleBling com status pending_review e registra em appliedFields', () => {
+    const sheet = createInitialSheet();
+    const mapping = mapBlingProductToSheetPatch(completeProductFixture);
+
+    const result = reconcileBlingPatch(sheet, mapping);
+
+    assert.strictEqual(result.sheet.titleBling?.value, completeProductFixture.nome?.toUpperCase());
+    assert.strictEqual(result.sheet.titleBling?.status, 'pending_review');
+    assert.strictEqual(result.sheet.titleBling?.source, 'bling_erp');
+    assert.ok(result.appliedFields.includes('titleBling'));
+  });
 }

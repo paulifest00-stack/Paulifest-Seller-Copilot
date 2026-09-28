@@ -6,7 +6,9 @@ import type {
   BlingStatusResponse,
   DisconnectResponse,
   BlingProductQuickView,
-  GetBlingProductQuickViewResponse
+  GetBlingProductQuickViewResponse,
+  BlingProductUpdatePatch,
+  UpdateBlingProductResponse
 } from '../shared/gateway-contracts.ts';
 
 export const DEFAULT_GATEWAY_DEV_URL = 'http://localhost:3001';
@@ -880,6 +882,89 @@ export class GatewayClient {
     return quickView;
   }
 
+  async updateBlingProduct(productId: string, patch: BlingProductUpdatePatch): Promise<UpdateBlingProductResponse> {
+    const snapshotAuth = this.authGeneration;
+    const trimmedId = productId.trim();
+    if (!trimmedId) throw new GatewayProductError('INVALID_PRODUCT_ID', 'ID do produto não pode ser vazio.', 400);
+    this.assertAuthGeneration(snapshotAuth);
+    let gst = await this.getValidGst();
+    this.assertAuthGeneration(snapshotAuth);
+    let res = await this.rawUpdateProduct(trimmedId, patch, gst);
+    this.assertAuthGeneration(snapshotAuth);
+    if (res.status === 401) {
+      let firstError: any = {};
+      try { firstError = await res.clone().json(); } catch { /* corpo opcional */ }
+      // O Gateway só emite SESSION_REVOKED após revalidar uma escrita que pode já
+      // ter chegado ao Bling. Repetir automaticamente poderia duplicar o PATCH.
+      if (firstError.error === 'SESSION_REVOKED') {
+        throw new GatewayProductError('SESSION_REVOKED', firstError.message || 'Sessão alterada durante a atualização.', 401);
+      }
+      const stored = await this.loadSession();
+      this.assertAuthGeneration(snapshotAuth);
+      if (!stored?.gatewayRefreshToken) throw new GatewayAuthRequiredError('Sessão inexistente no Gateway.');
+      gst = await this.executeSingleFlightRefresh(stored.gatewayRefreshToken);
+      this.assertAuthGeneration(snapshotAuth);
+      res = await this.rawUpdateProduct(trimmedId, patch, gst);
+      this.assertAuthGeneration(snapshotAuth);
+      if (res.status === 401) throw new GatewayAuthRequiredError('Sessão rejeitada pelo Gateway após renovação.');
+    }
+    if (!res.ok) {
+      let body: any = {};
+      try { body = await res.json(); } catch { /* resposta inválida */ }
+      throw new GatewayProductError(body.error || 'GATEWAY_ERROR', body.message || `Falha ao atualizar produto (HTTP ${res.status}).`, res.status, body.retryAfterMs);
+    }
+    const data = await res.json() as UpdateBlingProductResponse;
+    this.assertAuthGeneration(snapshotAuth);
+    if (!data.ok || data.productId !== trimmedId || !Array.isArray(data.updatedFields)) {
+      throw new GatewayProductError('INVALID_GATEWAY_PAYLOAD', 'Identidade da atualização retornada pelo Gateway é inválida.', 422);
+    }
+    return data;
+  }
+
+  async mercadoLivre(action: import('../shared/mercadolivre-contracts.ts').MlAction, payload: Record<string, unknown> = {}): Promise<any> {
+    const generation = this.authGeneration;
+    const request = (gst: string) => fetch(this.baseUrl + '/integrations/mercadolivre/' + action, {
+      method: action === 'status' ? 'GET' : 'POST',
+      headers: { Authorization: 'Bearer ' + gst, Accept: 'application/json', 'Content-Type': 'application/json' },
+      ...(action === 'status' ? {} : { body: JSON.stringify(payload) }), signal: AbortSignal.timeout(90000)
+    });
+    let gst = await this.getValidGst(); this.assertAuthGeneration(generation);
+    let response = await request(gst); this.assertAuthGeneration(generation);
+    if (response.status === 401) {
+      const session = await this.loadSession(); this.assertAuthGeneration(generation);
+      if (!session?.gatewayRefreshToken) throw new GatewayAuthRequiredError('Conecte o Bling/Gateway para usar a integração Mercado Livre.');
+      gst = await this.executeSingleFlightRefresh(session.gatewayRefreshToken); this.assertAuthGeneration(generation);
+      response = await request(gst);
+    }
+    const body = await response.json(); this.assertAuthGeneration(generation);
+    if (!response.ok || !body.ok) throw new GatewayProductError(body.error || 'ML_ERROR', response.status === 404 ? 'Atualize o Gateway para habilitar a integração Mercado Livre.' : body.message || 'Falha na integração Mercado Livre.', response.status);
+    return body;
+  }
+  async searchBlingProducts(query: string, page: number, searchBy: 'name' | 'sku') {
+    const generation = this.authGeneration;
+    const params = new URLSearchParams({ query, page: String(page), searchBy });
+    const request = (gst: string) => fetch(this.baseUrl + '/integrations/bling/products?' + params, {
+      headers: { Authorization: 'Bearer ' + gst, Accept: 'application/json' }, signal: AbortSignal.timeout(10000)
+    });
+    let gst = await this.getValidGst();
+    this.assertAuthGeneration(generation);
+    let response = await request(gst);
+    this.assertAuthGeneration(generation);
+    if (response.status === 401) {
+      const session = await this.loadSession();
+      this.assertAuthGeneration(generation);
+      if (!session?.gatewayRefreshToken) throw new GatewayAuthRequiredError('Reconecte o Bling para consultar o catálogo.');
+      gst = await this.executeSingleFlightRefresh(session.gatewayRefreshToken);
+      this.assertAuthGeneration(generation);
+      response = await request(gst);
+    }
+    const body = await response.json();
+    this.assertAuthGeneration(generation);
+    if (!response.ok) throw new GatewayProductError(body.error || 'GATEWAY_ERROR', response.status === 404 ? 'O catálogo precisa da atualização do Gateway. Suas fichas salvas continuam disponíveis.' : body.message || 'Falha na consulta do catálogo.', response.status);
+    if (!body.ok || !Array.isArray(body.items) || body.page !== page) throw new GatewayProductError('INVALID_GATEWAY_PAYLOAD', 'Resposta inválida do catálogo.', 422);
+    return body;
+  }
+
   private async rawFetchProduct(productId: string, gst: string): Promise<Response> {
     try {
       return await fetch(`${this.baseUrl}/integrations/bling/products/${encodeURIComponent(productId)}`, {
@@ -895,6 +980,38 @@ export class GatewayClient {
         `Erro de conexão com Gateway ao consultar produto: ${netErr?.message || netErr}`,
         0
       );
+    }
+  }
+
+  private async rawUpdateProduct(productId: string, patch: BlingProductUpdatePatch, gst: string): Promise<Response> {
+    const path = `/integrations/bling/products/${encodeURIComponent(productId)}`;
+    const init: RequestInit = {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${gst}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(patch),
+      signal: AbortSignal.timeout(10000)
+    };
+    try {
+      const res = await fetch(`${this.baseUrl}${path}`, init);
+      if (res.status === 404 && this.baseUrl.includes('onrender.com')) {
+        try {
+          return await fetch(`${DEFAULT_GATEWAY_DEV_URL}${path}`, { ...init, signal: AbortSignal.timeout(10000) });
+        } catch {
+          return res;
+        }
+      }
+      return res;
+    } catch (err: any) {
+      if (this.baseUrl.includes('onrender.com')) {
+        try {
+          return await fetch(`${DEFAULT_GATEWAY_DEV_URL}${path}`, { ...init, signal: AbortSignal.timeout(10000) });
+        } catch {}
+      }
+      throw new GatewayTransientError(`Erro de conexão com Gateway ao atualizar produto: ${err?.message || err}`, 0);
     }
   }
 

@@ -11,14 +11,16 @@ export interface SellerPreferences {
   defaultPackagingCost: number;
   defaultTargetMarginPercent: number;
   defaultListingType: 'gold_special' | 'gold_pro';
+  packagingCostMigratedTo150?: boolean;
   geminiApiKey?: string;
 }
 
 export const DEFAULT_PREFERENCES: SellerPreferences = {
   defaultTaxRatePercent: 6.0,      // Padrão Simples Nacional
-  defaultPackagingCost: 2.50,      // Embalagem média
+  defaultPackagingCost: 1.50,      // Embalagem padrão R$ 1,50
   defaultTargetMarginPercent: 20.0, // 20% de margem líquida limpa
-  defaultListingType: 'gold_special'
+  defaultListingType: 'gold_special',
+  packagingCostMigratedTo150: true
 };
 
 // Fallback em memória para testes e ambientes onde localStorage não está totalmente instanciado
@@ -92,7 +94,8 @@ async function saveSheetUnlocked(sheet: CentralProductSheet): Promise<void> {
     throw new Error(`Não é possível salvar ficha inválida no storage: ${validation.errors.join('; ')}`);
   }
 
-  sheet.updatedAt = new Date().toISOString();
+  // Never mutate React state or an in-flight AI snapshot while persisting.
+  sheet = { ...sheet, updatedAt: new Date().toISOString() };
   const sheetKey = `${SHEET_STORAGE_PREFIX}${sheet.id}`;
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -209,13 +212,26 @@ export async function saveSellerPreferences(prefs: Partial<SellerPreferences>): 
  * Recupera as preferências do vendedor.
  */
 export async function loadSellerPreferences(): Promise<SellerPreferences> {
+  let stored: SellerPreferences | null = null;
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     const res = await chrome.storage.local.get(STORAGE_KEYS.SELLER_PREFERENCES);
-    return res[STORAGE_KEYS.SELLER_PREFERENCES] || DEFAULT_PREFERENCES;
+    stored = res[STORAGE_KEYS.SELLER_PREFERENCES] || null;
   } else {
     const raw = getStorageItem(STORAGE_KEYS.SELLER_PREFERENCES);
-    return raw ? JSON.parse(raw) : DEFAULT_PREFERENCES;
+    stored = raw ? JSON.parse(raw) : null;
   }
+
+  if (!stored) return { ...DEFAULT_PREFERENCES };
+
+  if (!stored.packagingCostMigratedTo150 && stored.defaultPackagingCost === 2.5) {
+    stored = {
+      ...stored,
+      defaultPackagingCost: 1.50,
+      packagingCostMigratedTo150: true
+    };
+  }
+
+  return { ...DEFAULT_PREFERENCES, ...stored };
 }
 
 // Web Locks coordinates the worker and Sidepanel for the same extension origin.
@@ -240,6 +256,110 @@ export function loadActiveSheet(): Promise<CentralProductSheet | null> {
 }
 export function clearActiveSheet(): Promise<void> {
   return withSheetLock(clearActiveSheetUnlocked);
+}
+
+/** Saved drafts are independent of browser tabs and survive exports/navigation. */
+export function listSavedSheets(): Promise<CentralProductSheet[]> {
+  return withSheetLock(async () => {
+    const entries: Record<string, unknown> = {};
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      Object.assign(entries, await chrome.storage.local.get(null));
+    } else {
+      try {
+        if (typeof localStorage !== 'undefined' && typeof localStorage.length === 'number') {
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key?.startsWith(SHEET_STORAGE_PREFIX)) entries[key] = localStorage.getItem(key);
+          }
+        }
+      } catch {}
+      for (const [key, value] of memoryStore) {
+        if (key.startsWith(SHEET_STORAGE_PREFIX)) entries[key] = value;
+      }
+    }
+    const sheets = new Map<string, CentralProductSheet>();
+    for (const [key, raw] of Object.entries(entries)) {
+      if (!key.startsWith(SHEET_STORAGE_PREFIX) && key !== STORAGE_KEYS.ACTIVE_SHEET) continue;
+      try {
+        const sheet = migrateSheetToV3(typeof raw === 'string' ? JSON.parse(raw) : raw);
+        sheets.set(sheet.id, sheet);
+      } catch { /* Preserve unreadable records; never delete them. */ }
+    }
+    return [...sheets.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  });
+}
+
+const WORKSPACE_KEY = 'paulifest_workspace_v1';
+export interface ProductWorkspace { sheetId: string; step: number }
+export async function saveWorkspace(workspace: ProductWorkspace): Promise<void> {
+  if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+    await chrome.storage.local.set({ [WORKSPACE_KEY]: workspace });
+  } else setStorageItem(WORKSPACE_KEY, JSON.stringify(workspace));
+}
+export async function loadWorkspace(): Promise<ProductWorkspace | null> {
+  const raw = typeof chrome !== 'undefined' && chrome.storage?.local
+    ? (await chrome.storage.local.get(WORKSPACE_KEY))[WORKSPACE_KEY]
+    : JSON.parse(getStorageItem(WORKSPACE_KEY) || 'null');
+  return raw && typeof raw.sheetId === 'string' ? { sheetId: raw.sheetId, step: Math.min(8, Math.max(1, Number(raw.step) || 1)) } : null;
+}
+
+export function deleteSheet(sheetId: string): Promise<void> {
+  return withSheetLock(async () => {
+    if (!sheetId || typeof sheetId !== 'string') return;
+    const sheetKey = `${SHEET_STORAGE_PREFIX}${sheetId}`;
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      const current = await chrome.storage.local.get(null);
+      const keysToRemove = [sheetKey];
+      const activeRaw = current[STORAGE_KEYS.ACTIVE_SHEET];
+      const activeObj = typeof activeRaw === 'string' ? JSON.parse(activeRaw || 'null') : activeRaw;
+      if (activeObj && activeObj.id === sheetId) keysToRemove.push(STORAGE_KEYS.ACTIVE_SHEET);
+      const wsRaw = current[WORKSPACE_KEY];
+      const wsObj = typeof wsRaw === 'string' ? JSON.parse(wsRaw || 'null') : wsRaw;
+      if (wsObj && wsObj.sheetId === sheetId) keysToRemove.push(WORKSPACE_KEY);
+      for (const k of keysToRemove) await chrome.storage.local.remove(k);
+    } else {
+      removeStorageItem(sheetKey);
+      memoryStore.delete(sheetKey);
+      try {
+        const active = JSON.parse(getStorageItem(STORAGE_KEYS.ACTIVE_SHEET) || 'null');
+        if (active && active.id === sheetId) {
+          removeStorageItem(STORAGE_KEYS.ACTIVE_SHEET);
+          memoryStore.delete(STORAGE_KEYS.ACTIVE_SHEET);
+        }
+      } catch {}
+      try {
+        const ws = JSON.parse(getStorageItem(WORKSPACE_KEY) || 'null');
+        if (ws && ws.sheetId === sheetId) {
+          removeStorageItem(WORKSPACE_KEY);
+          memoryStore.delete(WORKSPACE_KEY);
+        }
+      } catch {}
+    }
+  });
+}
+
+export function clearAllSavedSheets(): Promise<void> {
+  return withSheetLock(async () => {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      const all = await chrome.storage.local.get(null);
+      const keys = Object.keys(all).filter(k => k.startsWith(SHEET_STORAGE_PREFIX) || k === STORAGE_KEYS.ACTIVE_SHEET || k === WORKSPACE_KEY);
+      for (const k of keys) await chrome.storage.local.remove(k);
+    } else {
+      try {
+        if (typeof localStorage !== 'undefined' && typeof localStorage.length === 'number') {
+          const keys: string[] = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && (k.startsWith(SHEET_STORAGE_PREFIX) || k === STORAGE_KEYS.ACTIVE_SHEET || k === WORKSPACE_KEY)) keys.push(k);
+          }
+          for (const k of keys) removeStorageItem(k);
+        }
+      } catch {}
+      for (const k of [...memoryStore.keys()]) {
+        if (k.startsWith(SHEET_STORAGE_PREFIX) || k === STORAGE_KEYS.ACTIVE_SHEET || k === WORKSPACE_KEY) memoryStore.delete(k);
+      }
+    }
+  });
 }
 
 /** Compensated import: readers/writers cannot observe or overwrite a tentative sheet.

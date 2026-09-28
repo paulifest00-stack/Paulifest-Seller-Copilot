@@ -1,3 +1,4 @@
+import { isGeneratedEan } from './ean-generator.ts';
 // Orquestrador de Identificação, Pesquisa Externa Confiável e Resolução da Verdade
 import type { 
   CentralProductSheet, 
@@ -86,6 +87,8 @@ function buildAiCandidates(
   addCandidate('brand', aiResult.brand);
   addCandidate('model', aiResult.model);
   addCandidate('title', aiResult.title);
+  addCandidate('titleBling', aiResult.titleBling);
+  addCandidate('sku', aiResult.generatedSku);
   addCandidate('packageWeightKg', aiResult.packageWeightKg);
   addCandidate('warrantyDays', aiResult.warrantyDays);
   addCandidate('ncmSuggested', aiResult.ncmSuggested);
@@ -118,6 +121,10 @@ export async function runProductIdentification(
   aiProvider: IAIProvider = defaultAIProvider,
   researchProvider?: IResearchProvider
 ): Promise<IdentificationRunResult> {
+  // Um número gerado não é evidência de identidade em catálogo/IA.
+  if (isGeneratedEan(baseSheet.ean) && request.ean === baseSheet.ean.value) {
+    request = { ...request, ean: undefined };
+  }
   const hasImage = Boolean(request.imageBase64 && request.imageBase64.length > 50);
 
   // 1. ETAPA 1: Execução do Gateway de IA (Visão / OCR / Leitura de Input)
@@ -190,7 +197,7 @@ export async function runProductIdentification(
   }
 
   // 3. ETAPA 3: Pesquisa Externa Confiável (IResearchProvider) com Identidade do Produto
-  const activeResearchProvider = researchProvider || defaultResearchProvider;
+  const activeResearchProvider = researchProvider || (aiResult.isSimulated ? defaultResearchProvider : undefined);
   let researchResult: ProductResearchResult | undefined;
 
   const searchQuery: ProductIdentityQuery = {
@@ -228,7 +235,7 @@ export async function runProductIdentification(
   const finalSummary: IdentificationSummary = {
     productSummary: aiResult.productSummary,
     providerName: aiResult.providerName,
-    researchProviderName: researchResult ? activeResearchProvider.providerId : undefined,
+    researchProviderName: researchResult ? activeResearchProvider?.providerId : undefined,
     isSimulated: aiResult.isSimulated,
     confirmedCount: resolution.report.confirmedCount,
     readFromImageCount: resolution.report.readFromImageCount,
@@ -244,7 +251,7 @@ export async function runProductIdentification(
   };
 
   return {
-    sheet: resolution.sheet,
+    sheet: { ...resolution.sheet, titleBling: resolution.sheet.titleBling ? { ...resolution.sheet.titleBling, value: resolution.sheet.titleBling.value.toUpperCase() } : undefined },
     summary: finalSummary,
     rawResponse: aiResult,
     researchResult
