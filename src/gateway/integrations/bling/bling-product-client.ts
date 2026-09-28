@@ -1,3 +1,4 @@
+import { validCost } from '../../../shared/cost.ts';
 import { validateEan } from '../../../core/engines/identification/ean-validator.ts';
 import { gatewayLogger } from '../../security/logger.ts';
 import type {
@@ -267,6 +268,7 @@ export class BlingProductClient {
       throw new BlingProductError('ID do produto inválido.', 400, 'INVALID_PRODUCT_ID');
     }
     validateUpdatePatch(patch);
+    if (patch.costUpdate) return this.updateCost(trimmedId, patch.costUpdate, accessToken);
 
     let response: Response;
     try {
@@ -312,6 +314,34 @@ export class BlingProductClient {
       updatedFields: Object.keys(patch) as Array<keyof BlingProductUpdatePatch>,
       retrievedAt: new Date().toISOString()
     };
+  }
+
+  /** Cost is updated through the documented product-supplier resource, not the read-only supplier projection. */
+  private async updateCost(productId: string, change: {value:number; expected:number|null}, accessToken:string): Promise<UpdateBlingProductResponse> {
+    let writing=false;
+    const request=async(path:string, body?:Record<string,unknown>)=>{
+      let response:Response;
+      try {response=await fetch(`${this.baseUrl}/Api/v3/${path}`,{method:body?'PUT':'GET',headers:{Authorization:`Bearer ${accessToken}`,Accept:'application/json','Content-Type':'application/json','enable-jwt':'1'},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(this.timeoutMs)});}
+      catch {throw new BlingProductError(writing?'Não foi possível confirmar a gravação. Atualize o custo antes de tentar novamente.':'Não foi possível consultar o custo no Bling.',502,writing?'COST_WRITE_UNCONFIRMED':'BLING_NETWORK_ERROR');}
+      if(!response.ok)throw new BlingProductError(`Bling não confirmou a operação de custo (HTTP ${response.status}).`,writing?409:response.status,writing?'COST_WRITE_UNCONFIRMED':response.status===401?'UNAUTHORIZED':'BLING_API_ERROR');
+      if(body)return null;
+      try{return (await response.json() as any).data;}catch{throw new BlingProductError('Resposta de custo inválida; atualize antes de tentar novamente.',422,'INVALID_BLING_PAYLOAD');}
+    };
+    const product=await request(`produtos/${encodeURIComponent(productId)}`);
+    if(String(product?.id)!==productId)throw new BlingProductError('Produto retornado não corresponde ao solicitado.',422,'INVALID_BLING_PAYLOAD');
+    const linkId=String(product?.fornecedor?.id||'');
+    if(!/^\d{1,20}$/.test(linkId))throw new BlingProductError('O produto não tem vínculo de fornecedor identificado. Cadastre o fornecedor no Bling para salvar o custo por aqui.',409,'COST_SUPPLIER_REQUIRED');
+    const path=`produtos/fornecedores/${linkId}`;
+    const current=await request(path);
+    if(String(current?.id)!==linkId || String(current?.produto?.id)!==productId)throw new BlingProductError('Vínculo de fornecedor não corresponde ao produto.',409,'COST_IDENTITY_MISMATCH');
+    if(parseCostPrice(current.precoCusto)!==change.expected)throw new BlingProductError('O custo mudou no Bling. Atualize a página e confira o novo valor antes de salvar.',409,'COST_CHANGED');
+    const body:Record<string,unknown>={};
+    for(const key of ['descricao','codigo','precoCompra','padrao','produto','fornecedor','garantia'])if(current[key]!==undefined)body[key]=current[key];
+    body.precoCusto=change.value;
+    writing=true;await request(path,body);
+    const confirmed=await request(path);
+    if(String(confirmed?.id)!==linkId || String(confirmed?.produto?.id)!==productId || parseCostPrice(confirmed?.precoCusto)!==change.value)throw new BlingProductError('Bling recebeu a operação, mas o custo final não foi confirmado. Atualize a página.',409,'COST_WRITE_UNCONFIRMED');
+    return {ok:true,productId,updatedFields:['costUpdate'],retrievedAt:new Date().toISOString()};
   }
 
   /**
@@ -476,7 +506,7 @@ export class BlingProductClient {
   }
 }
 
-const UPDATE_FIELDS = new Set(['nome', 'codigo', 'preco', 'gtin', 'marca', 'descricaoComplementar', 'pesoBruto', 'dimensoes', 'tributacao']);
+const UPDATE_FIELDS = new Set(['costUpdate', 'nome', 'codigo', 'preco', 'gtin', 'marca', 'descricaoComplementar', 'pesoBruto', 'dimensoes', 'tributacao']);
 
 function validateUpdatePatch(patch: BlingProductUpdatePatch): void {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -485,6 +515,10 @@ function validateUpdatePatch(patch: BlingProductUpdatePatch): void {
   const keys = Object.keys(patch);
   if (keys.length === 0 || keys.some(key => !UPDATE_FIELDS.has(key))) {
     throw new BlingProductError('Patch vazio ou com campo não autorizado.', 400, 'INVALID_PRODUCT_PATCH');
+  }
+  if (patch.costUpdate !== undefined) {
+    const cost=patch.costUpdate;
+    if(keys.length!==1 || !cost || typeof cost!=='object' || Object.keys(cost).some(key=>!['value','expected'].includes(key)) || !validCost(cost.value) || (cost.expected!==null && !validCost(cost.expected))) throw new BlingProductError('Atualização de custo inválida.',400,'INVALID_PRODUCT_PATCH');
   }
   if (patch.nome !== undefined && (typeof patch.nome !== 'string' || !patch.nome.trim() || patch.nome.length > 120)) throw new BlingProductError('Nome inválido.', 400, 'INVALID_PRODUCT_PATCH');
   if (patch.codigo !== undefined && (typeof patch.codigo !== 'string' || !patch.codigo.trim() || patch.codigo.length > 100)) throw new BlingProductError('SKU inválido.', 400, 'INVALID_PRODUCT_PATCH');

@@ -63,6 +63,7 @@ export interface GetBlingProductResponse {
 
 /** Whitelist de campos que o Copilot pode alterar em um produto existente. */
 export interface BlingProductUpdatePatch {
+  costUpdate?: { value: number; expected: number | null };
   nome?: string;
   codigo?: string;
   preco?: number;

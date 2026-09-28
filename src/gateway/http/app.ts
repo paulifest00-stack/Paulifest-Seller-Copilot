@@ -210,6 +210,7 @@ export class GatewayApp {
         this.sendJson(res, 200, {
           status: 'ok',
           environment: this.config.environment,
+            capabilities: ['bling-cost-update-v1'],
           timestamp: new Date().toISOString()
         });
         return;
@@ -1139,6 +1140,7 @@ export class GatewayApp {
     }
 
     try {
+      if (body.costUpdate) this.quickViewCache.invalidate(auth.connectionId, trimmedId);
       const result = await this.tokenManager.executeWithBlingAuth(
         auth.connectionId,
         accessToken => this.productClient.updateProduct(trimmedId, body, accessToken)
