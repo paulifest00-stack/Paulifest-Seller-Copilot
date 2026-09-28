@@ -60,17 +60,61 @@ export function extractProductIdFromRow(row: HTMLElement): string | null {
   }
 
   // 5. Elementos filhos com data-id (botões de ação, menus de contexto)
-  const childWithId = row.querySelector('[data-id], [data-id-produto], [data-product-id]');
+  const childWithId = row.querySelector('[data-id], [data-id-produto], [data-product-id], [data-row-id], [data-item-id]');
   if (childWithId) {
     const childId = childWithId.getAttribute('data-id') || 
                     childWithId.getAttribute('data-id-produto') || 
-                    childWithId.getAttribute('data-product-id');
+                    childWithId.getAttribute('data-product-id') ||
+                    childWithId.getAttribute('data-row-id') ||
+                    childWithId.getAttribute('data-item-id');
     if (childId && isValidProductId(childId)) {
       return childId.trim();
     }
   }
 
+  // 6. Propriedades internas de frameworks (Vue / React / jQuery data) na linha <tr>
+  try {
+    const anyRow = row as any;
+    const candidates = [
+      anyRow.__vue__?.item?.id,
+      anyRow.__vue__?.produto?.id,
+      anyRow.__vue__?.row?.id,
+      anyRow.__vnode?.props?.['data-id'],
+      anyRow.__vnode?.key,
+      anyRow._vnode?.key
+    ];
+    for (const key of Object.keys(anyRow)) {
+      if (key.startsWith('__reactProps$') || key.startsWith('__reactFiber$')) {
+        const fiber = anyRow[key];
+        candidates.push(fiber?.return?.memoizedProps?.row?.id, fiber?.return?.key, fiber?.memoizedProps?.['data-id']);
+      }
+    }
+    for (const cand of candidates) {
+      if (cand != null && isValidProductId(String(cand)) && /^\d{5,20}$/.test(String(cand).trim())) {
+        return String(cand).trim();
+      }
+    }
+  } catch {}
+
   return null;
+}
+
+function parseCellBrlNumber(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/[R$\s]/g, '').trim();
+  if (!cleaned || cleaned === '-' || cleaned.includes('⏳')) return null;
+  const normalized = cleaned.includes(',')
+    ? cleaned.replace(/\./g, '').replace(',', '.')
+    : cleaned;
+  const num = Number(normalized);
+  return Number.isFinite(num) && num >= 0 ? Math.round(num * 100) / 100 : null;
+}
+
+function extractCleanCellText(cell: Element | undefined | null): string {
+  if (!cell) return '';
+  const clone = cell.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll('button, svg, script, style, .paulifest-cost-editor').forEach(el => el.remove());
+  return (clone.textContent || '').replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -92,6 +136,20 @@ export function findProductTable(root: Document | HTMLElement = document): HTMLT
       }
     }
     if (hasProductRows) {
+      return tbl;
+    }
+  }
+
+  // Fallback para a listagem moderna do Bling (onde as linhas <tr> possuem Descrição/Código/Preço mas não expõem data-id inicialmente)
+  for (let i = 0; i < candidates.length; i++) {
+    const tbl = candidates[i];
+    const headerRow = tbl.querySelector('thead tr') || tbl.querySelector('tr');
+    if (!headerRow) continue;
+    const headerTexts = Array.from(headerRow.children).map(th => (th.textContent || '').toLowerCase());
+    const hasDesc = headerTexts.some(t => t.includes('descri'));
+    const hasCodeOrPrice = headerTexts.some(t => t.includes('código') || t.includes('codigo') || t.includes('preço') || t.includes('preco') || t.includes('custo'));
+    const bodyRows = tbl.querySelectorAll('tbody tr');
+    if (hasDesc && hasCodeOrPrice && bodyRows.length > 0) {
       return tbl;
     }
   }
@@ -118,8 +176,11 @@ export class ProductListCostInjector {
   private observer: MutationObserver | null = null;
   private debounceTimer: number | null = null;
   private knownCosts = new Map<string, number | null>();
-  private costRevisions = new Map<string,number>();
+  private costRevisions = new Map<string, number>();
   private pendingIds = new Set<string>();
+  private skuToProductId = new Map<string, string>();
+  private nameToProductId = new Map<string, string>();
+  private catalogPreloadPromise: Promise<void> | null = null;
   private isDestroyed = false;
 
   constructor(pageInstanceId: string) {
@@ -175,7 +236,7 @@ export class ProductListCostInjector {
   }
 
   /**
-   * Realiza a varredura da tabela, inserção de colunas e solicitação de custos faltantes.
+   * Realiza a varredura da tabela, inserção/reuso da coluna Preço de Custo e ativação da edição inline.
    */
   scanAndInject(): InjectionResult {
     const table = findProductTable();
@@ -183,27 +244,39 @@ export class ProductListCostInjector {
       return { injectedCount: 0, productIds: [] };
     }
 
-    // 1. Identifica ou injeta o cabeçalho <th>
     const headerRow = table.querySelector('thead tr') || table.querySelector('tr');
     if (!headerRow) {
       return { injectedCount: 0, productIds: [] };
     }
 
+    const ths = Array.from(headerRow.children) as HTMLElement[];
+    let descColIndex = -1;
+    let skuColIndex = -1;
+    let nativeCostColIndex = -1;
+
+    for (let i = 0; i < ths.length; i++) {
+      const text = (ths[i].textContent || '').trim().toLowerCase();
+      if (descColIndex === -1 && text.includes('descri')) descColIndex = i;
+      if (skuColIndex === -1 && (text.includes('código') || text.includes('codigo') || text === 'sku')) skuColIndex = i;
+      if (ths[i].id === HEADER_ID || text.includes('custo')) {
+        nativeCostColIndex = i;
+      }
+    }
+
     let targetColIndex = -1;
-    let existingHeader = headerRow.querySelector(`#${HEADER_ID}`);
+    let reusedNativeColumn = false;
 
-    if (existingHeader) {
-      targetColIndex = Array.from(headerRow.children).indexOf(existingHeader);
+    if (nativeCostColIndex >= 0) {
+      targetColIndex = nativeCostColIndex;
+      reusedNativeColumn = !ths[nativeCostColIndex].classList.contains('paulifest-cost-th');
+      ths[nativeCostColIndex].id = HEADER_ID;
     } else {
-      // Procura a coluna de "Preço" ou "Estoque" para inserir ao lado
-      const ths = Array.from(headerRow.children) as HTMLElement[];
-      let insertBeforeCol = ths.length > 1 ? ths.length - 1 : ths.length; // Padrão: antes da última coluna (Ações)
-
+      let insertBeforeCol = ths.length > 1 ? ths.length - 1 : ths.length;
       let refTh: HTMLElement | null = null;
       for (let i = 0; i < ths.length; i++) {
         const text = (ths[i].textContent || '').toLowerCase();
         if (text.includes('preço') || text.includes('preco') || text.includes('valor')) {
-          insertBeforeCol = i + 1; // Insere logo após o Preço de Venda
+          insertBeforeCol = i + 1;
           refTh = ths[i];
           break;
         } else if (text.includes('estoque') || text.includes('saldo')) {
@@ -230,7 +303,7 @@ export class ProductListCostInjector {
         th.style.fontWeight = '600';
         th.style.fontSize = '12px';
       }
-      th.textContent = 'Preço de custo';
+      th.textContent = 'Preço de Custo';
 
       if (insertBeforeCol < ths.length) {
         headerRow.insertBefore(th, ths[insertBeforeCol]);
@@ -241,20 +314,30 @@ export class ProductListCostInjector {
       }
     }
 
-    // 2. Itera sobre as linhas de produtos no <tbody>
     const bodyRows = table.querySelectorAll('tbody tr');
     const rowsToProcess = bodyRows.length > 0 ? Array.from(bodyRows) : Array.from(table.querySelectorAll('tr')).slice(1);
 
     const idsNeedingCost: string[] = [];
     let injectedCount = 0;
+    let needsCatalogPreload = false;
 
-    for (const row of rowsToProcess) {
-      const htmlRow = row as HTMLElement;
-      const productId = extractProductIdFromRow(htmlRow);
+    for (let rowIndex = 0; rowIndex < rowsToProcess.length; rowIndex++) {
+      const htmlRow = rowsToProcess[rowIndex] as HTMLElement;
+      const rowSku = skuColIndex >= 0 ? extractCleanCellText(htmlRow.children[skuColIndex]) : '';
+      const rowName = descColIndex >= 0 ? extractCleanCellText(htmlRow.children[descColIndex]) : '';
 
-      if (!productId) {
-        // Linha sem produto (ex: separador ou agrupador). Se já temos a coluna, insere td vazio para não quebrar a contagem
-        if (targetColIndex >= 0 && !htmlRow.querySelector(`.${CELL_CLASS}`)) {
+      let productId = extractProductIdFromRow(htmlRow);
+      if (!productId && rowSku && this.skuToProductId.has(rowSku.toUpperCase())) {
+        productId = this.skuToProductId.get(rowSku.toUpperCase()) || null;
+        if (productId) htmlRow.setAttribute('data-product-id', productId);
+      }
+      if (!productId && rowName && this.nameToProductId.has(rowName.toUpperCase())) {
+        productId = this.nameToProductId.get(rowName.toUpperCase()) || null;
+        if (productId) htmlRow.setAttribute('data-product-id', productId);
+      }
+
+      if (!productId && !rowSku && !rowName) {
+        if (!reusedNativeColumn && targetColIndex >= 0 && !htmlRow.querySelector(`.${CELL_CLASS}`)) {
           const emptyTd = document.createElement('td');
           emptyTd.className = CELL_CLASS;
           if (targetColIndex < htmlRow.children.length) {
@@ -266,12 +349,32 @@ export class ProductListCostInjector {
         continue;
       }
 
-      // Injeta célula na coluna dedicada
+      if (!productId) {
+        needsCatalogPreload = true;
+      }
+
+      const rowKey = productId || (rowSku ? `sku:${rowSku.toUpperCase()}` : `name:${rowName.toUpperCase()}`);
+
       let td = htmlRow.querySelector<HTMLTableCellElement>(`.${CELL_CLASS}`);
-      if (!td) {
+      if (!td && reusedNativeColumn && targetColIndex >= 0 && targetColIndex < htmlRow.children.length) {
+        td = htmlRow.children[targetColIndex] as HTMLTableCellElement;
+        td.classList.add(CELL_CLASS);
+        const initialCellCost = parseCellBrlNumber(extractCleanCellText(td));
+        if (initialCellCost !== null && !this.knownCosts.has(rowKey)) {
+          this.knownCosts.set(rowKey, initialCellCost);
+          if (productId) this.knownCosts.set(productId, initialCellCost);
+        }
+        // Limpa o texto estático original para substituir pelo editor inline idêntico ao Preço de venda
+        td.textContent = '';
+        const span = document.createElement('span');
+        span.className = 'paulifest-cost-text';
+        span.style.display = 'none';
+        this.applyCostToElement(span, this.knownCosts.get(productId || rowKey) ?? initialCellCost);
+        td.appendChild(span);
+        injectedCount++;
+      } else if (!td) {
         td = document.createElement('td');
         td.className = CELL_CLASS;
-        td.setAttribute('data-product-id', productId);
         td.style.textAlign = 'right';
         td.style.whiteSpace = 'nowrap';
         td.style.verticalAlign = 'middle';
@@ -291,13 +394,14 @@ export class ProductListCostInjector {
         span.className = 'paulifest-cost-text';
         span.style.display = 'none';
 
-        if (this.knownCosts.has(productId)) {
-          const cost = this.knownCosts.get(productId);
-          this.applyCostToElement(span, cost);
+        if (productId && this.knownCosts.has(productId)) {
+          this.applyCostToElement(span, this.knownCosts.get(productId));
+        } else if (this.knownCosts.has(rowKey)) {
+          this.applyCostToElement(span, this.knownCosts.get(rowKey));
         } else {
           span.textContent = '⏳ ...';
           span.style.color = '#94a3b8';
-          idsNeedingCost.push(productId);
+          if (productId) idsNeedingCost.push(productId);
         }
 
         td.appendChild(span);
@@ -309,27 +413,26 @@ export class ProductListCostInjector {
         }
         injectedCount++;
       } else {
-        // Se a célula já existe mas estava carregando e temos o custo agora
-        if (this.knownCosts.has(productId)) {
+        if (productId && this.knownCosts.has(productId)) {
           const span = td.querySelector<HTMLElement>('.paulifest-cost-text');
-          if (span && span.textContent === '⏳ ...') {
-            this.applyCostToElement(span, this.knownCosts.get(productId));
-          }
+          if (span) this.applyCostToElement(span, this.knownCosts.get(productId));
           const editor = td.querySelector('.paulifest-cost-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
           editor?.refreshDisplay?.();
-        } else if (!this.pendingIds.has(productId)) {
+        } else if (productId && !this.pendingIds.has(productId) && !this.knownCosts.has(rowKey)) {
           idsNeedingCost.push(productId);
         }
       }
 
-
       if (td) {
-        this.mountCostEditor(td, htmlRow, productId);
+        if (productId) td.setAttribute('data-product-id', productId);
+        this.mountCostEditor(td, htmlRow, rowKey, rowSku, rowName);
       }
-
     }
 
-    // Se temos IDs novos a buscar, despacha para o Background
+    if (needsCatalogPreload) {
+      void this.preloadCatalogIds();
+    }
+
     if (idsNeedingCost.length > 0) {
       this.fetchCostsForProducts(idsNeedingCost);
     }
@@ -340,7 +443,7 @@ export class ProductListCostInjector {
     };
   }
 
-  private mountCostEditor(td: HTMLElement, htmlRow: HTMLElement, productId: string): void {
+  private mountCostEditor(td: HTMLElement, htmlRow: HTMLElement, rowKey: string, rowSku: string, rowName: string): void {
     const existing = td.querySelector('.paulifest-cost-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
     if (existing) {
       existing.refreshDisplay?.();
@@ -349,18 +452,153 @@ export class ProductListCostInjector {
     const textSpan = td.querySelector<HTMLElement>('.paulifest-cost-text');
     if (textSpan) textSpan.style.display = 'none';
     td.append(createCostEditor({
-      getCost: () => this.knownCosts.get(productId) ?? null,
-      isCurrent: () => !this.isDestroyed && htmlRow.isConnected && extractProductIdFromRow(htmlRow) === productId,
-      save: (value, expected) => saveInlineCost(this.pageInstanceId, productId, value, expected),
+      getCost: () => {
+        const pid = extractProductIdFromRow(htmlRow);
+        if (pid && this.knownCosts.has(pid)) return this.knownCosts.get(pid) ?? null;
+        return this.knownCosts.get(rowKey) ?? null;
+      },
+      isCurrent: () => !this.isDestroyed && htmlRow.isConnected,
+      save: async (value, expected) => {
+        const pid = await this.resolveProductIdForRow(htmlRow, rowSku, rowName);
+        if (!pid) {
+          return { ok: false, error: 'Não foi possível identificar o ID deste produto no Bling.' };
+        }
+        htmlRow.setAttribute('data-product-id', pid);
+        td.setAttribute('data-product-id', pid);
+        return saveInlineCost(this.pageInstanceId, pid, value, expected);
+      },
       onSaved: value => {
-        this.costRevisions.set(productId, (this.costRevisions.get(productId) || 0) + 1);
-        this.knownCosts.set(productId, value);
+        const pid = extractProductIdFromRow(htmlRow);
+        if (pid) {
+          this.costRevisions.set(pid, (this.costRevisions.get(pid) || 0) + 1);
+          this.knownCosts.set(pid, value);
+        }
+        this.knownCosts.set(rowKey, value);
         const text = td.querySelector<HTMLElement>('.paulifest-cost-text');
         if (text) this.applyCostToElement(text, value);
         const ed = td.querySelector('.paulifest-cost-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
         ed?.refreshDisplay?.();
       }
     }));
+  }
+
+  private async preloadCatalogIds(): Promise<void> {
+    if (this.catalogPreloadPromise) return this.catalogPreloadPromise;
+    this.catalogPreloadPromise = (async () => {
+      try {
+        if (typeof location !== 'undefined' && /(?:^|\.)bling\.com\.br$/i.test(location.hostname)) {
+          for (const url of ['/Api/v3/produtos?limite=100&criterio=5', '/Api/v3/produtos?limite=100']) {
+            try {
+              const r = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
+              if (r.ok) {
+                const j = await r.json();
+                for (const item of (j?.data || [])) {
+                  if (item?.id != null) {
+                    const idStr = String(item.id).trim();
+                    const sku = String(item.codigo || '').trim().toUpperCase();
+                    const name = String(item.nome || '').trim().toUpperCase();
+                    if (sku) this.skuToProductId.set(sku, idStr);
+                    if (name) this.nameToProductId.set(name, idStr);
+                    const rawCost = item?.fornecedor?.precoCusto ?? item?.precoCusto;
+                    if (typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0 && !this.knownCosts.has(idStr)) {
+                      this.knownCosts.set(idStr, Math.round(rawCost * 100) / 100);
+                    }
+                  }
+                }
+              }
+            } catch {}
+          }
+        }
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          const res: any = await chrome.runtime.sendMessage({
+            type: 'BLING_SEARCH_PRODUCTS',
+            query: '',
+            searchBy: 'name',
+            page: 1
+          });
+          if (res?.ok && Array.isArray(res.items)) {
+            for (const item of res.items) {
+              if (item?.id) {
+                const idStr = String(item.id).trim();
+                const sku = String(item.sku || '').trim().toUpperCase();
+                const name = String(item.name || '').trim().toUpperCase();
+                if (sku) this.skuToProductId.set(sku, idStr);
+                if (name) this.nameToProductId.set(name, idStr);
+              }
+            }
+          }
+        }
+        if (!this.isDestroyed) {
+          this.scanAndInject();
+        }
+      } finally {
+        this.catalogPreloadPromise = null;
+      }
+    })();
+    return this.catalogPreloadPromise;
+  }
+
+  private async resolveProductIdForRow(htmlRow: HTMLElement, rowSku: string, rowName: string): Promise<string | null> {
+    const direct = extractProductIdFromRow(htmlRow);
+    if (direct) return direct;
+
+    const upperSku = rowSku.trim().toUpperCase();
+    const upperName = rowName.trim().toUpperCase();
+    if (upperSku && this.skuToProductId.has(upperSku)) return this.skuToProductId.get(upperSku)!;
+    if (upperName && this.nameToProductId.has(upperName)) return this.nameToProductId.get(upperName)!;
+
+    await this.preloadCatalogIds();
+    if (upperSku && this.skuToProductId.has(upperSku)) return this.skuToProductId.get(upperSku)!;
+    if (upperName && this.nameToProductId.has(upperName)) return this.nameToProductId.get(upperName)!;
+
+    // Busca específica por SKU ou Nome via API da mesma origem ou Gateway
+    if (typeof location !== 'undefined' && /(?:^|\.)bling\.com\.br$/i.test(location.hostname)) {
+      try {
+        const qs = upperSku ? `codigo=${encodeURIComponent(rowSku.trim())}` : `pesquisa=${encodeURIComponent(rowName.trim())}`;
+        const r = await fetch(`/Api/v3/produtos?limite=20&${qs}`, { credentials: 'include', headers: { Accept: 'application/json' } });
+        if (r.ok) {
+          const j = await r.json();
+          for (const item of (j?.data || [])) {
+            const itemSku = String(item?.codigo || '').trim().toUpperCase();
+            const itemName = String(item?.nome || '').trim().toUpperCase();
+            if ((upperSku && itemSku === upperSku) || (upperName && itemName === upperName)) {
+              const idStr = String(item.id).trim();
+              if (upperSku) this.skuToProductId.set(upperSku, idStr);
+              if (upperName) this.nameToProductId.set(upperName, idStr);
+              return idStr;
+            }
+          }
+          if (j?.data?.length === 1 && j.data[0]?.id) {
+            return String(j.data[0].id).trim();
+          }
+        }
+      } catch {}
+    }
+
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage && (rowSku || rowName)) {
+      try {
+        const res: any = await chrome.runtime.sendMessage({
+          type: 'BLING_SEARCH_PRODUCTS',
+          query: rowSku || rowName,
+          searchBy: rowSku ? 'sku' : 'name',
+          page: 1
+        });
+        if (res?.ok && Array.isArray(res.items)) {
+          const exact = res.items.find((it: any) =>
+            (upperSku && String(it.sku || '').trim().toUpperCase() === upperSku) ||
+            (upperName && String(it.name || '').trim().toUpperCase() === upperName)
+          ) || (res.items.length === 1 ? res.items[0] : null);
+          if (exact?.id) {
+            const idStr = String(exact.id).trim();
+            if (upperSku) this.skuToProductId.set(upperSku, idStr);
+            if (upperName) this.nameToProductId.set(upperName, idStr);
+            return idStr;
+          }
+        }
+      } catch {}
+    }
+
+    return null;
   }
 
   private applyCostToElement(span: HTMLElement, cost: number | null | undefined): void {
@@ -390,8 +628,6 @@ export class ProductListCostInjector {
       cells.forEach(td => {
         const span = td.querySelector<HTMLElement>('.paulifest-cost-text');
         if (span) this.applyCostToElement(span, cost);
-        const row = td.closest('tr') as HTMLElement | null;
-        if (row) this.mountCostEditor(td, row, id);
         const editor = td.querySelector('.paulifest-cost-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
         editor?.refreshDisplay?.();
       });

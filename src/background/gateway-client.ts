@@ -921,9 +921,28 @@ export class GatewayClient {
     return data;
   }
 
+  private async fetchWithLocalFallback(path: string, init: RequestInit): Promise<Response> {
+    try {
+      const res = await fetch(`${this.baseUrl}${path}`, init);
+      if (res.status === 404 && this.baseUrl.includes('onrender.com')) {
+        try {
+          const localRes = await fetch(`${DEFAULT_GATEWAY_DEV_URL}${path}`, { ...init, signal: AbortSignal.timeout(15000) });
+          if (localRes.status !== 404) return localRes;
+        } catch {}
+      }
+      return res;
+    } catch (err: any) {
+      if (this.baseUrl.includes('onrender.com')) {
+        try {
+          return await fetch(`${DEFAULT_GATEWAY_DEV_URL}${path}`, { ...init, signal: AbortSignal.timeout(15000) });
+        } catch {}
+      }
+      throw err;
+    }
+  }
   async mercadoLivre(action: import('../shared/mercadolivre-contracts.ts').MlAction, payload: Record<string, unknown> = {}): Promise<any> {
     const generation = this.authGeneration;
-    const request = (gst: string) => fetch(this.baseUrl + '/integrations/mercadolivre/' + action, {
+    const request = (gst: string) => this.fetchWithLocalFallback('/integrations/mercadolivre/' + action, {
       method: action === 'status' ? 'GET' : 'POST',
       headers: { Authorization: 'Bearer ' + gst, Accept: 'application/json', 'Content-Type': 'application/json' },
       ...(action === 'status' ? {} : { body: JSON.stringify(payload) }), signal: AbortSignal.timeout(90000)
@@ -943,7 +962,7 @@ export class GatewayClient {
   async searchBlingProducts(query: string, page: number, searchBy: 'name' | 'sku') {
     const generation = this.authGeneration;
     const params = new URLSearchParams({ query, page: String(page), searchBy });
-    const request = (gst: string) => fetch(this.baseUrl + '/integrations/bling/products?' + params, {
+    const request = (gst: string) => this.fetchWithLocalFallback('/integrations/bling/products?' + params, {
       headers: { Authorization: 'Bearer ' + gst, Accept: 'application/json' }, signal: AbortSignal.timeout(10000)
     });
     let gst = await this.getValidGst();

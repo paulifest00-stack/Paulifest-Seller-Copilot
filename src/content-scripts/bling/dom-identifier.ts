@@ -74,12 +74,23 @@ export function classifyBlingUrl(urlStr: string): { pageType: BlingPageType; det
       };
     }
 
-    // 4. Listagem de Produtos
+    // Se houver hash de edição ou query id/idProduto mas o ID for inválido (ex: tentativa de XSS), rejeita como 'other'
+    if (
+      /^#(?:edit|editar|alterar|view)\//i.test(rawHash) ||
+      parsed.searchParams.has('id') ||
+      parsed.searchParams.has('idProduto')
+    ) {
+      return { pageType: 'other' };
+    }
+
+    // 4. Listagem de Produtos (qualquer hash de listagem/filtro/paginação em produtos.php ou /produtos)
     if (
       pathname === '/produtos' || 
       pathname === '/produtos/' || 
       pathname.startsWith('/produtos/lista') ||
-      ((pathname.includes('/produto') || pathname.includes('/cadastros')) && (!hash || hash === '#list' || hash === '#' || hash === '#todos'))
+      pathname.includes('/produtos.php') ||
+      pathname.includes('/cadastros.produtos.php') ||
+      ((pathname.includes('/produto') || pathname.includes('/cadastros')) && (!hash || hash.startsWith('#list') || hash === '#' || hash === '#todos'))
     ) {
       return { pageType: 'product_list' };
     }

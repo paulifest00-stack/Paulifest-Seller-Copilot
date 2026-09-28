@@ -138,8 +138,12 @@ import type {
       if(message?.type!=='BLING_VERIFY_COST_TARGET')return;
       if(sender.id!==chrome.runtime.id || message.pageInstanceId!==pageInstanceId || message.expectedUrl!==location.href){sendResponse({ok:false});return;}
       const context=classifyBlingUrl(location.href);
-      const ok=context.pageType==='product_form_edit'?context.detectedId===message.productId:
-        context.pageType==='product_list' && Array.from(document.querySelectorAll<HTMLElement>('tbody tr')).some(row=>extractProductIdFromRow(row)===message.productId);
+      const pid = String(message.productId || '');
+      const ok=context.pageType==='product_form_edit'?context.detectedId===pid:
+        (context.pageType==='product_list' || Boolean(document.querySelector('#paulifest-cost-header, .paulifest-cost-td'))) && (
+          Boolean(pid && document.querySelector(`[data-product-id="${CSS.escape(pid)}"]`)) ||
+          Array.from(document.querySelectorAll<HTMLElement>('tbody tr, tr')).some(row=>extractProductIdFromRow(row)===pid)
+        );
       sendResponse({ok});
     });
 
