@@ -1,11 +1,13 @@
-import { createCostEditor, saveInlineCost } from './cost-editor.ts';
-// Injetor Dinâmico de Coluna de Preço de Custo na Listagem de Produtos do Bling ERP (produtos.php)
+import { createCostEditor, saveInlineCost, createStockEditor, saveInlineStock } from './cost-editor.ts';
+// Injetor Dinâmico de Coluna de Preço de Custo e Estoque na Listagem de Produtos do Bling ERP (produtos.php)
 import { isValidProductId } from '../../shared/tab-context-contracts.ts';
 import type { ContentToBackgroundEnvelope, BlingGetProductsCostListPayload, BlingGetProductsCostListResponse } from '../../shared/tab-context-contracts.ts';
 
 const HEADER_ID = 'paulifest-cost-header';
 const CELL_CLASS = 'paulifest-cost-td';
 const INLINE_PILL_CLASS = 'paulifest-cost-inline-pill';
+const STOCK_HEADER_ID = 'paulifest-stock-header';
+const STOCK_CELL_CLASS = 'paulifest-stock-td';
 
 /**
  * Extrai o ID do produto de uma linha <tr> da tabela do Bling usando múltiplas estratégias.
@@ -130,10 +132,23 @@ function parseCellBrlNumber(raw: string | null | undefined): number | null {
   return Number.isFinite(num) && num >= 0 ? Math.round(num * 100) / 100 : null;
 }
 
+function parseCellStockNumber(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/\s*(?:un(?:id(?:ades?)?)?|und)\.?$/i, '').trim();
+  if (!cleaned || cleaned === '-' || cleaned.includes('⏳')) return null;
+  const normalized = cleaned.includes(',')
+    ? cleaned.replace(/\./g, '').replace(',', '.')
+    : /^\d{1,3}(?:\.\d{3})+$/.test(cleaned)
+      ? cleaned.replace(/\./g, '')
+      : cleaned;
+  const num = Number(normalized);
+  return Number.isFinite(num) && num >= 0 ? Math.round(num * 100) / 100 : null;
+}
+
 function extractCleanCellText(cell: Element | undefined | null): string {
   if (!cell) return '';
   const clone = cell.cloneNode(true) as HTMLElement;
-  clone.querySelectorAll('button, svg, script, style, .paulifest-cost-editor').forEach(el => el.remove());
+  clone.querySelectorAll('button, svg, script, style, .paulifest-cost-editor, .paulifest-stock-editor').forEach(el => el.remove());
   return (clone.textContent || '').replace(/\s+/g, ' ').trim();
 }
 
@@ -266,6 +281,33 @@ function bindCostCellIsolation(td: HTMLElement): void {
   }
 }
 
+function bindStockCellIsolation(td: HTMLElement): void {
+  if (td.getAttribute('data-paulifest-stock-isolated') === 'true') return;
+  td.setAttribute('data-paulifest-stock-isolated', 'true');
+  td.removeAttribute('onclick');
+  td.style.cursor = 'pointer';
+
+  for (const evtName of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'touchstart', 'touchend']) {
+    td.addEventListener(evtName, (e) => {
+      const target = e.target as HTMLElement | null;
+      if (!target || !target.closest('.paulifest-stock-editor')) {
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        if (evtName === 'click') {
+          e.preventDefault();
+          const editor = td.querySelector('.paulifest-stock-editor') as (HTMLElement & { openEditor?: () => void }) | null;
+          editor?.openEditor?.();
+        }
+      }
+    }, true);
+
+    td.addEventListener(evtName, (e) => {
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+    }, false);
+  }
+}
+
 /**
  * Encontra a tabela principal de produtos na página.
  */
@@ -314,6 +356,11 @@ export function formatCostValue(cost: number | null | undefined): string {
   return `R$ ${cost.toFixed(2).replace('.', ',')}`;
 }
 
+export function formatStockValue(stock: number | null | undefined): string {
+  if (stock === null || stock === undefined) return '-';
+  return Number.isInteger(stock) ? String(stock) : stock.toFixed(2).replace('.', ',');
+}
+
 export interface InjectionResult {
   injectedCount: number;
   productIds: string[];
@@ -326,6 +373,8 @@ export class ProductListCostInjector {
   private pollInterval: number | null = null;
   private knownCosts = new Map<string, number | null>();
   private costRevisions = new Map<string, number>();
+  private knownStocks = new Map<string, number | null>();
+  private stockRevisions = new Map<string, number>();
   private pendingIds = new Set<string>();
   private skuToProductId = new Map<string, string>();
   private nameToProductId = new Map<string, string>();
@@ -440,8 +489,8 @@ export class ProductListCostInjector {
 
   /**
    * Fallback Geométrico Universal:
-   * Localiza o texto visível "Preço de Custo" no cabeçalho pela coordenada X na tela (getBoundingClientRect)
-   * e transforma todas as células numéricas ("19,00", "20,00", "5,40", "0,00"...) alinhadas verticalmente abaixo dele,
+   * Localiza os textos visíveis "Preço de Custo" e "Estoque" no cabeçalho pela coordenada X na tela (getBoundingClientRect)
+   * e transforma todas as células numéricas ("19,00", "6,00", "5,00"...) alinhadas verticalmente abaixo deles,
    * independentemente de o Bling usar <table>, múltiplas <table>s, CSS Grid ou <div>s aninhadas.
    */
   private scanByVisualColumnCoordinates(root: Document): number {
@@ -450,61 +499,68 @@ export class ProductListCostInjector {
 
     let costHeaderEl: HTMLElement | null = null;
     let costHeaderRect: DOMRect | null = null;
+    let descAnchorRect: DOMRect | null = null;
 
     for (const el of allElements) {
       if (el.children.length > 2) continue;
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      if (text === 'preço de custo' || text === 'preco de custo') {
+      if (!costHeaderEl && (text === 'preço de custo' || text === 'preco de custo')) {
         const rect = el.getBoundingClientRect();
         if (rect.width > 10 && rect.height > 8) {
           costHeaderEl = el;
           costHeaderRect = rect;
-          break;
+        }
+      } else if (!descAnchorRect && (text === 'descrição' || text === 'descricao')) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 10 && rect.height > 8) {
+          descAnchorRect = rect;
         }
       }
     }
 
-    if (!costHeaderEl || !costHeaderRect) return 0;
+    const headerAnchorRect = costHeaderRect || descAnchorRect;
+    if (!headerAnchorRect) return 0;
 
-    const costCenterX = (costHeaderRect.left + costHeaderRect.right) / 2;
-    const headerCenterY = (costHeaderRect.top + costHeaderRect.bottom) / 2;
+    const headerCenterY = (headerAnchorRect.top + headerAnchorRect.bottom) / 2;
 
-    // Localiza também as colunas "Código" e "Descrição" na mesma linha horizontal do cabeçalho
+    // Localiza todas as colunas na mesma linha horizontal do cabeçalho da tabela
     let skuHeaderRect: DOMRect | null = null;
-    let descHeaderRect: DOMRect | null = null;
+    let descHeaderRect: DOMRect | null = descAnchorRect;
+    let stockHeaderEl: HTMLElement | null = null;
+    let stockHeaderRect: DOMRect | null = null;
+    const allHeaderCentersX: number[] = [];
 
     for (const el of allElements) {
       if (el.children.length > 2) continue;
       const rect = el.getBoundingClientRect();
-      if (rect.width < 10 || Math.abs((rect.top + rect.bottom) / 2 - headerCenterY) > 24) continue;
+      if (rect.width < 10 || Math.abs((rect.top + rect.bottom) / 2 - headerCenterY) > 28) continue;
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (text.length >= 2 && text.length <= 30) {
+        allHeaderCentersX.push((rect.left + rect.right) / 2);
+      }
       if (!skuHeaderRect && (text === 'código' || text === 'codigo' || text === 'sku')) {
         skuHeaderRect = rect;
       } else if (!descHeaderRect && (text === 'descrição' || text === 'descricao')) {
         descHeaderRect = rect;
+      } else if (!stockHeaderEl && (text === 'estoque' || text === 'saldo' || text === 'estoque atual')) {
+        stockHeaderEl = el;
+        stockHeaderRect = rect;
       }
     }
 
-    // Encontra todas as células de valor de custo alinhadas abaixo de "Preço de Custo"
-    let transformed = 0;
-    for (const el of allElements) {
-      if (el === costHeaderEl || el.contains(costHeaderEl)) continue;
-      if (el.classList.contains(CELL_CLASS) || el.closest(`.${CELL_CLASS}, .paulifest-cost-editor`)) continue;
-      // Prefere o elemento mais específico (folha) que contém o número
-      if (el.children.length > 0) continue;
+    const isClosestColumnCenter = (elCenterX: number, targetCenterX: number, maxDist: number): boolean => {
+      const distToTarget = Math.abs(elCenterX - targetCenterX);
+      if (distToTarget > maxDist) return false;
+      for (const otherX of allHeaderCentersX) {
+        if (Math.abs(otherX - targetCenterX) <= 8) continue;
+        if (Math.abs(elCenterX - otherX) < distToTarget) {
+          return false;
+        }
+      }
+      return true;
+    };
 
-      const rawText = (el.textContent || '').trim();
-      if (!/^(?:R\$\s*)?\d+(?:\.\d{3})*,\d{2}$/.test(rawText) && rawText !== '-') continue;
-
-      const rect = el.getBoundingClientRect();
-      if (rect.width < 8 || rect.height < 8 || rect.top <= costHeaderRect.bottom) continue;
-
-      const elCenterX = (rect.left + rect.right) / 2;
-      if (Math.abs(elCenterX - costCenterX) > Math.max(costHeaderRect.width * 0.85, 65)) continue;
-
-      const elCenterY = (rect.top + rect.bottom) / 2;
-
-      // Localiza o container da linha e extrai Código (SKU) e Descrição na mesma linha horizontal (Y)
+    const resolveRowMeta = (el: HTMLElement, elCenterY: number) => {
       const rowContainer = el.closest<HTMLElement>('tr, [role="row"]') || (() => {
         let p = el.parentElement;
         for (let d = 0; d < 6 && p; d++) {
@@ -550,26 +606,95 @@ export class ProductListCostInjector {
       }
 
       const rowKey = productId || (rowSku ? `sku:${rowSku.toUpperCase()}` : rowName ? `name:${rowName.toUpperCase()}` : `y:${Math.round(elCenterY)}`);
-      const initialCost = parseCellBrlNumber(rawText);
-      if (initialCost !== null && !this.knownCosts.has(rowKey)) {
-        this.knownCosts.set(rowKey, initialCost);
-        if (productId) this.knownCosts.set(productId, initialCost);
+      return { rowContainer, rowSku, rowName, productId, rowKey };
+    };
+
+    let transformed = 0;
+
+    // 1. Encontra todas as células de valor de custo alinhadas exclusivamente abaixo de "Preço de Custo"
+    if (costHeaderEl && costHeaderRect) {
+      const costCenterX = (costHeaderRect.left + costHeaderRect.right) / 2;
+      for (const el of allElements) {
+        if (el === costHeaderEl || el.contains(costHeaderEl)) continue;
+        if (el.classList.contains(CELL_CLASS) || el.closest(`.${CELL_CLASS}, .${STOCK_CELL_CLASS}, .paulifest-cost-editor, .paulifest-stock-editor`)) continue;
+        if (el.children.length > 0) continue;
+
+        const rawText = (el.textContent || '').trim();
+        if (!/^(?:R\$\s*)?\d+(?:\.\d{3})*,\d{2}$/.test(rawText) && rawText !== '-') continue;
+
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8 || rect.top <= costHeaderRect.bottom) continue;
+
+        const elCenterX = (rect.left + rect.right) / 2;
+        if (!isClosestColumnCenter(elCenterX, costCenterX, Math.max(costHeaderRect.width * 0.65, 38))) continue;
+
+        const elCenterY = (rect.top + rect.bottom) / 2;
+        const { rowContainer, rowSku, rowName, productId, rowKey } = resolveRowMeta(el, elCenterY);
+
+        const initialCost = parseCellBrlNumber(rawText);
+        if (initialCost !== null && !this.knownCosts.has(rowKey)) {
+          this.knownCosts.set(rowKey, initialCost);
+          if (productId) this.knownCosts.set(productId, initialCost);
+        }
+
+        const targetCell = (el.tagName.toLowerCase() === 'td' ? el : (el.closest('td') || el)) as HTMLElement;
+        targetCell.classList.add(CELL_CLASS);
+        if (productId) targetCell.setAttribute('data-product-id', productId);
+        targetCell.textContent = '';
+        bindCostCellIsolation(targetCell);
+
+        const span = document.createElement('span');
+        span.className = 'paulifest-cost-text';
+        span.style.display = 'none';
+        this.applyCostToElement(span, this.knownCosts.get(productId || rowKey) ?? initialCost);
+        targetCell.appendChild(span);
+
+        this.mountCostEditor(targetCell, rowContainer, rowKey, rowSku, rowName);
+        transformed++;
       }
+    }
 
-      const targetCell = (el.tagName.toLowerCase() === 'td' ? el : (el.closest('td') || el)) as HTMLElement;
-      targetCell.classList.add(CELL_CLASS);
-      if (productId) targetCell.setAttribute('data-product-id', productId);
-      targetCell.textContent = '';
-      bindCostCellIsolation(targetCell);
+    // 2. Encontra todas as células de saldo alinhadas exclusivamente abaixo de "Estoque" (sem tocar em "Preço")
+    if (stockHeaderEl && stockHeaderRect) {
+      const stockCenterX = (stockHeaderRect.left + stockHeaderRect.right) / 2;
+      for (const el of allElements) {
+        if (el === stockHeaderEl || el.contains(stockHeaderEl)) continue;
+        if (el.classList.contains(STOCK_CELL_CLASS) || el.classList.contains(CELL_CLASS) || el.closest(`.${STOCK_CELL_CLASS}, .${CELL_CLASS}, .paulifest-stock-editor, .paulifest-cost-editor`)) continue;
+        if (el.children.length > 0) continue;
 
-      const span = document.createElement('span');
-      span.className = 'paulifest-cost-text';
-      span.style.display = 'none';
-      this.applyCostToElement(span, this.knownCosts.get(productId || rowKey) ?? initialCost);
-      targetCell.appendChild(span);
+        const rawText = (el.textContent || '').trim();
+        if (!/^-?\d+(?:\.\d{3})*(?:,\d{1,4})?(?:\s*un(?:id)?\.?)?$/i.test(rawText) && rawText !== '-') continue;
 
-      this.mountCostEditor(targetCell, rowContainer, rowKey, rowSku, rowName);
-      transformed++;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8 || rect.top <= stockHeaderRect.bottom) continue;
+
+        const elCenterX = (rect.left + rect.right) / 2;
+        if (!isClosestColumnCenter(elCenterX, stockCenterX, Math.max(stockHeaderRect.width * 0.65, 38))) continue;
+
+        const elCenterY = (rect.top + rect.bottom) / 2;
+        const { rowContainer, rowSku, rowName, productId, rowKey } = resolveRowMeta(el, elCenterY);
+
+        const initialStock = parseCellStockNumber(rawText);
+        if (initialStock !== null && !this.knownStocks.has(rowKey)) {
+          this.knownStocks.set(rowKey, initialStock);
+          if (productId) this.knownStocks.set(productId, initialStock);
+        }
+
+        const targetCell = (el.tagName.toLowerCase() === 'td' ? el : (el.closest('td') || el)) as HTMLElement;
+        targetCell.classList.add(STOCK_CELL_CLASS);
+        if (productId) targetCell.setAttribute('data-product-id', productId);
+        targetCell.textContent = '';
+        bindStockCellIsolation(targetCell);
+
+        const span = document.createElement('span');
+        span.className = 'paulifest-stock-text';
+        span.style.display = 'none';
+        this.applyStockToElement(span, this.knownStocks.get(productId || rowKey) ?? initialStock);
+        targetCell.appendChild(span);
+
+        this.mountStockEditor(targetCell, rowContainer, rowKey, rowSku, rowName);
+        transformed++;
+      }
     }
 
     return transformed;
@@ -579,7 +704,7 @@ export class ProductListCostInjector {
    * Realiza a varredura da tabela, inserção/reuso da coluna Preço de Custo e ativação da edição inline.
    */
   scanAndInject(): InjectionResult {
-    // 1. Executa primeiro o pareamento geométrico visual da coluna "Preço de Custo" se ela já estiver visível na tela
+    // 1. Executa primeiro o pareamento geométrico visual das colunas "Preço de Custo" e "Estoque"
     let visualCount = 0;
     if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
       try {
@@ -617,6 +742,7 @@ export class ProductListCostInjector {
     let descColIndex = -1;
     let skuColIndex = -1;
     let nativeCostColIndex = -1;
+    let nativeStockColIndex = -1;
 
     for (let i = 0; i < ths.length; i++) {
       const text = (ths[i].textContent || '').trim().toLowerCase();
@@ -624,6 +750,9 @@ export class ProductListCostInjector {
       if (skuColIndex === -1 && (text.includes('código') || text.includes('codigo') || text === 'sku')) skuColIndex = i;
       if (ths[i].id === HEADER_ID || text.includes('custo')) {
         nativeCostColIndex = i;
+      }
+      if (ths[i].id === STOCK_HEADER_ID || text === 'estoque' || text === 'saldo') {
+        nativeStockColIndex = i;
       }
     }
 
@@ -673,11 +802,24 @@ export class ProductListCostInjector {
       if (insertBeforeCol < ths.length) {
         headerRow.insertBefore(th, ths[insertBeforeCol]);
         targetColIndex = insertBeforeCol;
+        if (nativeStockColIndex >= insertBeforeCol) nativeStockColIndex++;
       } else {
         headerRow.appendChild(th);
         targetColIndex = ths.length;
       }
     }
+
+    const updatedThs = Array.from(headerRow.children) as HTMLElement[];
+    let stockColIndex = -1;
+    let reusedNativeStockColumn = false;
+
+    if (nativeStockColIndex >= 0 && nativeStockColIndex < updatedThs.length) {
+      stockColIndex = nativeStockColIndex;
+      reusedNativeStockColumn = true;
+      updatedThs[nativeStockColIndex].id = STOCK_HEADER_ID;
+    }
+
+    const finalThs = Array.from(headerRow.children) as HTMLElement[];
 
     const idsNeedingCost: string[] = [];
     let injectedCount = 0;
@@ -723,7 +865,7 @@ export class ProductListCostInjector {
 
       let td = htmlRow.querySelector<HTMLElement>(`.${CELL_CLASS}`);
       if (!td && reusedNativeColumn) {
-        const nativeCell = this.resolveCellByColIndexOrGeometry(htmlRow, targetColIndex, ths[targetColIndex], ths.length);
+        const nativeCell = this.resolveCellByColIndexOrGeometry(htmlRow, targetColIndex, finalThs[targetColIndex], finalThs.length);
         if (nativeCell) {
           td = nativeCell;
           td.classList.add(CELL_CLASS);
@@ -801,6 +943,42 @@ export class ProductListCostInjector {
         if (productId) td.setAttribute('data-product-id', productId);
         this.mountCostEditor(td, htmlRow, rowKey, rowSku, rowName);
       }
+
+      // Coluna de Estoque (reutiliza exclusivamente a coluna nativa de Estoque/Saldo sem duplicar colunas)
+      let stockTd = htmlRow.querySelector<HTMLElement>(`.${STOCK_CELL_CLASS}`);
+      if (!stockTd && reusedNativeStockColumn && stockColIndex >= 0) {
+        const nativeStockCell = this.resolveCellByColIndexOrGeometry(htmlRow, stockColIndex, finalThs[stockColIndex], finalThs.length);
+        if (nativeStockCell && nativeStockCell !== td && !nativeStockCell.classList.contains(CELL_CLASS)) {
+          stockTd = nativeStockCell;
+          stockTd.classList.add(STOCK_CELL_CLASS);
+          const initialCellStock = parseCellStockNumber(extractCleanCellText(stockTd));
+          if (initialCellStock !== null && !this.knownStocks.has(rowKey)) {
+            this.knownStocks.set(rowKey, initialCellStock);
+            if (productId) this.knownStocks.set(productId, initialCellStock);
+          }
+          stockTd.textContent = '';
+          bindStockCellIsolation(stockTd);
+
+          const stockSpan = document.createElement('span');
+          stockSpan.className = 'paulifest-stock-text';
+          stockSpan.style.display = 'none';
+          this.applyStockToElement(stockSpan, this.knownStocks.get(productId || rowKey) ?? initialCellStock);
+          stockTd.appendChild(stockSpan);
+        }
+      } else if (stockTd) {
+        bindStockCellIsolation(stockTd);
+        if (productId && this.knownStocks.has(productId)) {
+          const stockSpan = stockTd.querySelector<HTMLElement>('.paulifest-stock-text');
+          if (stockSpan) this.applyStockToElement(stockSpan, this.knownStocks.get(productId));
+          const stockEditor = stockTd.querySelector('.paulifest-stock-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
+          stockEditor?.refreshDisplay?.();
+        }
+      }
+
+      if (stockTd) {
+        if (productId) stockTd.setAttribute('data-product-id', productId);
+        this.mountStockEditor(stockTd, htmlRow, rowKey, rowSku, rowName);
+      }
     }
 
     if (needsCatalogPreload) {
@@ -851,6 +1029,45 @@ export class ProductListCostInjector {
         const text = td.querySelector<HTMLElement>('.paulifest-cost-text');
         if (text) this.applyCostToElement(text, value);
         const ed = td.querySelector('.paulifest-cost-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
+        ed?.refreshDisplay?.();
+      }
+    }));
+  }
+
+  private mountStockEditor(td: HTMLElement, htmlRow: HTMLElement, rowKey: string, rowSku: string, rowName: string): void {
+    const existing = td.querySelector('.paulifest-stock-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
+    if (existing) {
+      existing.refreshDisplay?.();
+      return;
+    }
+    const textSpan = td.querySelector<HTMLElement>('.paulifest-stock-text');
+    if (textSpan) textSpan.style.display = 'none';
+    td.append(createStockEditor({
+      getStock: () => {
+        const pid = extractProductIdFromRow(htmlRow);
+        if (pid && this.knownStocks.has(pid)) return this.knownStocks.get(pid) ?? null;
+        return this.knownStocks.get(rowKey) ?? null;
+      },
+      isCurrent: () => !this.isDestroyed && htmlRow.isConnected,
+      save: async (value, expected) => {
+        const pid = await this.resolveProductIdForRow(htmlRow, rowSku, rowName);
+        if (!pid) {
+          return { ok: false, error: 'Não foi possível identificar o ID deste produto no Bling.' };
+        }
+        htmlRow.setAttribute('data-product-id', pid);
+        td.setAttribute('data-product-id', pid);
+        return saveInlineStock(this.pageInstanceId, pid, value, expected);
+      },
+      onSaved: value => {
+        const pid = extractProductIdFromRow(htmlRow);
+        if (pid) {
+          this.stockRevisions.set(pid, (this.stockRevisions.get(pid) || 0) + 1);
+          this.knownStocks.set(pid, value);
+        }
+        this.knownStocks.set(rowKey, value);
+        const text = td.querySelector<HTMLElement>('.paulifest-stock-text');
+        if (text) this.applyStockToElement(text, value);
+        const ed = td.querySelector('.paulifest-stock-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
         ed?.refreshDisplay?.();
       }
     }));
@@ -993,6 +1210,33 @@ export class ProductListCostInjector {
     }
   }
 
+  private applyStockToElement(span: HTMLElement, stock: number | null | undefined): void {
+    span.textContent = formatStockValue(stock);
+    if (stock !== null && stock !== undefined && stock > 0) {
+      span.style.color = '#047857';
+    } else {
+      span.style.color = '#94a3b8';
+    }
+  }
+
+  private applyBatchStocks(uniqueIds: string[], stocksMap: Record<string, number | null>, revisions: Map<string, number>): void {
+    for (const id of uniqueIds) {
+      if ((this.stockRevisions.get(id) || 0) !== revisions.get(id)) continue;
+      if (!(id in stocksMap)) continue;
+      const stock = stocksMap[id];
+      if (stock !== null && stock !== undefined) {
+        this.knownStocks.set(id, stock);
+      }
+      const cells = document.querySelectorAll<HTMLElement>(`.${STOCK_CELL_CLASS}[data-product-id="${id}"]`);
+      cells.forEach(td => {
+        const span = td.querySelector<HTMLElement>('.paulifest-stock-text');
+        if (span) this.applyStockToElement(span, this.knownStocks.get(id) ?? stock);
+        const editor = td.querySelector('.paulifest-stock-editor') as (HTMLElement & { refreshDisplay?: () => void }) | null;
+        editor?.refreshDisplay?.();
+      });
+    }
+  }
+
   private applyBatchCosts(uniqueIds: string[], costsMap: Record<string, number | null>, revisions: Map<string, number>): void {
     for (const id of uniqueIds) {
       if ((this.costRevisions.get(id) || 0) !== revisions.get(id)) continue;
@@ -1011,13 +1255,14 @@ export class ProductListCostInjector {
   }
 
   /**
-   * Solicita ao background o lote de custos dos produtos.
+   * Solicita ao background o lote de custos e estoques dos produtos.
    */
   private fetchCostsForProducts(productIds: string[]): void {
     const uniqueIds = Array.from(new Set(productIds)).filter(id => !this.pendingIds.has(id));
     if (uniqueIds.length === 0) return;
 
     const revisions = new Map(uniqueIds.map(id => [id, this.costRevisions.get(id) || 0]));
+    const stockRevisions = new Map(uniqueIds.map(id => [id, this.stockRevisions.get(id) || 0]));
     for (const id of uniqueIds) {
       this.pendingIds.add(id);
     }
@@ -1038,10 +1283,14 @@ export class ProductListCostInjector {
         if (this.isDestroyed || res?.stale) return;
         if (res && res.ok && res.costs && Object.keys(res.costs).length > 0) {
           this.applyBatchCosts(uniqueIds, res.costs, revisions);
+          if (res.stocks) {
+            this.applyBatchStocks(uniqueIds, res.stocks, stockRevisions);
+          }
           return;
         }
         // Fallback na mesma origem do Bling caso o Gateway retorne erro/429
         const fallbackCosts: Record<string, number | null> = {};
+        const fallbackStocks: Record<string, number | null> = {};
         if (typeof location !== 'undefined' && /(?:^|\.)bling\.com\.br$/i.test(location.hostname)) {
           try {
             const params = new URLSearchParams();
@@ -1052,14 +1301,35 @@ export class ProductListCostInjector {
               const j = await r.json();
               for (const item of (j?.data || [])) {
                 if (item?.id != null) {
+                  const idStr = String(item.id);
                   const rawCost = item?.fornecedor?.precoCusto ?? item?.precoCusto;
-                  fallbackCosts[String(item.id)] = typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0 ? Math.round(rawCost * 100) / 100 : null;
+                  fallbackCosts[idStr] = typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0 ? Math.round(rawCost * 100) / 100 : null;
+                  const rawStock = item?.estoque?.saldoVirtualTotal ?? item?.estoque?.saldoFisicoTotal;
+                  if (typeof rawStock === 'number' && Number.isFinite(rawStock) && rawStock >= 0) {
+                    fallbackStocks[idStr] = Math.round(rawStock * 100) / 100;
+                  }
+                }
+              }
+            }
+            const sParams = new URLSearchParams();
+            for (const id of uniqueIds) sParams.append('idsProdutos[]', id);
+            const rs = await fetch(`/Api/v3/estoques/saldos?${sParams.toString()}`, { credentials: 'include', headers: { Accept: 'application/json' } });
+            if (rs.ok) {
+              const js = await rs.json();
+              for (const item of (js?.data || [])) {
+                if (item?.produto?.id != null) {
+                  const idStr = String(item.produto.id);
+                  const rawStock = item?.saldoVirtualTotal ?? item?.saldoFisicoTotal;
+                  if (typeof rawStock === 'number' && Number.isFinite(rawStock) && rawStock >= 0) {
+                    fallbackStocks[idStr] = Math.round(rawStock * 100) / 100;
+                  }
                 }
               }
             }
           } catch {}
         }
         this.applyBatchCosts(uniqueIds, fallbackCosts, revisions);
+        this.applyBatchStocks(uniqueIds, fallbackStocks, stockRevisions);
       });
     }
   }

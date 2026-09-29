@@ -236,4 +236,33 @@ export async function runSpaDetectorTests() {
     assert.strictEqual(tagSpan.textContent, '#<script>alert("xss")</script>');
     assert.strictEqual(tagSpan.children.length, 0, 'Nenhum nó script deve ter sido instanciado');
   });
+
+  // 11. Novo Produto via Hash (#add, #edit/0), Query (?id=0) e Modal SPA (produtos.php)
+  await runTest('11. Novo Produto: classifica #add, #edit/0, ?id=0 e formulário SPA visível sem ID como product_form_new', () => {
+    assert.strictEqual(classifyBlingUrl('https://www.bling.com.br/produtos.php#add').pageType, 'product_form_new');
+    assert.strictEqual(classifyBlingUrl('https://www.bling.com.br/produtos.php#edit/0').pageType, 'product_form_new');
+    assert.strictEqual(classifyBlingUrl('https://www.bling.com.br/cadastros.produtos.php?id=0').pageType, 'product_form_new');
+
+    const fakeNewProductSpaDoc = {
+      querySelector: (selector: string) => {
+        if (selector.includes('nome')) {
+          return {
+            value: 'Produto Novo Teste',
+            getClientRects: () => [{ width: 200, height: 32 }]
+          };
+        }
+        if (selector.includes('id')) {
+          return { value: '0' };
+        }
+        return null;
+      }
+    };
+
+    const spaNewContext = detectBlingScreenContext(
+      'https://www.bling.com.br/produtos.php#list',
+      fakeNewProductSpaDoc
+    );
+    assert.strictEqual(spaNewContext.pageType, 'product_form_new');
+  });
 }
+

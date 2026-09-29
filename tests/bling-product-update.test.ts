@@ -1,4 +1,4 @@
-import { parseCostInput } from '../src/shared/cost.ts';
+import { parseCostInput, parseStockInput } from '../src/shared/cost.ts';
 import assert from 'node:assert/strict';
 import { createAuditedField, createInitialSheet } from '../src/core/schema/product.ts';
 import { buildBlingProductUpdatePatch, BlingSheetPatchError } from '../src/integrations/bling/sheet-to-bling-patch.ts';
@@ -161,6 +161,76 @@ export async function runBlingProductUpdateTests() {
     };
     await assert.rejects(new BlingProductClient().updateProduct('123',{costUpdate:{value:12,expected:5}},'token-test'),(error:any)=>error.code==='COST_WRITE_UNCONFIRMED'&&error.status!==401);
     assert.equal(writes,1);
+  });
+  await run('Estoque: parseStockInput valida inteiros/decimais e BLING_UPDATE_STOCK lança Entrada (+delta) ou Saída (-delta)', async () => {
+    assert.equal(parseStockInput('15'), 15);
+    assert.equal(parseStockInput('10,5 un'), 10.5);
+    assert.equal(parseStockInput('-3'), null);
+
+    let currentSimulatedStock = 5;
+    let postPayload: any = null;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (init?.method === 'POST' && u.endsWith('/estoques')) {
+        postPayload = JSON.parse(String(init.body));
+        if (postPayload.operacao === 'E') currentSimulatedStock += postPayload.quantidade;
+        if (postPayload.operacao === 'S') currentSimulatedStock -= postPayload.quantidade;
+        return new Response(JSON.stringify({ data: { id: 999 } }), { status: 201 });
+      }
+      if (u.includes('/estoques/saldos')) {
+        return new Response(JSON.stringify({
+          data: [{
+            produto: { id: 123 },
+            saldoFisicoTotal: currentSimulatedStock,
+            saldoVirtualTotal: currentSimulatedStock,
+            depositos: [{ id: 777, saldoFisico: currentSimulatedStock, saldoVirtual: currentSimulatedStock }]
+          }]
+        }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    };
+
+    // Caso 1: Estoque estava 5 e editou para 10 -> Lançamento de Entrada ('E') de quantidade 5
+    const resEntrada = await new BlingProductClient({ baseUrl: 'https://api.bling.test/Api/v3' }).updateProduct('123', { stockUpdate: { value: 10, expected: 5 } }, 'token-test');
+    assert.equal(resEntrada.ok, true);
+    assert.deepEqual(postPayload, {
+      produto: { id: 123 },
+      deposito: { id: 777 },
+      operacao: 'E',
+      quantidade: 5,
+      observacoes: 'Entrada de +5 un (5 -> 10) via Paulifest Seller Copilot'
+    });
+    assert.equal(currentSimulatedStock, 10);
+
+    // Caso 2: Estoque estava 5 e editou para 2 -> Lançamento de Saída ('S') de quantidade 3
+    currentSimulatedStock = 5;
+    const resSaida = await new BlingProductClient({ baseUrl: 'https://api.bling.test/Api/v3' }).updateProduct('123', { stockUpdate: { value: 2, expected: 5 } }, 'token-test');
+    assert.equal(resSaida.ok, true);
+    assert.deepEqual(postPayload, {
+      produto: { id: 123 },
+      deposito: { id: 777 },
+      operacao: 'S',
+      quantidade: 3,
+      observacoes: 'Saída de 3 un (5 -> 2) via Paulifest Seller Copilot'
+    });
+    assert.equal(currentSimulatedStock, 2);
+
+    const env = await setupRouter();
+    await tabContextManager.registerOrUpdateTab(900, { url: 'https://www.bling.com.br/produtos.php', domain: 'www.bling.com.br', pageType: 'product_list', isSupported: true, pageInstanceId: 'document-A' });
+    (globalThis as any).chrome.tabs.sendMessage = async () => ({ ok: true });
+    let gatewayPatch: any;
+    env.client.updateBlingProduct = async (id, body) => {
+      gatewayPatch = body;
+      return { ok: true, productId: id, updatedFields: ['stockUpdate'], retrievedAt: 'now' };
+    };
+    const routerRes = await new Promise<any>(resolve => env.router.handleMessage(
+      { type: 'BLING_UPDATE_STOCK', productId: '123', pageInstanceId: 'document-A', expectedUrl: 'https://www.bling.com.br/produtos.php', value: 10, expected: 5, confirmed: true },
+      { id: 'extension-id', frameId: 0, url: 'https://www.bling.com.br/produtos.php', tab: { id: 900 } } as any,
+      resolve
+    ));
+    assert.equal(routerRes.ok, true);
+    assert.equal(routerRes.stock, 10);
+    assert.deepEqual(gatewayPatch, { stockUpdate: { value: 10, expected: 5 } });
   });
   await run('Bling write: Fact-or-Omit preserva edição manual e omite ausentes', () => {
     const sheet = createInitialSheet();

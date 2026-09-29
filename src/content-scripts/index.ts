@@ -91,6 +91,14 @@ import type {
         }
         return { ok: false, message: res.error || 'Não foi possível aplicar o custo.' };
       },
+      onQuickApplyStock: async (stockValue: number) => {
+        const res = await costField.applyStockFromPopup(stockValue);
+        if (res.ok) {
+          const formatted = Number.isInteger(stockValue) ? String(stockValue) : String(stockValue).replace('.', ',');
+          return { ok: true, message: `Estoque ${formatted} un aplicado ✓` };
+        }
+        return { ok: false, message: res.error || 'Não foi possível aplicar o estoque.' };
+      },
       onQuickConnectBling: () => {
         chrome.runtime?.sendMessage?.({ type: 'BLING_START_CONNECT' }, (res) => {
           if (res?.status) shadowUi.updateConnectionStatus(res.status);
@@ -205,11 +213,26 @@ import type {
       if(sender.id!==chrome.runtime.id || message.pageInstanceId!==pageInstanceId || message.expectedUrl!==location.href){sendResponse({ok:false});return;}
       const context=classifyBlingUrl(location.href);
       const pid = String(message.productId || '');
+      const hasProductInDoc = (doc: Document): boolean => (
+        Boolean(doc.querySelector('#paulifest-cost-header, .paulifest-cost-td, #paulifest-stock-header, .paulifest-stock-td')) && (
+          Boolean(pid && doc.querySelector(`[data-product-id="${CSS.escape(pid)}"]`)) ||
+          Array.from(doc.querySelectorAll<HTMLElement>('tbody tr, tr')).some(row=>extractProductIdFromRow(row)===pid)
+        )
+      );
+      let foundInDocs = hasProductInDoc(document);
+      if (!foundInDocs && typeof document.querySelectorAll === 'function') {
+        const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe');
+        for (let i = 0; i < iframes.length; i++) {
+          try {
+            if (iframes[i].contentDocument && hasProductInDoc(iframes[i].contentDocument!)) {
+              foundInDocs = true;
+              break;
+            }
+          } catch {}
+        }
+      }
       const ok=context.pageType==='product_form_edit'?context.detectedId===pid:
-        (context.pageType==='product_list' || Boolean(document.querySelector('#paulifest-cost-header, .paulifest-cost-td'))) && (
-          Boolean(pid && document.querySelector(`[data-product-id="${CSS.escape(pid)}"]`)) ||
-          Array.from(document.querySelectorAll<HTMLElement>('tbody tr, tr')).some(row=>extractProductIdFromRow(row)===pid)
-        );
+        (context.pageType==='product_list' || foundInDocs);
       sendResponse({ok});
     });
 

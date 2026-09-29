@@ -1,4 +1,4 @@
-import { validCost } from '../../../shared/cost.ts';
+import { validCost, validStock } from '../../../shared/cost.ts';
 import { validateEan } from '../../../core/engines/identification/ean-validator.ts';
 import { gatewayLogger } from '../../security/logger.ts';
 import type {
@@ -269,6 +269,7 @@ export class BlingProductClient {
     }
     validateUpdatePatch(patch);
     if (patch.costUpdate) return this.updateCost(trimmedId, patch.costUpdate, accessToken);
+    if (patch.stockUpdate) return this.updateStock(trimmedId, patch.stockUpdate, accessToken);
 
     let response: Response;
     try {
@@ -361,6 +362,123 @@ export class BlingProductClient {
     const confirmed=await request(path);
     if(String(confirmed?.id)!==linkId || String(confirmed?.produto?.id)!==productId || parseCostPrice(confirmed?.precoCusto)!==change.value)throw new BlingProductError('Bling recebeu a operação, mas o custo final não foi confirmado. Atualize a página.',409,'COST_WRITE_UNCONFIRMED');
     return {ok:true,productId,updatedFields:['costUpdate'],retrievedAt:new Date().toISOString()};
+  }
+
+  /** Stock balance is adjusted through POST /Api/v3/estoques (operacao: 'B' - Balanço). */
+  private async updateStock(productId: string, change: { value: number; expected: number | null; depositId?: string }, accessToken: string): Promise<UpdateBlingProductResponse> {
+    let writing = false;
+    const request = async (path: string, body?: Record<string, unknown>, method: 'GET' | 'POST' = body ? 'POST' : 'GET') => {
+      let response: Response;
+      try {
+        response = await fetch(`${this.baseUrl}/Api/v3/${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'enable-jwt': '1'
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+          signal: AbortSignal.timeout(this.timeoutMs)
+        });
+      } catch {
+        throw new BlingProductError(
+          writing ? 'Não foi possível confirmar a gravação do estoque. Atualize a página antes de tentar novamente.' : 'Não foi possível consultar o estoque no Bling.',
+          502,
+          writing ? 'STOCK_WRITE_UNCONFIRMED' : 'BLING_NETWORK_ERROR'
+        );
+      }
+      if (!response.ok) {
+        throw new BlingProductError(
+          `Bling não confirmou a operação de estoque (HTTP ${response.status}).`,
+          writing ? 409 : response.status,
+          writing ? 'STOCK_WRITE_UNCONFIRMED' : response.status === 401 ? 'UNAUTHORIZED' : 'BLING_API_ERROR'
+        );
+      }
+      try {
+        return ((await response.json()) as any)?.data;
+      } catch {
+        if (method === 'POST') return null;
+        throw new BlingProductError('Resposta de estoque inválida; atualize antes de tentar novamente.', 422, 'INVALID_BLING_PAYLOAD');
+      }
+    };
+
+    const saldosList = await request(`estoques/saldos?idsProdutos[]=${encodeURIComponent(productId)}`);
+    const record = Array.isArray(saldosList) && saldosList.length > 0 ? saldosList[0] : null;
+    if (record?.produto?.id != null && String(record.produto.id).trim() !== productId) {
+      throw new BlingProductError('Identidade do produto no estoque não corresponde ao solicitado.', 409, 'STOCK_IDENTITY_MISMATCH');
+    }
+
+    let depositId = String(record?.depositos?.[0]?.id || change.depositId || '');
+    if (!/^[1-9]\d{0,19}$/.test(depositId)) {
+      try {
+        const depositos = await request('depositos?situacao=1&limite=20');
+        if (Array.isArray(depositos) && depositos.length > 0) {
+          const preferred = depositos.find((d: any) => d?.padrao === true && /^[1-9]\d{0,19}$/.test(String(d?.id || ''))) || depositos[0];
+          if (preferred?.id != null) depositId = String(preferred.id);
+        }
+      } catch {}
+    }
+    if (!/^[1-9]\d{0,19}$/.test(depositId)) {
+      throw new BlingProductError('O produto não possui depósito de estoque identificado no Bling. Cadastre um depósito ativo no Bling para ajustar o estoque.', 409, 'STOCK_DEPOSIT_REQUIRED');
+    }
+
+    const phys = typeof record?.saldoFisicoTotal === 'number' ? record.saldoFisicoTotal : Number(record?.saldoFisicoTotal);
+    const virt = typeof record?.saldoVirtualTotal === 'number' ? record.saldoVirtualTotal : Number(record?.saldoVirtualTotal);
+    const depPhys = typeof record?.depositos?.[0]?.saldoFisico === 'number' ? record.depositos[0].saldoFisico : Number(record?.depositos?.[0]?.saldoFisico);
+    const depVirt = typeof record?.depositos?.[0]?.saldoVirtual === 'number' ? record.depositos[0].saldoVirtual : Number(record?.depositos?.[0]?.saldoVirtual);
+    const apiStock = Number.isFinite(depPhys) ? depPhys : Number.isFinite(phys) ? phys : Number.isFinite(virt) ? virt : Number.isFinite(depVirt) ? depVirt : null;
+
+    if (change.expected !== null && record && apiStock !== null) {
+      const matchesAny = [phys, virt, depPhys, depVirt].some(v => Number.isFinite(v) && Math.abs(v - change.expected!) < 0.001);
+      if (!matchesAny) {
+        throw new BlingProductError('O estoque mudou no Bling. Atualize a página e confira o novo saldo antes de salvar.', 409, 'STOCK_CHANGED');
+      }
+    }
+
+    const baseStock = (change.expected !== null && Number.isFinite(change.expected))
+      ? change.expected
+      : (apiStock ?? 0);
+    const delta = Math.round((change.value - baseStock) * 1000) / 1000;
+    if (Math.abs(delta) < 0.0001) {
+      return { ok: true, productId, updatedFields: ['stockUpdate'], retrievedAt: new Date().toISOString() };
+    }
+
+    const operacao = delta > 0 ? 'E' : 'S';
+    const quantidade = Math.abs(delta);
+    const observacoes = operacao === 'E'
+      ? `Entrada de +${quantidade} un (${baseStock} -> ${change.value}) via Paulifest Seller Copilot`
+      : `Saída de ${quantidade} un (${baseStock} -> ${change.value}) via Paulifest Seller Copilot`;
+
+    writing = true;
+    await request('estoques', {
+      produto: { id: Number(productId) },
+      deposito: { id: Number(depositId) },
+      operacao,
+      quantidade,
+      observacoes
+    }, 'POST');
+
+    const confirmedList = await request(`estoques/saldos?idsProdutos[]=${encodeURIComponent(productId)}`);
+    const confirmedRec = Array.isArray(confirmedList) && confirmedList.length > 0 ? confirmedList[0] : null;
+    if (confirmedRec) {
+      if (String(confirmedRec?.produto?.id ?? '').trim() !== productId) {
+        throw new BlingProductError('Bling recebeu a operação, mas a identidade do estoque final divergiu.', 409, 'STOCK_WRITE_UNCONFIRMED');
+      }
+      const cPhys = Number(confirmedRec.saldoFisicoTotal);
+      const cVirt = Number(confirmedRec.saldoVirtualTotal);
+      const cDepPhys = Number(confirmedRec.depositos?.[0]?.saldoFisico);
+      const cDepVirt = Number(confirmedRec.depositos?.[0]?.saldoVirtual);
+      const expectedTarget = apiStock !== null ? Math.round((apiStock + delta) * 1000) / 1000 : change.value;
+      const okVal = [cPhys, cVirt, cDepPhys, cDepVirt].some(
+        v => Number.isFinite(v) && (Math.abs(v - change.value) < 0.001 || Math.abs(v - expectedTarget) < 0.001)
+      );
+      if (!okVal) {
+        throw new BlingProductError('Bling recebeu a operação, mas o saldo final não foi confirmado. Atualize a página.', 409, 'STOCK_WRITE_UNCONFIRMED');
+      }
+    }
+
+    return { ok: true, productId, updatedFields: ['stockUpdate'], retrievedAt: new Date().toISOString() };
   }
 
   /**
@@ -525,7 +643,7 @@ export class BlingProductClient {
   }
 }
 
-const UPDATE_FIELDS = new Set(['costUpdate', 'nome', 'codigo', 'preco', 'gtin', 'marca', 'descricaoComplementar', 'pesoBruto', 'dimensoes', 'tributacao']);
+const UPDATE_FIELDS = new Set(['costUpdate', 'stockUpdate', 'nome', 'codigo', 'preco', 'gtin', 'marca', 'descricaoComplementar', 'pesoBruto', 'dimensoes', 'tributacao']);
 
 function validateUpdatePatch(patch: BlingProductUpdatePatch): void {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
@@ -538,6 +656,12 @@ function validateUpdatePatch(patch: BlingProductUpdatePatch): void {
   if (patch.costUpdate !== undefined) {
     const cost=patch.costUpdate;
     if(keys.length!==1 || !cost || typeof cost!=='object' || Object.keys(cost).some(key=>!['value','expected','supplierId'].includes(key)) || !validCost(cost.value) || (cost.expected!==null && !validCost(cost.expected)) || (cost.supplierId!==undefined && (typeof cost.supplierId!=='string' || !/^[1-9]\d{0,19}$/.test(cost.supplierId)))) throw new BlingProductError('Atualização de custo inválida.',400,'INVALID_PRODUCT_PATCH');
+  }
+  if (patch.stockUpdate !== undefined) {
+    const stock = patch.stockUpdate;
+    if (keys.length !== 1 || !stock || typeof stock !== 'object' || Object.keys(stock).some(key => !['value', 'expected', 'depositId'].includes(key)) || !validStock(stock.value) || (stock.expected !== null && !validStock(stock.expected)) || (stock.depositId !== undefined && (typeof stock.depositId !== 'string' || !/^[1-9]\d{0,19}$/.test(stock.depositId)))) {
+      throw new BlingProductError('Atualização de estoque inválida.', 400, 'INVALID_PRODUCT_PATCH');
+    }
   }
   if (patch.nome !== undefined && (typeof patch.nome !== 'string' || !patch.nome.trim() || patch.nome.length > 120)) throw new BlingProductError('Nome inválido.', 400, 'INVALID_PRODUCT_PATCH');
   if (patch.codigo !== undefined && (typeof patch.codigo !== 'string' || !patch.codigo.trim() || patch.codigo.length > 100)) throw new BlingProductError('SKU inválido.', 400, 'INVALID_PRODUCT_PATCH');

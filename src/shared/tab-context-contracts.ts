@@ -63,6 +63,7 @@ export interface BlingGetProductsCostListPayload {
 export interface BlingGetProductsCostListResponse {
   ok: boolean;
   costs: Record<string, number | null>;
+  stocks?: Record<string, number | null>;
   stale?: boolean;
   error?: string;
 }

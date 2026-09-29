@@ -1191,7 +1191,7 @@ export class GatewayApp {
     }
 
     try {
-      if (body.costUpdate) this.quickViewCache.invalidate(auth.connectionId, trimmedId);
+      if (body.costUpdate || body.stockUpdate) this.quickViewCache.invalidate(auth.connectionId, trimmedId);
       const result = await this.tokenManager.executeWithBlingAuth(
         auth.connectionId,
         accessToken => this.productClient.updateProduct(trimmedId, body, accessToken)

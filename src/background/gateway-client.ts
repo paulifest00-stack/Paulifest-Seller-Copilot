@@ -1016,7 +1016,7 @@ export class GatewayClient {
     };
     try {
       const res = await fetch(`${this.baseUrl}${path}`, init);
-      if (res.status === 404 && this.baseUrl.includes('onrender.com')) {
+      if ((res.status === 404 || (res.status === 400 && Boolean(patch.stockUpdate))) && this.baseUrl.includes('onrender.com')) {
         try {
           return await fetch(`${DEFAULT_GATEWAY_DEV_URL}${path}`, { ...init, signal: AbortSignal.timeout(10000) });
         } catch {

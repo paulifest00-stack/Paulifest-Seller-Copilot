@@ -51,6 +51,7 @@ export interface ShadowUiOptions {
   onQuickGenerateSku?: () => { ok: boolean; value?: string; message: string };
   onQuickGenerateEan?: () => { ok: boolean; value?: string; message: string };
   onQuickApplyCost?: (costValue: number) => Promise<{ ok: boolean; message: string }>;
+  onQuickApplyStock?: (stockValue: number) => Promise<{ ok: boolean; message: string }>;
   onQuickConnectBling?: () => void;
   onQuickRetryBling?: () => void;
 }

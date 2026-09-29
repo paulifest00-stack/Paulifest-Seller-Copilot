@@ -1,13 +1,13 @@
 import { generateRandomEan13 } from '../../core/engines/identification/ean-generator.ts';
 import { generateSkuFromTitle } from '../../core/engines/identification/sku-generator.ts';
-export type ProductInputName = 'name' | 'sku' | 'ean' | 'cost' | 'price' | 'ncm' | 'brand';
+export type ProductInputName = 'name' | 'sku' | 'ean' | 'cost' | 'stock' | 'price' | 'brand';
 const INPUT_SELECTORS: Record<ProductInputName, string> = {
     name: 'input#nome, input[name="nome"], input[data-product-name], input[placeholder*="Nome do produto" i], input[placeholder*="Descrição do produto" i]',
     sku: 'input#codigo, input[name="codigo"], input[data-product-sku], input[placeholder*="Código (SKU)" i]',
     ean: 'input#gtin, input[name="gtin"], input#ean, input[name="ean"], input#gtinEmbalagem, input[name="gtinEmbalagem"], input[placeholder*="GTIN" i], input[placeholder*="EAN" i]',
     cost: 'input#precoCusto, input[name="precoCusto"], input[name="fornecedor.precoCusto"], input#preco_custo, input[id*="precoCusto" i], input[name*="precoCusto" i]',
     price: 'input#preco, input[name="preco"], input[id*="precoVenda" i], input[name*="precoVenda" i]',
-    ncm: 'input#ncm, input[name="ncm"], input#classificacaoFiscal, input[name="classificacaoFiscal"]',
+    stock: 'input#estoque, input[name="estoque"], input#estoqueAtual, input[name="estoqueAtual"], input#saldo, input[name="saldo"], input[id*="estoque" i], input[name*="estoque" i]',
     brand: 'input#marca, input[name="marca"]'
 };
 export function findBlingProductInput(kind: ProductInputName, root: Document | HTMLElement = document): HTMLInputElement | null {

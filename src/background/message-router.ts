@@ -1,4 +1,4 @@
-import { validCost } from '../shared/cost.ts';
+import { validCost, validStock } from '../shared/cost.ts';
 import { ML_ACTIONS } from '../shared/mercadolivre-contracts.ts';
 import { importCommitGate } from './import-commit-gate.ts';
 import { 
@@ -55,6 +55,7 @@ export class MessageRouter {
   private mockMode: boolean = false;
   private importResponders = new Map<string, Set<(response: any) => void>>();
   private costWrites = new Set<string>();
+  private stockWrites = new Set<string>();
   private inFlightProductWrites = new Map<string, Promise<BlingUpdateProductMessageResponse>>();
 
   constructor(
@@ -277,6 +278,65 @@ export class MessageRouter {
         sendResponse({ok:false,code:error?.code,status:error?.status,remoteUpdateMayHaveCompleted:dispatched && !preWriteRejected,error:error?.message||'Não foi possível salvar o custo.'});
       }
       finally{this.costWrites.delete(key);}
+      return true;
+    }
+
+    if (message.type === 'BLING_UPDATE_STOCK') {
+      const tabId = sender.tab?.id;
+      const state = tabId !== undefined ? tabContextManager.peekTabState(tabId) : undefined;
+      const trusted = sender.id === chrome.runtime.id && sender.frameId === 0 && isBlingDomain(sender.url || '');
+      const validDeposit = message.depositId === undefined || (typeof message.depositId === 'string' && /^[1-9]\d{0,19}$/.test(message.depositId));
+      if (!trusted || tabId === undefined || !state || state.platform !== 'bling' ||
+          !['product_list', 'product_form_edit'].includes(state.pageType) || state.pageInstanceId !== message.pageInstanceId ||
+          state.url !== message.expectedUrl || !isValidProductId(message.productId) || message.confirmed !== true ||
+          !validStock(message.value) || (message.expected !== null && !validStock(message.expected)) || !validDeposit ||
+          (state.pageType === 'product_form_edit' && state.detectedProduct?.id !== message.productId)) {
+        sendResponse({ ok: false, error: 'Página ou produto mudou. Atualize antes de editar o estoque.' });
+        return true;
+      }
+      const generation = this.gatewayClient.getAuthGeneration();
+      const key = JSON.stringify([generation, message.productId]);
+      if (this.stockWrites.has(key)) {
+        sendResponse({ ok: false, error: 'Já existe uma gravação de estoque em andamento para este produto.' });
+        return true;
+      }
+      this.stockWrites.add(key);
+      let dispatched = false;
+      try {
+        const proof = await chrome.tabs.sendMessage(
+          tabId,
+          { type: 'BLING_VERIFY_COST_TARGET', productId: message.productId, pageInstanceId: state.pageInstanceId, expectedUrl: state.url },
+          { frameId: 0 }
+        );
+        const fresh = tabContextManager.peekTabState(tabId);
+        if (!proof?.ok || fresh?.contextRevision !== state.contextRevision || fresh?.pageInstanceId !== state.pageInstanceId || this.gatewayClient.getAuthGeneration() !== generation) {
+          throw new Error('A página mudou antes de salvar. Confira o produto e tente novamente.');
+        }
+        dispatched = true;
+        const stockUpdate = message.depositId
+          ? { value: message.value, expected: message.expected, depositId: message.depositId }
+          : { value: message.value, expected: message.expected };
+        await this.gatewayClient.updateBlingProduct(message.productId, { stockUpdate });
+        this.gatewayClient.assertAuthGeneration(generation);
+        sendResponse({ ok: true, productId: message.productId, stock: message.value });
+        if (tabContextManager.peekTabState(tabId)?.pageType === 'product_form_edit') {
+          void this.handleBlingGetQuickView(tabId, message.pageInstanceId, { productId: message.productId }, () => {});
+        }
+      } catch (error: any) {
+        const preWriteRejected = error instanceof GatewayProductError && (
+          error.status === 400 || error.status === 401 || error.status === 403 || error.status === 404 || error.status === 502 ||
+          ['INVALID_PRODUCT_PATCH', 'INVALID_PRODUCT_ID', 'STOCK_DEPOSIT_REQUIRED', 'STOCK_CHANGED', 'STOCK_IDENTITY_MISMATCH', 'GATEWAY_NETWORK_ERROR', 'BLING_NETWORK_ERROR', 'UNAUTHORIZED', 'SESSION_EXPIRED', 'BLING_NOT_CONNECTED'].includes(error.code)
+        );
+        sendResponse({
+          ok: false,
+          code: error?.code,
+          status: error?.status,
+          remoteUpdateMayHaveCompleted: dispatched && !preWriteRejected,
+          error: error?.message || 'Não foi possível salvar o estoque.'
+        });
+      } finally {
+        this.stockWrites.delete(key);
+      }
       return true;
     }
 
@@ -922,6 +982,7 @@ export class MessageRouter {
       }
 
       const costs: Record<string, number | null> = {};
+      const stocks: Record<string, number | null> = {};
 
       if (this.mockMode) {
         for (const id of validIds) {
@@ -929,12 +990,13 @@ export class MessageRouter {
           for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) & 0xffffffff;
           const mockCost = Number((15 + (Math.abs(hash) % 2500) / 10).toFixed(2));
           costs[id] = mockCost;
+          stocks[id] = Math.abs(hash) % 120;
         }
         if (!(await contextIsCurrent())) {
-          sendResponse({ ok: false, stale: true, costs: {}, error: 'Contexto da listagem mudou.' });
+          sendResponse({ ok: false, stale: true, costs: {}, stocks: {}, error: 'Contexto da listagem mudou.' });
           return;
         }
-        sendResponse({ ok: true, costs });
+        sendResponse({ ok: true, costs, stocks });
         return;
       }
 
@@ -946,11 +1008,13 @@ export class MessageRouter {
         const chunk = validIds.slice(i, i + 3);
         const results = await Promise.allSettled(chunk.map(async (id) => {
           const qv = await this.gatewayClient.fetchBlingProductQuickView(id);
-          return [id, qv.costPrice === undefined ? null : qv.costPrice] as const;
+          const stockVal = qv.stockInfo ? qv.stockInfo.virtualTotal : null;
+          return [id, qv.costPrice === undefined ? null : qv.costPrice, stockVal] as const;
         }));
         for (const r of results) {
           if (r.status === 'fulfilled') {
             costs[r.value[0]] = r.value[1];
+            stocks[r.value[0]] = r.value[2];
             anySucceeded = true;
           } else {
             lastError = r.reason;
@@ -961,11 +1025,11 @@ export class MessageRouter {
         throw lastError;
       }
       if (!(await contextIsCurrent())) {
-        sendResponse({ ok: false, stale: true, costs: {}, error: 'Contexto da listagem mudou.' });
+        sendResponse({ ok: false, stale: true, costs: {}, stocks: {}, error: 'Contexto da listagem mudou.' });
         return;
       }
 
-      sendResponse({ ok: true, costs });
+      sendResponse({ ok: true, costs, stocks });
     } catch (err: any) {
       console.error('[Paulifest Copilot] Erro em handleBlingGetProductsCostList:', err);
       sendResponse({ ok: false, error: err?.message || 'Falha ao processar lista de custos.' });
