@@ -1,3 +1,4 @@
+import { runLivePricingTests } from './ml-live-pricing.test.ts';
 import { runMlIntegrationTests } from './mercadolivre-integration.test.ts';
 import { runUnificationTests } from './unification.test.ts';
 import { runProductWorkspaceTests } from './product-workspace.test.ts';
@@ -34,6 +35,7 @@ interface SuiteDefinition {
 }
 
 const SUITES: SuiteDefinition[] = [
+  { name: 'Precificação ML conectada', phase: 'ML', fn: runLivePricingTests },
   { name: 'Mercado Livre: OAuth, publicação e concorrência PostgreSQL', phase: 'ML', fn: runMlIntegrationTests },
   { name: 'Unificação: conteúdo, kits, mercado e publicação', phase: 'Unificação', fn: runUnificationTests },
   { name: 'Biblioteca e continuidade do produto', phase: 'Workspace', fn: runProductWorkspaceTests },

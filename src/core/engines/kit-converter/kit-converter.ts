@@ -24,6 +24,8 @@ export function convertToKit(source: CentralProductSheet, quantity: number): Cen
   result.externalReferences = [];
   result.stockInfo = undefined;
   result.pricingDraft = undefined;
+  result.mlCalculator = undefined;
+  result.mlAppliedPricing = undefined;
   result.title = createAuditedField(limitMlTitle((quantity > 1 ? `Kit ${quantity} ` : '') + baseName), 'rule_engine', 1, 'pending_review');
   result.titleBling = createAuditedField(((quantity > 1 ? `KIT ${quantity} ` : '') + baseName).toUpperCase(), 'rule_engine', 1, 'pending_review');
   result.sku = createAuditedField(skuForKit(baseSku, quantity), 'rule_engine', 1, baseSku ? 'pending_review' : 'missing');

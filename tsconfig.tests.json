@@ -5,7 +5,7 @@
     "noUnusedParameters": false
   },
   "include": [
-    "tests/mercadolivre-integration.test.ts",
+    "tests/ml-live-pricing.test.ts", "tests/mercadolivre-integration.test.ts",
     "tests/unification.test.ts",
     "tests/product-workspace.test.ts",
     "tests/catalog-workflow.test.ts",

@@ -2,7 +2,11 @@
 
 Extensão Chrome Manifest V3 para ficha central auditável, precificação e integração de leitura com Bling, com Gateway separado.
 
-## Estado atual
+## Calculadora conectada — 29/09/2026
+
+A etapa Preço agora consulta comissão e cotação de frete na API ML, com categoria, preço e logística; reconhece contexto de anúncio, sugere categorias e mostra custos/lucro por unidade. Sem conexão não usa taxas simuladas. 569 testes e builds aprovados. Ativação do aplicativo no Gateway e homologação na conta real ainda pendentes. Veja [entrega, limites e ativação](docs/CALCULADORA_ML_2026-09-29.md).
+
+## Estado anterior (25/09/2026)
 
 Revisão de 25/09/2026: ficha de trabalho preservada ao trocar de aba, biblioteca para retomar produtos, busca paginada no catálogo Bling, preparação de anúncio e correções no preenchimento por IA. Parâmetros da calculadora persistem por produto.
 

@@ -121,6 +121,8 @@ export interface PricingDraft {
 }
 
 export interface CentralProductSheet {
+  mlCalculator?: import('../../shared/ml-pricing.ts').MlCalculatorDraft;
+  mlAppliedPricing?: { quote: import('../../shared/ml-pricing.ts').MlPricingQuote; costs: import('../../shared/ml-pricing.ts').MlCalculatorDraft; appliedAt: string };
   workbench?: import('./workbench.ts').ProductWorkbench;
   pricingDraft?: PricingDraft;
   schemaVersion: number;

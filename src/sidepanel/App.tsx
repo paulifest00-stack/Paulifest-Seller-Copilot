@@ -133,13 +133,37 @@ export const App: React.FC = () => {
       }
     };
 
+    const onWindowMessage = (event: MessageEvent) => {
+      const data = event?.data;
+      if (!data || typeof data !== 'object' || data.type !== 'PAULIFEST_SYNC_WORKSPACE') return;
+      void contextSync.refresh();
+      void (async () => {
+        try {
+          const workspace = await loadWorkspace();
+          const saved = workspace ? await loadSheet(workspace.sheetId) : await loadActiveSheet();
+          if (disposed) return;
+          if (saved) {
+            sheetRef.current = saved;
+            setSheet(saved);
+            setActiveFlow(true);
+            setCurrentStep(typeof data.targetStep === 'number' ? data.targetStep : (workspace?.step || 2));
+            setScreen(data.targetScreen || 'product');
+          } else if (data.targetScreen) {
+            setScreen(data.targetScreen);
+          }
+        } catch {}
+      })();
+    };
+
     const onTabChanged = () => { void contextSync.refresh(); };
+    if (typeof window !== 'undefined') window.addEventListener?.('message', onWindowMessage);
     if (typeof chrome !== 'undefined') chrome.tabs?.onActivated.addListener(onTabChanged);
     if (typeof chrome !== 'undefined') chrome.runtime?.onMessage.addListener(listener);
     return () => {
       contextSync.dispose();
       contextSyncRef.current = null;
       disposed = true;
+      if (typeof window !== 'undefined') window.removeEventListener?.('message', onWindowMessage);
       if (typeof chrome !== 'undefined') chrome.tabs?.onActivated.removeListener(onTabChanged);
       if (typeof chrome !== 'undefined') chrome.runtime?.onMessage.removeListener(listener);
     };
@@ -372,7 +396,7 @@ export const App: React.FC = () => {
       {/* 1. Header Fixo e Translúcido com Identidade Visual Paulifest Copilot */}
       <header className="sticky top-0 z-30 px-3.5 py-2 bg-white/90 backdrop-blur-xl border-b border-[#0052d4]/10 shadow-[0_2px_12px_-4px_rgba(10,31,68,0.06)] flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#0a1f44]/5 to-[#00b4ff]/15 border border-[#0066ff]/20 flex items-center justify-center p-1 shadow-xs">
+          <div className="w-7 h-7 rounded-lg bg-white border border-[#0066ff]/20 flex items-center justify-center p-0.5 shadow-xs">
             <img
               src="/icons/logo.png"
               alt="Paulifest Seller Copilot"
@@ -669,7 +693,7 @@ export const App: React.FC = () => {
                   tabContext?.detectedProduct?.id && tabContext?.activeSheetId === sheet.id
                   ? { productId: tabContext.detectedProduct.id, connected: blingStatus === 'connected', contextKey: JSON.stringify([tabContext.tabId, tabContext.pageInstanceId, tabContext.contextRevision]) }
                   : undefined}
-                newBlingTarget={tabContext?.platform === 'bling' && tabContext?.pageType === 'product_form_new' && tabContext?.activeSheetId === sheet.id
+                newBlingTarget={tabContext?.platform === 'bling' && tabContext?.pageType === 'product_form_new' && typeof tabContext?.tabId === 'number'
                   ? { tabId: tabContext.tabId, pageInstanceId: tabContext.pageInstanceId, url: tabContext.url } : undefined}
                 onUpdateBling={handleUpdateProductInBling}
               />

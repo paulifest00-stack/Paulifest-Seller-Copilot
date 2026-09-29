@@ -1,4 +1,4 @@
-import { classifyBlingUrl } from './dom-identifier.ts';
+import { detectBlingScreenContext } from './dom-identifier.ts';
 import { setNativeInputValue } from './form-assistant.ts';
 import type { NewProductFormValues } from '../../integrations/bling/new-product-form.ts';
 
@@ -12,7 +12,7 @@ const selectors: Record<keyof NewProductFormValues, string> = {
 };
 export function fillNewBlingProduct(values: NewProductFormValues, expectedUrl: string, root: Document = document) {
   const filled: string[] = [], skipped: string[] = [];
-  if (window.location.href !== expectedUrl || classifyBlingUrl(window.location.href).pageType !== 'product_form_new') {
+  if (window.location.href !== expectedUrl || detectBlingScreenContext(window.location.href, root).pageType !== 'product_form_new') {
     return { ok: false, error: 'O formulário mudou. Abra o cadastro novo novamente.', filled, skipped };
   }
   for (const key of Object.keys(selectors) as (keyof NewProductFormValues)[]) {

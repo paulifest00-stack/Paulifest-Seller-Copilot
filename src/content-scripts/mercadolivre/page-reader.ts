@@ -1,3 +1,4 @@
+import { readPricingPage } from '../../integrations/mercadolivre/pricing-context.ts';
 import { isMlHost, normalizeMarketUrl, parseBrlPrice, type MarketItem, type MarketSnapshot } from '../../integrations/mercadolivre/market.ts';
 const read = (root: ParentNode, selector: string) => root.querySelector(selector)?.textContent?.replace(/\s+/g, ' ').trim() || '';
 function price(root: ParentNode): number | null {
@@ -37,11 +38,11 @@ export function readMarketPage(doc: Document, href: string): MarketSnapshot {
 }
 export function installMarketReader(): void {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message?.type !== 'ML_READ_PAGE') return;
+    if (!['ML_READ_PAGE', 'ML_READ_PRICING'].includes(message?.type)) return;
     if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('sidepanel.html') || message.expectedUrl !== location.href) {
       sendResponse({ ok: false, error: 'A aba mudou ou a origem é inválida. Capture novamente.' }); return;
     }
-    try { sendResponse({ ok: true, snapshot: readMarketPage(document, location.href) }); }
+    try { sendResponse(message.type === 'ML_READ_PRICING' ? { ok: true, context: readPricingPage(document, location.href) } : { ok: true, snapshot: readMarketPage(document, location.href) }); }
     catch (e) { sendResponse({ ok: false, error: e instanceof Error ? e.message : 'Não foi possível ler a página.' }); }
   });
 }

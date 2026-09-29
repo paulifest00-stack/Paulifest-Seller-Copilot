@@ -14,7 +14,7 @@ import {
 } from '../shared/tab-context-contracts.ts';
 import type { BlingProductQuickView, BlingUpdateProductMessageResponse } from '../shared/gateway-contracts.ts';
 import { tabContextManager } from './tab-context-manager.ts';
-import { loadSheet, saveSheet, commitImportedSheet } from '../core/storage/storage.ts';
+import { loadSheet, saveSheet, commitImportedSheet, saveWorkspace } from '../core/storage/storage.ts';
 import { createInitialSheet, type CentralProductSheet } from '../core/schema/product.ts';
 import { validateBlingProductInput } from '../integrations/bling/runtime-validator.ts';
 import { mapBlingProductToSheetPatch } from '../integrations/bling/bling-to-sheet.mapper.ts';
@@ -281,8 +281,9 @@ export class MessageRouter {
     }
 
     if (message.type === 'BLING_UPDATE_PRODUCT') {
-      const trustedSidepanel = typeof chrome !== 'undefined' && chrome.runtime?.getURL &&
-        sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL('sidepanel.html');
+      const panelUrl = typeof chrome !== 'undefined' ? chrome.runtime?.getURL?.('sidepanel.html') : '';
+      const trustedSidepanel = typeof chrome !== 'undefined' && Boolean(panelUrl) &&
+        sender.id === chrome.runtime.id && Boolean(sender.url?.startsWith(panelUrl));
       if (!trustedSidepanel) {
         sendResponse({ ok: false, error: 'Atualizações do Bling só podem ser confirmadas pela sidebar da extensão.' });
         return true;
@@ -343,10 +344,15 @@ export class MessageRouter {
   }
 
   private async resolveTargetTab(sender: chrome.runtime.MessageSender, requestedTabId?: number, windowId?: number): Promise<number | null> {
+    const panelUrl = typeof chrome !== 'undefined' ? chrome.runtime?.getURL?.('sidepanel.html') : '';
+    const isTrustedPanel = typeof chrome !== 'undefined' && Boolean(panelUrl) &&
+      sender.id === chrome.runtime.id && Boolean(sender.url?.startsWith(panelUrl));
     const contentTab = extractVerifiedSenderTabId(sender);
-    if (contentTab !== null) return contentTab;
-    if (typeof chrome === 'undefined' || !chrome.runtime?.getURL ||
-        sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('sidepanel.html')) return null;
+    if (contentTab !== null) {
+      if (isTrustedPanel && requestedTabId !== undefined && requestedTabId !== contentTab) return null;
+      return contentTab;
+    }
+    if (!isTrustedPanel) return null;
     const [active] = await chrome.tabs.query(Number.isInteger(windowId) ? { active: true, windowId } : { active: true, currentWindow: true });
     if (!active?.id || (requestedTabId !== undefined && requestedTabId !== active.id)) return null;
     return active.id;
@@ -429,7 +435,12 @@ export class MessageRouter {
 
       // Requisito 4: Recalcula o contexto a partir da URL no Background
       const urlClassification = classifyBlingUrl(payload.url);
-      const acceptedPageType = urlClassification.pageType;
+      let acceptedPageType = urlClassification.pageType;
+      // Se a URL for de listagem (ex: produtos.php) mas o Content Script detectou formulário de
+      // cadastro novo aberto via SPA sem ID, aceita product_form_new (nunca product_form_edit sem ID na URL)
+      if (acceptedPageType === 'product_list' && payload.pageType === 'product_form_new') {
+        acceptedPageType = 'product_form_new';
+      }
 
       let acceptedDetectedProduct = payload.detectedProduct;
       if (urlClassification.detectedId) {
@@ -483,6 +494,7 @@ export class MessageRouter {
     sendResponse: (res: any) => void
   ): Promise<void> {
     try {
+      const shouldOpenSidePanel = (payload as any)?.openSidePanel !== false;
       const snapshotAuth = this.gatewayClient.getAuthGeneration();
       const currentTab = await tabContextManager.getTabState(tabId);
       if (!currentTab) {
@@ -504,6 +516,7 @@ export class MessageRouter {
         if (currentTab.pageType === 'product_form_new' && !currentTab.activeSheetId) {
           const draft = createInitialSheet();
           await saveSheet(draft);
+          await saveWorkspace({ sheetId: draft.id, step: 1 });
           const live = tabContextManager.peekTabState(tabId);
           if (!live || live.pageInstanceId !== currentTab.pageInstanceId || live.url !== currentTab.url || live.pageType !== 'product_form_new') {
             sendResponse({ ok: false, error: 'A tela mudou. Abra o cadastro novamente.' }); return;
@@ -515,12 +528,12 @@ export class MessageRouter {
           }
         }
 
-        if (typeof chrome !== 'undefined' && chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
+        if (shouldOpenSidePanel && typeof chrome !== 'undefined' && chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
           chrome.sidePanel.open({ tabId }).catch((err) => {
             console.debug('[Paulifest Copilot] sidePanel.open:', err);
           });
         }
-        sendResponse({ ok: true, action: 'open_in_copilot' });
+        sendResponse({ ok: true, action: 'open_in_copilot', sheetId: tabContextManager.peekTabState(tabId)?.activeSheetId });
         return;
       }
 
@@ -654,6 +667,8 @@ export class MessageRouter {
           assertCurrent();
           await commitImportedSheet(reconciled.sheet, assertCurrent, async () => {
             assertCurrent();
+            await saveWorkspace({ sheetId: reconciled.sheet.id, step: 4 });
+            assertCurrent();
             const hasConflicts = reconciled.conflictedFields.length > 0 || reconciled.sheet.hasUnresolvedConflicts;
             await tabContextManager.linkSheetToTab(tabId, reconciled.sheet.id, {
               assertCurrent,
@@ -664,7 +679,7 @@ export class MessageRouter {
               publish: state => {
                 this.dispatchUiStateToContentScript(tabId, state);
                 this.notifyActiveTabToSidebar(tabId, state);
-                if (typeof chrome !== 'undefined' && chrome.sidePanel?.open) {
+                if (shouldOpenSidePanel && typeof chrome !== 'undefined' && chrome.sidePanel?.open) {
                   try { void chrome.sidePanel.open({tabId}).catch(() => {}); } catch { /* UI is best effort. */ }
                 }
                 sendResponse({ok: true, action: 'prepare_mercadolivre', isSimulatedMock: this.mockMode,
@@ -690,8 +705,11 @@ export class MessageRouter {
   private async handleGetActiveTabContext(sendResponse: (res: any) => void, windowId?: number, sender?: chrome.runtime.MessageSender): Promise<void> {
     try {
       let activeTabId: number | undefined;
-      if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
-        const trustedPanel = sender?.id === chrome.runtime.id && sender?.url === chrome.runtime.getURL?.('sidepanel.html');
+      const panelUrl = typeof chrome !== 'undefined' ? chrome.runtime?.getURL?.('sidepanel.html') : '';
+      const trustedPanel = Boolean(panelUrl) && sender?.id === chrome.runtime.id && Boolean(sender?.url?.startsWith(panelUrl));
+      if (trustedPanel && typeof sender?.tab?.id === 'number' && sender.tab.id >= 0) {
+        activeTabId = sender.tab.id;
+      } else if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
         const tabs = await chrome.tabs.query(trustedPanel && Number.isInteger(windowId)
           ? { active: true, windowId } : { active: true, currentWindow: true });
         activeTabId = tabs[0]?.id;

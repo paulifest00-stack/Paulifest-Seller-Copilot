@@ -10,5 +10,5 @@ export interface MlPreparedListing {
   id: string; hash: string; payload: Record<string, unknown>; description: string;
   account: { id: string; nickname: string }; warnings: string[]; expiresAt: string;
 }
-export type MlAction = 'status' | 'start' | 'disconnect' | 'category' | 'quote' | 'picture' | 'prepare' | 'publish' | 'item' | 'sync';
-export const ML_ACTIONS: MlAction[] = ['status', 'start', 'disconnect', 'category', 'quote', 'picture', 'prepare', 'publish', 'item', 'sync'];
+export type MlAction = 'status' | 'start' | 'disconnect' | 'category' | 'quote' | 'picture' | 'prepare' | 'publish' | 'item' | 'sync' | 'pricing-context' | 'pricing-quote' | 'pricing-categories';
+export const ML_ACTIONS: MlAction[] = ['status', 'start', 'disconnect', 'category', 'quote', 'picture', 'prepare', 'publish', 'item', 'sync', 'pricing-context', 'pricing-quote', 'pricing-categories'];

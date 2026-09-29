@@ -1,13 +1,28 @@
 import { generateRandomEan13 } from '../../core/engines/identification/ean-generator.ts';
 import { generateSkuFromTitle } from '../../core/engines/identification/sku-generator.ts';
-type ProductInputName = 'name' | 'sku' | 'ean';
+export type ProductInputName = 'name' | 'sku' | 'ean' | 'cost' | 'price' | 'ncm' | 'brand';
 const INPUT_SELECTORS: Record<ProductInputName, string> = {
-    name: 'input#nome, input[name="nome"], input[data-product-name]',
-    sku: 'input#codigo, input[name="codigo"], input[data-product-sku]',
-    ean: 'input#gtin, input[name="gtin"], input#ean, input[name="ean"]'
+    name: 'input#nome, input[name="nome"], input[data-product-name], input[placeholder*="Nome do produto" i], input[placeholder*="Descrição do produto" i]',
+    sku: 'input#codigo, input[name="codigo"], input[data-product-sku], input[placeholder*="Código (SKU)" i]',
+    ean: 'input#gtin, input[name="gtin"], input#ean, input[name="ean"], input#gtinEmbalagem, input[name="gtinEmbalagem"], input[placeholder*="GTIN" i], input[placeholder*="EAN" i]',
+    cost: 'input#precoCusto, input[name="precoCusto"], input[name="fornecedor.precoCusto"], input#preco_custo, input[id*="precoCusto" i], input[name*="precoCusto" i]',
+    price: 'input#preco, input[name="preco"], input[id*="precoVenda" i], input[name*="precoVenda" i]',
+    ncm: 'input#ncm, input[name="ncm"], input#classificacaoFiscal, input[name="classificacaoFiscal"]',
+    brand: 'input#marca, input[name="marca"]'
 };
 export function findBlingProductInput(kind: ProductInputName, root: Document | HTMLElement = document): HTMLInputElement | null {
-    return root.querySelector<HTMLInputElement>(INPUT_SELECTORS[kind]);
+    const selector = INPUT_SELECTORS[kind];
+    if (typeof (root as any).querySelectorAll === 'function') {
+        const list = Array.from(root.querySelectorAll<HTMLInputElement>(selector));
+        if (list.length > 0) {
+            const visible = list.find(el => !el.disabled && typeof el.getClientRects === 'function' && el.getClientRects().length > 0);
+            if (visible) return visible;
+            const anyVisible = list.find(el => typeof el.getClientRects === 'function' && el.getClientRects().length > 0);
+            if (anyVisible) return anyVisible;
+            return list[0];
+        }
+    }
+    return typeof root.querySelector === 'function' ? root.querySelector<HTMLInputElement>(selector) : null;
 }
 /** Atualiza o valor e emite os mesmos eventos observados pelos frameworks do formulário. */
 export function setNativeInputValue(input: HTMLInputElement, value: string): void {
@@ -24,9 +39,9 @@ export class BlingFormAssistant {
     private timer: number | undefined;
     private controls = new Map<HTMLInputElement, HTMLElement>();
     start(): void {
+        this.mount();
         if (this.observer)
             return;
-        this.mount();
         this.observer = new MutationObserver(() => {
             window.clearTimeout(this.timer);
             this.timer = window.setTimeout(() => this.mount(), 150);
@@ -70,18 +85,18 @@ export class BlingFormAssistant {
                     gap: 3px;
                     font: 600 11px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                     color: #21845e;
-                    background: transparent;
-                    border: none;
-                    border-radius: 3px;
-                    padding: 1px 4px;
+                    background: rgba(33, 132, 94, 0.06);
+                    border: 1px solid rgba(33, 132, 94, 0.22);
+                    border-radius: 4px;
+                    padding: 2px 6px;
                     cursor: pointer;
-                    transition: background 0.12s ease, color 0.12s ease;
+                    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
                     white-space: nowrap;
                 }
                 button:hover {
-                    background: rgba(33, 132, 94, 0.08);
+                    background: rgba(33, 132, 94, 0.14);
                     color: #166534;
-                    text-decoration: underline;
+                    border-color: rgba(33, 132, 94, 0.4);
                 }
                 button:focus-visible {
                     outline: 1.5px solid #21845e;
@@ -89,7 +104,8 @@ export class BlingFormAssistant {
                 }
                 small {
                     font-size: 10.5px;
-                    color: #475569;
+                    color: #15803d;
+                    font-weight: 500;
                     white-space: nowrap;
                 }
                 small:empty {
@@ -103,17 +119,13 @@ export class BlingFormAssistant {
                 window.clearTimeout(statusTimer);
                 statusTimer = window.setTimeout(() => { status.textContent = ''; }, 3500);
             };
-            button.textContent = kind === 'sku' ? 'Gerar SKU' : 'Gerar EAN';
-            button.title = kind === 'sku' ? 'Gerar código SKU automaticamente a partir do nome do produto' : 'Gerar código interno EAN-13';
+            button.textContent = kind === 'sku' ? '⚡ Gerar SKU' : '⚡ Gerar EAN';
+            button.title = kind === 'sku' ? 'Gerar código SKU automaticamente a partir do nome do produto' : 'Gerar código interno EAN-13 válido';
             button.onclick = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 if (!input.isConnected || input.disabled || input.readOnly) {
                     showStatus('Indisponível');
-                    return;
-                }
-                if (input.value.trim()) {
-                    showStatus('Limpe o campo antes');
                     return;
                 }
                 const name = findBlingProductInput('name');
@@ -123,8 +135,9 @@ export class BlingFormAssistant {
                     name?.focus();
                     return;
                 }
+                const hadPrevious = Boolean(input.value.trim());
                 setNativeInputValue(input, value);
-                showStatus('Preenchido ✓');
+                showStatus(hadPrevious ? 'Novo código gerado ✓' : 'Preenchido ✓');
             };
             const fieldWrapper = input.closest('.form-group, .group-item-form, .field, .mdc-layout-grid__cell, div[class*="col-"]');
             const fieldLabel = (input.id ? document.querySelector<HTMLElement>(`label[for="${CSS.escape(input.id)}"]`) : null)

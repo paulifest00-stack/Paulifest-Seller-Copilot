@@ -25,7 +25,9 @@ class FakeMlApi extends MlApiClient {
     if (path === '/users/me') return {id:123,site_id:'MLB',nickname:'Teste',tags:this.tags};
     if (path === '/categories/MLB1234') return {id:'MLB1234',name:'Copos',settings:{listing_allowed:true,max_title_length:60,max_pictures_per_item:12},children_categories:[]};
     if (path === '/categories/MLB1234/attributes') return [{id:'BRAND',name:'Marca',tags:{required:true}}];
-    if (path.startsWith('/sites/MLB/listing_prices?')) return [{sale_fee_amount:4.5,sale_fee_details:{fixed_fee:2}}];
+    if (path.startsWith('/sites/MLB/listing_prices?')) return [{currency_id:'BRL',listing_type_id:'gold_special',sale_fee_amount:4.5,sale_fee_details:{fixed_fee:2}}];
+    if (path.startsWith('/users/123/shipping_options/free?')) return {coverage:{all_country:{currency_id:'BRL',list_cost:7,billable_weight:500}}};
+    if (path.startsWith('/sites/MLB/domain_discovery/search?')) return [{category_id:'MLB1234',category_name:'Copos'}];
     if (path === '/pictures/items/upload') { assert.ok(body instanceof FormData); return {id:'picture-test'}; }
     if (path === '/items/validate') { this.lastPayload=body; return {}; }
     if (path === '/items' && method === 'POST') { this.creates++; if(this.publishFailure) throw new MlApiError(502,'Resposta perdida',true); this.lastPayload=body; return {id:'MLB123456789',seller_id:123,status:'active',permalink:'https://produto.mercadolivre.com.br/MLB-123456789-copo',user_product_id:this.tags.includes('user_product_seller')?'MLBU1234':null}; }
@@ -68,6 +70,13 @@ export async function runMlIntegrationTests() {
     });
     await test('renovação concorrente executa uma única troca de refresh token',async()=>{await pool.query("UPDATE ml_connections SET expires_at=NOW()-INTERVAL '1 minute' WHERE connection_id=$1",[owner]);const before=api.refreshes;await Promise.all([service.quote(owner,'MLB1234',20,'gold_special'),service.quote(owner,'MLB1234',30,'gold_special'),service.quote(owner,'MLB1234',40,'gold_special')]);assert.equal(api.refreshes-before,1);});
     await test('NCM e preço não influenciam requisitos da categoria ML',async()=>{const meta=await service.category(owner,'MLB1234');assert.equal(meta.attributes[0].id,'BRAND');const quote=await service.quote(owner,'MLB1234',29.9,'gold_special');assert.equal(quote.fees[0].sale_fee_amount,4.5);await assert.rejects(service.category(owner,'../../users/me'));});
+    await test('cotação integrada usa sessão real do Gateway e categorias vêm da API',async()=>{
+      const result=await service.pricingQuote(owner,{categoryId:'MLB1234',price:29.9,listingType:'gold_special',shippingMode:'me2',logisticType:'drop_off',condition:'new',freeShipping:false,dimensions:'10x15x20,500'});
+      assert.equal(result.sellerId,'123');assert.equal(result.saleFee,4.5);assert.equal(result.shippingCost,7);
+      assert.deepEqual((await service.pricingCategories(owner,'Copo azul')).categories,[{id:'MLB1234',name:'Copos'}]);
+      await assert.rejects(service.pricingQuote('other',result.request),/Conecte/);
+      await assert.rejects(service.pricingCategories(owner,''),/nome/);
+    });
     await test('upload valida conteúdo e associa foto à conexão',async()=>{await assert.rejects(service.upload(owner,'data:image/png;base64,YWJj'));const bytes=Buffer.alloc(20);bytes[0]=255;bytes[1]=216;const image=await service.upload(owner,'data:image/jpeg;base64,'+bytes.toString('base64'));assert.equal(image.pictureId,'picture-test');});
     await test('preparação recusa fotos alheias e atributos ausentes',async()=>{await assert.rejects(service.prepare(owner,session,{...exampleDraft(),pictureIds:['unknown-photo']}));await assert.rejects(service.prepare(owner,session,{...exampleDraft(),attributes:[]}));});
     await test('publicação concorrente é idempotente e persiste ID antes da descrição',async()=>{
@@ -105,6 +114,10 @@ export async function runMlIntegrationTests() {
       const gst=createGatewaySessionToken({connectionId:owner,clientSessionId:'client-test',sessionId:session},gatewayConfig.jwtSecret,900);
       const headers={Authorization:'Bearer '+gst,'Content-Type':'application/json',Origin:'chrome-extension://test'};
       const status=await fetch(base+'/integrations/mercadolivre/status',{headers});assert.equal(status.status,200);assert.equal((await status.json()).sellerId,'123');
+      const pricingPayload={categoryId:'MLB1234',price:29.9,listingType:'gold_special',shippingMode:'me2',logisticType:'drop_off',condition:'new',freeShipping:false,dimensions:'10x15x20,500'};
+      assert.equal((await fetch(base+'/integrations/mercadolivre/pricing-quote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pricingPayload)})).status,401);
+      const quoted=await fetch(base+'/integrations/mercadolivre/pricing-quote',{method:'POST',headers,body:JSON.stringify(pricingPayload)});
+      assert.equal(quoted.status,200);assert.equal((await quoted.json()).saleFee,4.5);
       const rejected=await fetch(base+'/integrations/mercadolivre/publish',{method:'POST',headers,body:JSON.stringify({})});assert.equal(rejected.status,422);
       assert.equal((await fetch(base+'/integrations/mercadolivre/status',{headers:{...headers,Origin:'https://evil.example'}})).status,403);
       const callback=await fetch(base+'/auth/mercadolivre/callback?state=bad&code=secret');assert.equal(callback.status,400);assert.equal(callback.headers.get('referrer-policy'),'no-referrer');assert.ok(!(await callback.text()).includes('secret'));

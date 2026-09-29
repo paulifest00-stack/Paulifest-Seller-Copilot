@@ -8,7 +8,9 @@ import { fillNewBlingProduct } from './bling/fill-new-product.ts';
 import { BlingSpaObserver } from './bling/spa-observer.ts';
 import { BlingShadowUi } from './bling/shadow-ui.ts';
 import { ProductListCostInjector } from './bling/product-list-cost-injector.ts';
-import { BlingFormAssistant } from './bling/form-assistant.ts';
+import { BlingFormAssistant, findBlingProductInput, setNativeInputValue } from './bling/form-assistant.ts';
+import { generateRandomEan13 } from '../core/engines/identification/ean-generator.ts';
+import { generateSkuFromTitle } from '../core/engines/identification/sku-generator.ts';
 import { isBlingDomain } from '../shared/tab-context-contracts.ts';
 import type { 
   ContentToBackgroundEnvelope, 
@@ -31,48 +33,92 @@ import type {
 
   // 1. Ativação no Bling ERP com validação estrita de domínio (Requisito 6)
   if (isBlingDomain(host)) {
+    const listCostInjector = new ProductListCostInjector(pageInstanceId);
+    const formAssistant = new BlingFormAssistant();
+    const costField = new BlingCostField(pageInstanceId);
+
+    // Mantém o assistente de formulário sempre ativo no Bling para injetar Gerar SKU e Gerar EAN
+    // assim que os campos aparecerem no DOM (tanto em Produto Novo quanto em Edição)
+    try {
+      formAssistant.start();
+    } catch (err) {
+      console.error('[Paulifest Copilot] Erro inicial em formAssistant:', err);
+    }
+
     // Inicializa a UI contextual isolada no Shadow DOM (mode: 'open')
-    const onContextAction = (action: ContextualActionType) => {
-        const actionPayload: ContentToBackgroundEnvelope<BlingActionTriggeredPayload> = {
+    const onContextAction = (action: ContextualActionType, options?: { openSidePanel?: boolean }) => {
+        const actionPayload: ContentToBackgroundEnvelope<BlingActionTriggeredPayload & { openSidePanel?: boolean }> = {
           type: 'BLING_ACTION_TRIGGERED',
           pageInstanceId,
-          payload: { action },
+          payload: { action, openSidePanel: options?.openSidePanel ?? false },
           clientTimestamp: new Date().toISOString()
         };
 
-        chrome.runtime.sendMessage(actionPayload).catch((err) => {
+        return chrome.runtime.sendMessage(actionPayload).catch((err) => {
           console.debug('[Paulifest Copilot] Erro ao enviar ação contextual:', err);
         });
     };
-    const shadowUi = new BlingShadowUi({onAction:onContextAction});
+
+    const shadowUi = new BlingShadowUi({
+      onAction: onContextAction,
+      onQuickGenerateSku: () => {
+        const skuInput = findBlingProductInput('sku');
+        const nameInput = findBlingProductInput('name');
+        if (!skuInput || skuInput.disabled || skuInput.readOnly) {
+          return { ok: false, message: 'Campo de SKU não encontrado ou bloqueado nesta tela.' };
+        }
+        const generated = generateSkuFromTitle(nameInput?.value || '');
+        if (!generated) {
+          nameInput?.focus();
+          return { ok: false, message: 'Preencha o nome do produto primeiro para gerar o SKU.' };
+        }
+        setNativeInputValue(skuInput, generated);
+        return { ok: true, value: generated, message: `SKU gerado e preenchido: ${generated} ✓` };
+      },
+      onQuickGenerateEan: () => {
+        const eanInput = findBlingProductInput('ean');
+        if (!eanInput || eanInput.disabled || eanInput.readOnly) {
+          return { ok: false, message: 'Campo EAN/GTIN não encontrado ou bloqueado nesta tela.' };
+        }
+        const generated = generateRandomEan13();
+        setNativeInputValue(eanInput, generated);
+        return { ok: true, value: generated, message: `EAN-13 gerado e preenchido: ${generated} ✓` };
+      },
+      onQuickApplyCost: async (costValue: number) => {
+        const res = await costField.applyCostFromPopup(costValue);
+        if (res.ok) {
+          return { ok: true, message: `Custo R$ ${costValue.toFixed(2).replace('.', ',')} aplicado ✓` };
+        }
+        return { ok: false, message: res.error || 'Não foi possível aplicar o custo.' };
+      },
+      onQuickConnectBling: () => {
+        chrome.runtime?.sendMessage?.({ type: 'BLING_START_CONNECT' }, (res) => {
+          if (res?.status) shadowUi.updateConnectionStatus(res.status);
+        });
+      },
+      onQuickRetryBling: () => {
+        chrome.runtime?.sendMessage?.({ type: 'BLING_RETRY_CONNECTION' }, (res) => {
+          if (res?.status) shadowUi.updateConnectionStatus(res.status);
+        });
+      }
+    });
 
     shadowUi.mount();
 
     // AJUSTE OBRIGATÓRIO 2: Hidratação do Dock com status inicial de conexão Bling.
-    // Broadcast (BLING_CONNECTION_STATUS_CHANGED) serve para mudanças futuras.
-    // Query inicial serve para hidratação do estado já estabelecido.
-    // Proteção de race: revision local garante que query antiga não sobrescreva broadcast mais novo.
     let lastConnectionRevision = 0;
 
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
       const queryRevision = ++lastConnectionRevision;
       chrome.runtime.sendMessage({ type: 'BLING_GET_CONNECTION_STATUS' }, (res) => {
-        // AJUSTE OBRIGATÓRIO 2 — Race protection:
-        // Se um broadcast chegou após esta query ser iniciada, queryRevision < lastConnectionRevision,
-        // e descartamos a resposta da query (o broadcast já aplicou estado mais recente).
         if (queryRevision < lastConnectionRevision) {
-          return; // broadcast mais recente chegou — ignorar resposta da query antiga
+          return;
         }
         if (res && res.status) {
           shadowUi.updateConnectionStatus(res.status);
         }
       });
     }
-
-    // Injetor de coluna de Preço de Custo na listagem de produtos (produtos.php)
-    const listCostInjector = new ProductListCostInjector(pageInstanceId);
-    const formAssistant = new BlingFormAssistant();
-    const costField = new BlingCostField(pageInstanceId);
 
     // Inicializa o observador de rotas e DOM SPA
     const spaObserver = new BlingSpaObserver({
@@ -94,7 +140,13 @@ import type {
         });
 
         try {
-          costField.setTarget(context.pageType === 'product_form_edit' ? context.detectedProduct?.id : undefined);
+          costField.setTarget(
+            context.pageType === 'product_form_edit'
+              ? context.detectedProduct?.id
+              : context.pageType === 'product_form_new'
+                ? '__new__'
+                : undefined
+          );
         } catch (err) {
           console.error('[Paulifest Copilot] Erro em costField:', err);
         }
@@ -111,11 +163,7 @@ import type {
         }
 
         try {
-          if (context.pageType === 'product_form_edit' || context.pageType === 'product_form_new') {
-            formAssistant.start();
-          } else {
-            formAssistant.destroy();
-          }
+          formAssistant.start();
         } catch (err) {
           console.error('[Paulifest Copilot] Erro em formAssistant:', err);
         }
@@ -140,11 +188,16 @@ import type {
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message?.type !== 'BLING_FILL_NEW_PRODUCT') return;
-      if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('sidepanel.html') ||
+      const panelUrl = chrome.runtime.getURL('sidepanel.html');
+      if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(panelUrl) ||
           message.pageInstanceId !== pageInstanceId || message.url !== window.location.href) {
         sendResponse({ ok: false, error: 'Documento alterado ou remetente inválido. Abra a ficha novamente.' }); return;
       }
-      sendResponse(fillNewBlingProduct(message.values, message.url));
+      const res = fillNewBlingProduct(message.values, message.url);
+      if (res.ok && typeof message.costPrice === 'number' && Number.isFinite(message.costPrice) && message.costPrice >= 0) {
+        void costField.applyCostFromPopup(message.costPrice);
+      }
+      sendResponse(res);
     });
 
     chrome.runtime.onMessage.addListener((message,sender,sendResponse)=>{

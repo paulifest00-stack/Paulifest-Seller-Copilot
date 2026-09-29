@@ -1,694 +1,144 @@
-import React, { useState, useEffect } from 'react';
-import {
-  DollarSign,
-  Percent,
-  ShieldAlert,
-  Truck,
-  Receipt,
-  ArrowLeft,
-  Save,
-  Check,
-  Sliders,
-  ChevronDown,
-  ChevronUp,
-  Package
-} from 'lucide-react';
-import type { CentralProductSheet, AuditedField } from '../../../core/schema/product.ts';
+import { findPriceForProfit } from '../../../integrations/mercadolivre/profit-price.ts';
+import { pricingRequest, pricingRequestKey } from '../../../integrations/mercadolivre/pricing-request.ts';
+import { useEffect, useRef, useState } from 'react';
+import type { AuditedField, CentralProductSheet } from '../../../core/schema/product.ts';
 import { createAuditedField } from '../../../core/schema/product.ts';
-import type { ListingType, PricingInputs, PricingOutputs } from '../../../core/schema/pricing.ts';
-import {
-  calculateDirectPricing,
-  calculateReversePricing
-} from '../../../core/engines/pricing-calculator/pricing-calculator.ts';
-import {
-  loadSellerPreferences,
-  saveSellerPreferences
-} from '../../../core/storage/storage.ts';
-
-interface StepPricingProps {
-  sheet: CentralProductSheet;
-  onUpdateSheet: (updater: (prev: CentralProductSheet) => CentralProductSheet) => void;
-  onPrev: () => void;
-  onFinish?: () => void;
+import { mlAction } from '../../../integrations/mercadolivre/client.ts';
+import { isMlHost } from '../../../integrations/mercadolivre/market.ts';
+import { mlItemIdFromUrl } from '../../../integrations/mercadolivre/pricing-context.ts';
+import { pricingTotals, type MlCalculatorDraft, type MlPricingContext, type MlPricingQuote } from '../../../shared/ml-pricing.ts';
+export function isCostPriceComputable(field?: AuditedField<number | null> | null): boolean {
+  return !!field && field.status !== 'missing' && typeof field.value === 'number' && Number.isFinite(field.value) && field.value >= 0;
 }
-
-/**
- * Validador estrito de computabilidade de preço de custo para a UI:
- * - Ausente (missing ou value === null) -> bloqueia cálculo (retorna false)
- * - Zero explícito (status approved ou pending_review com value === 0) -> cálculo permitido (retorna true)
- * - Custo positivo numérico -> cálculo permitido (retorna true)
- * - Não faz coerção sintética de null para 0
- */
-export function isCostPriceComputable(
-  costPrice?: AuditedField<number | null> | null
-): boolean {
-  if (!costPrice) return false;
-  if (costPrice.status === 'missing') return false;
-  if (costPrice.value === null || costPrice.value === undefined) return false;
-  if (typeof costPrice.value !== 'number' || isNaN(costPrice.value)) return false;
-  return costPrice.value >= 0;
+type Props = { sheet: CentralProductSheet; onUpdateSheet: (fn: (s: CentralProductSheet) => CentralProductSheet) => void; onPrev: () => void; onFinish?: () => void };
+const money = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const fieldClass = 'mt-1 w-full rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-900 focus:outline-blue-600';
+const buttonClass = 'rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium disabled:opacity-40';
+function initial(sheet: CentralProductSheet): MlCalculatorDraft {
+  const currentCost = isCostPriceComputable(sheet.costPrice) ? sheet.costPrice.value : null;
+  if (sheet.mlCalculator) return { ...sheet.mlCalculator, ...(sheet.mlCalculator.baseCost !== undefined && sheet.mlCalculator.baseCost !== currentCost ? { cost: currentCost } : {}), baseCost: currentCost };
+  const dims = [sheet.packageHeightCm.value, sheet.packageWidthCm.value, sheet.packageLengthCm.value, sheet.packageWeightKg.value];
+  return { categoryId: sheet.categoryIdML.value || '', price: sheet.suggestedSalePrice.value ?? sheet.currentSalePrice.value ?? 0,
+    listingType: sheet.pricingDraft?.listingType || 'gold_special', shippingMode: 'me2', logisticType: '', condition: 'new', freeShipping: false,
+    cost: currentCost, baseCost: currentCost, taxPercent: sheet.pricingDraft?.taxRate ?? null,
+    packaging: sheet.pricingDraft?.packagingCost ?? 1.5, otherCosts: 0, manualShipping: null,
+    ...(dims.every(n => Number.isFinite(n) && n > 0) ? { dimensions: `${dims[0]}x${dims[1]}x${dims[2]},${Math.round(dims[3] * 1000)}` } : {}) };
 }
-
-export const StepPricing: React.FC<StepPricingProps> = ({
-  sheet,
-  onUpdateSheet,
-  onPrev,
-  onFinish
-}) => {
-  const isCostComputable = isCostPriceComputable(sheet.costPrice);
-
-  // Configurações do Vendedor
-  const [mode, setMode] = useState<'target_profit' | 'target_margin' | 'free_price'>(sheet.pricingDraft?.mode || 'target_profit');
-  const [listingType, setListingType] = useState<ListingType>(sheet.pricingDraft?.listingType || 'gold_special');
-  const [targetMargin, setTargetMargin] = useState<number>(sheet.pricingDraft?.targetMargin ?? 20);
-
-  const initialNetReceive =
-    isCostComputable && typeof sheet.costPrice.value === 'number' && sheet.costPrice.value > 0
-      ? Number((sheet.costPrice.value * 1.3).toFixed(2))
-      : typeof sheet.suggestedSalePrice?.value === 'number' && sheet.suggestedSalePrice.value > 0
-      ? Number((sheet.suggestedSalePrice.value * 0.65).toFixed(2))
-      : 35.0;
-
-  const [targetNetReceive, setTargetNetReceive] = useState<number>(sheet.pricingDraft?.targetNetReceive ?? initialNetReceive);
-
-  const initialSuggestedPrice =
-    typeof sheet.suggestedSalePrice?.value === 'number' && sheet.suggestedSalePrice.value > 0
-      ? sheet.suggestedSalePrice.value
-      : 0;
-  const [freePrice, setFreePrice] = useState<number>(sheet.pricingDraft?.freePrice ?? initialSuggestedPrice);
-  const [taxRate, setTaxRate] = useState<number>(sheet.pricingDraft?.taxRate ?? 6.0);
-  const [packagingCost, setPackagingCost] = useState<number>(sheet.pricingDraft?.packagingCost ?? 1.50);
-  const [weightKg, setWeightKg] = useState<number>(
-    sheet.pricingDraft?.weightKg ?? (typeof sheet.packageWeightKg?.value === 'number' && sheet.packageWeightKg.value > 0
-      ? sheet.packageWeightKg.value
-      : 0.5)
-  );
-  const otherCost = 0;
-
-  // Estado dos Cálculos
-  const [outputs, setOutputs] = useState<PricingOutputs | null>(null);
-  const [calcError, setCalcError] = useState<string | null>(null);
-  const [showFeeDetails, setShowFeeDetails] = useState<boolean>(true);
-  const [isSaved, setIsSaved] = useState<boolean>(false);
-
-  // No modo 'target_profit' (Valor Líquido a Receber), o cálculo funciona mesmo sem Custo CMV informado
-  const canCalculate = mode === 'target_profit' ? targetNetReceive > 0 : isCostComputable;
-
-  // Persist the calculator inputs with this product, independently of tabs/steps.
-  useEffect(() => {
-    const draft = { mode, listingType, targetMargin, targetNetReceive, freePrice, taxRate, packagingCost, weightKg };
-    onUpdateSheet(prev => JSON.stringify(prev.pricingDraft) === JSON.stringify(draft) ? prev : { ...prev, pricingDraft: draft });
-    setIsSaved(false);
-  }, [mode, listingType, targetMargin, targetNetReceive, freePrice, taxRate, packagingCost, weightKg]);
-
-  // Carrega preferências do vendedor no mount
-  useEffect(() => {
-    if (sheet.pricingDraft) return;
-    loadSellerPreferences().then((prefs) => {
-      setTaxRate(prefs.defaultTaxRatePercent);
-      setPackagingCost(prefs.defaultPackagingCost ?? 1.50);
-      setTargetMargin(prefs.defaultTargetMarginPercent);
-      setListingType(prefs.defaultListingType);
-    });
-  }, []);
-
-  // Recalcula dinamicamente sempre que qualquer variável mudar
-  useEffect(() => {
-    if (!canCalculate) {
-      setOutputs(null);
-      setCalcError(null);
-      return;
-    }
-
-    let isMounted = true;
-    // Em 'target_profit' (Valor Líquido a Receber), resolvemos o preço de venda para que
-    // (Preço do Anúncio - Comissão ML - Frete/Taxa Fixa - Imposto - Embalagem) = targetNetReceive.
-    const effectiveCostPrice =
-      mode === 'target_profit'
-        ? 0
-        : (sheet.costPrice.value as number);
-
-    const inputs: PricingInputs = {
-      costPrice: effectiveCostPrice,
-      taxRatePercent: taxRate,
-      packagingCost,
-      otherOperationalCost: otherCost,
-      listingType,
-      categoryId: sheet.categoryIdML.value || 'MLB1051',
-      packageWeightKg: weightKg > 0 ? weightKg : 0.5,
-      mode,
-      freeSalePrice: freePrice,
-      targetMarginPercent: targetMargin,
-      targetProfitAmount: targetNetReceive
-    };
-
-    const runCalc = async () => {
-      try {
-        setCalcError(null);
-        let res: PricingOutputs;
-        if (mode === 'target_profit' || mode === 'target_margin') {
-          res = await calculateReversePricing(inputs);
-        } else {
-          res = await calculateDirectPricing(inputs);
-        }
-
-        if (isMounted) {
-          setOutputs(res);
-
-          // Se estiver em modo reverso, sincroniza o input de preço livre
-          if (mode === 'target_margin' || mode === 'target_profit') {
-            setFreePrice(res.salePrice);
-          }
-        }
-      } catch (err: any) {
-        console.error('Erro no cálculo de precificação:', err);
-        if (isMounted) {
-          setOutputs(null);
-          setCalcError(err?.message || 'Não foi possível calcular o preço para os parâmetros informados.');
-        }
-      }
-    };
-
-    runCalc();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [
-    canCalculate,
-    mode,
-    listingType,
-    targetMargin,
-    targetNetReceive,
-    freePrice,
-    taxRate,
-    packagingCost,
-    weightKg,
-    otherCost,
-    sheet.costPrice.value,
-    sheet.costPrice.status,
-    sheet.categoryIdML.value
-  ]);
-
-  // Salva o preço na Ficha Central e as preferências do vendedor
-  const handleApplyPrice = () => {
-    if (!canCalculate || !outputs) return;
-
-    onUpdateSheet((prev) => ({
-      ...prev,
-      suggestedSalePrice: createAuditedField(
-        outputs.salePrice,
-        'rule_engine',
-        1.0,
-        'approved'
-      )
-    }));
-
-    // Salva preferências para próximos produtos
-    saveSellerPreferences({
-      defaultTaxRatePercent: taxRate,
-      defaultPackagingCost: packagingCost,
-      defaultTargetMarginPercent: targetMargin,
-      defaultListingType: listingType,
-      packagingCostMigratedTo150: true
-    });
-
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2500);
-
-    if (onFinish) {
-      onFinish();
-    }
+export const StepPricing = ({ sheet, onUpdateSheet, onPrev, onFinish }: Props) => {
+  const [draft, setDraft] = useState(() => initial(sheet));
+  const [quote, setQuote] = useState<{ value: MlPricingQuote; signature: string } | null>(null);
+  const [targetProfit, setTargetProfit] = useState<number | null>(null);
+  const [message, setMessage] = useState(''), [busy, setBusy] = useState(false);
+  const [connection, setConnection] = useState<{ connected: boolean; configured: boolean; sellerId?: string } | null>(null);
+  const [candidate, setCandidate] = useState<MlPricingContext | null>(null);
+  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  const [categoryName, setCategoryName] = useState('');
+  const [categoryQuery, setCategoryQuery] = useState(sheet.title.value || sheet.titleBling?.value || '');
+  const [itemInput, setItemInput] = useState('');
+  const [contextLabel, setContextLabel] = useState('Dados desta ficha');
+  const [clock, setClock] = useState(Date.now());
+  const mounted = useRef(true), locked = useRef(false), revision = useRef(0);
+  const quoteKey = pricingRequestKey(draft);
+  const liveQuoteKey = useRef(quoteKey); liveQuoteKey.current = quoteKey;
+  const signature = JSON.stringify(draft), liveSignature = useRef(signature); liveSignature.current = signature;
+  useEffect(() => { mounted.current = true; const timer = setInterval(() => setClock(Date.now()), 15000); return () => { mounted.current = false; clearInterval(timer); }; }, []);
+  useEffect(() => { onUpdateSheet(s => JSON.stringify(s.mlCalculator) === signature ? s : { ...s, mlCalculator: draft }); }, [signature]);
+  const change = <K extends keyof MlCalculatorDraft>(key: K, value: MlCalculatorDraft[K]) => {
+    revision.current++; setDraft(d => ({ ...d, [key]: value })); setMessage('');
   };
-
-  // No modo Valor Líquido, outputs.netProfit representa o Valor Líquido Recebido (após taxas, frete, imposto e embalagem)
-  const netReceivedValue = outputs
-    ? Number(
-        (
-          outputs.salePrice -
-          outputs.marketplaceFees.totalMarketplaceRetention -
-          outputs.taxAmount -
-          outputs.packagingCost -
-          outputs.otherOperationalCost
-        ).toFixed(2)
-      )
-    : 0;
-
-  const totalDeductionsWithoutCmv = outputs
-    ? Number(
-        (
-          outputs.marketplaceFees.totalMarketplaceRetention +
-          outputs.taxAmount +
-          outputs.packagingCost +
-          outputs.otherOperationalCost
-        ).toFixed(2)
-      )
-    : 0;
-
-  const realProfitWithCmv =
-    outputs && isCostComputable && typeof sheet.costPrice.value === 'number'
-      ? Number((netReceivedValue - sheet.costPrice.value).toFixed(2))
-      : null;
-
-  return (
-    <div className="space-y-4 animate-fade-in">
-      {/* 1. Seletor de Modo: Valor Líquido (Receber) vs. Margem Alvo vs. Preço Livre */}
-      <div className="apple-glass-card rounded-2xl p-1.5 grid grid-cols-3 gap-1 bg-black/[0.04]">
-        <button
-          type="button"
-          onClick={() => setMode('target_profit')}
-          className={`py-2 px-1.5 rounded-xl text-[11px] font-semibold flex items-center justify-center gap-1 transition-all apple-press-spring ${
-            mode === 'target_profit'
-              ? 'bg-white text-[#0071e3] shadow-sm'
-              : 'text-[#86868b] hover:text-[#1d1d1f]'
-          }`}
-        >
-          <DollarSign className="w-3.5 h-3.5 shrink-0" />
-          <span className="truncate">Valor Líquido</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setMode('target_margin')}
-          className={`py-2 px-1.5 rounded-xl text-[11px] font-semibold flex items-center justify-center gap-1 transition-all apple-press-spring ${
-            mode === 'target_margin'
-              ? 'bg-white text-[#0071e3] shadow-sm'
-              : 'text-[#86868b] hover:text-[#1d1d1f]'
-          }`}
-        >
-          <Sliders className="w-3.5 h-3.5 shrink-0" />
-          <span className="truncate">Margem (%)</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setMode('free_price')}
-          className={`py-2 px-1.5 rounded-xl text-[11px] font-semibold flex items-center justify-center gap-1 transition-all apple-press-spring ${
-            mode === 'free_price'
-              ? 'bg-white text-[#0071e3] shadow-sm'
-              : 'text-[#86868b] hover:text-[#1d1d1f]'
-          }`}
-        >
-          <Receipt className="w-3.5 h-3.5 shrink-0" />
-          <span className="truncate">Preço Livre</span>
-        </button>
+  const run = async (fn: () => Promise<void>) => {
+    if (locked.current) return;
+    locked.current = true; setBusy(true); setMessage('');
+    try { await fn(); } catch (e) { if (mounted.current) setMessage(e instanceof Error ? e.message : 'Não foi possível concluir.'); }
+    finally { locked.current = false; if (mounted.current) setBusy(false); }
+  };
+  const status = async () => {
+    const result = await mlAction('status');
+    if (mounted.current) { setConnection(result); setQuote(null); }
+    return result;
+  };
+  const capture = async () => {
+    const serial = ++revision.current;
+    try {
+      if (typeof chrome === 'undefined' || !chrome.tabs?.query) return;
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id || !tab.url || !isMlHost(new URL(tab.url).hostname)) { if (mounted.current && revision.current === serial) setCandidate(null); return; }
+      let data: MlPricingContext = { itemId: mlItemIdFromUrl(tab.url) };
+      try { const response = await chrome.tabs.sendMessage(tab.id, { type: 'ML_READ_PRICING', expectedUrl: tab.url }); if (response?.ok) data = response.context; } catch { /* URL still identifies ordinary listing pages after extension reload. */ }
+      const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (mounted.current && revision.current === serial && current?.id === tab.id && current.url === tab.url) setCandidate(data?.itemId || data?.categoryId || data?.title ? data : null);
+    } catch { if (mounted.current && revision.current === serial) setCandidate(null); }
+  };
+  useEffect(() => {
+    void status().catch(e => { if (mounted.current) setMessage(e.message); }); void capture();
+    if (typeof chrome === 'undefined' || !chrome.tabs?.onActivated) return;
+    const active = () => { void capture(); };
+    const updated = (_id: number, info: chrome.tabs.TabChangeInfo) => { if (info.status === 'complete' || info.url) void capture(); };
+    chrome.tabs.onActivated.addListener(active); chrome.tabs.onUpdated.addListener(updated);
+    return () => { chrome.tabs.onActivated.removeListener(active); chrome.tabs.onUpdated.removeListener(updated); };
+  }, []);
+  const useContext = async (data: MlPricingContext) => {
+    const expected = liveSignature.current;
+    const context: MlPricingContext = data.itemId ? await mlAction('pricing-context', { itemId: data.itemId }) : data;
+    if (!mounted.current || liveSignature.current !== expected) return;
+    setDraft(d => ({ ...d, ...(context.categoryId ? { categoryId: context.categoryId } : {}), ...(context.price ? { price: context.price } : {}),
+      ...(context.listingType ? { listingType: context.listingType } : {}),
+      ...(context.owned ? { itemId: context.itemId, shippingMode: context.shippingMode || '', logisticType: context.logisticType || '', freeShipping: context.freeShipping ?? false, condition: context.condition || 'new', dimensions: context.dimensions || d.dimensions } : { itemId: undefined,
+        ...(context.shippingMode ? { shippingMode: context.shippingMode } : {}), ...(context.logisticType ? { logisticType: context.logisticType } : {}) }), manualShipping: null }));
+    setContextLabel(context.title || context.itemId || 'Cadastro em andamento'); setCategoryQuery(context.title || categoryQuery); setCategoryName(''); setQuote(null);
+    setMessage(context.owned === false ? 'Categoria e preço lidos. Confira a logística da SUA loja; os custos do concorrente não foram importados.' : 'Dados carregados. Confira se esta ficha e seus custos correspondem ao produto detectado.');
+  };
+  const validQuote = quote?.signature === quoteKey && clock - Date.parse(quote.value.queriedAt) < 300000 ? quote.value : null;
+  const totals = validQuote ? pricingTotals(validQuote, draft) : null;
+  const ready = /^MLB\d+$/.test(draft.categoryId) && draft.price > 0 && !!draft.logisticType;
+  const numberField = (label: string, key: 'price' | 'cost' | 'taxPercent' | 'packaging' | 'otherCosts' | 'manualShipping', suffix = 'R$') => <label className="block text-xs font-medium text-slate-600">{label} <span className="font-normal">({suffix})</span><input aria-label={label} className={fieldClass} type="number" min="0" step="0.01" placeholder="Informe" value={draft[key] ?? ''} onChange={e => change(key, e.target.value === '' && ['cost','taxPercent','manualShipping'].includes(key) ? null : Number(e.target.value))} /></label>;
+  return <section className="space-y-4 pb-5">
+    <header><p className="text-xs font-semibold uppercase tracking-wider text-blue-600">Preço · Mercado Livre</p><h2 className="mt-1 text-2xl font-semibold text-slate-900">Quanto sobra na venda?</h2><p className="mt-2 text-sm text-slate-500">O Mercado Livre informa comissão e cotação de frete. Você informa os custos do seu negócio.</p></header>
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
+      <div className="flex items-center justify-between gap-2"><strong className="text-sm">1. Produto e conta</strong><span className="text-xs text-slate-500">{connection?.connected ? `Conta ${connection.sellerId}` : 'Conexão pendente'}</span></div>
+      {!connection?.connected && <><p className="text-xs text-slate-600">{connection?.configured === false ? 'A integração ML precisa ser configurada no servidor.' : 'Conecte o Gateway/Bling nas conexões e autorize sua conta Mercado Livre.'}</p><button className={buttonClass} disabled={busy} onClick={() => void run(async () => { const result = await mlAction('start'); const url = new URL(result.authorizationUrl); if (url.origin !== 'https://auth.mercadolivre.com.br' || url.pathname !== '/authorization') throw new Error('Endereço de autorização inválido.'); await chrome.tabs.create({ url: url.href }); setMessage('Conclua a autorização e clique em Verificar conexão.'); })}>Conectar Mercado Livre</button></>}
+      <button className={buttonClass} disabled={busy} onClick={() => void run(status)}>Verificar conexão</button>
+      <p className="text-sm font-medium break-words">{contextLabel === 'Dados desta ficha' ? sheet.title.value || sheet.titleBling?.value || contextLabel : contextLabel}</p>
+      {candidate && <div className="rounded-xl bg-blue-50 p-3 text-xs space-y-2"><p className="font-medium">Detectado na aba: {candidate.title || candidate.itemId || 'cadastro de anúncio'}</p><button disabled={busy} className={buttonClass} onClick={() => void run(() => useContext(candidate))}>Usar dados deste produto</button></div>}
+      <details><summary className="cursor-pointer text-xs text-blue-700">Ler outro anúncio por link ou código MLB</summary><input aria-label="Link ou código do anúncio" className={fieldClass} value={itemInput} onChange={e => setItemInput(e.target.value)} placeholder="https://produto.mercadolivre.com.br/…" /><button disabled={busy} className={`${buttonClass} mt-2`} onClick={() => void run(() => useContext({ itemId: /^MLB\d{6,}$/.test(itemInput.trim().toUpperCase()) ? itemInput.trim().toUpperCase() : mlItemIdFromUrl(itemInput) || 'invalid' }))}>Ler anúncio</button></details>
+      <div className="space-y-2"><p className="text-xs font-medium text-slate-600">Categoria: {categoryName || draft.categoryId || 'Ainda não identificada'}</p>
+        <details open={!draft.categoryId}><summary className="cursor-pointer text-xs text-blue-700">Buscar categoria pelo nome do produto</summary>
+          <input aria-label="Nome para buscar categoria" className={fieldClass} value={categoryQuery} onChange={e => setCategoryQuery(e.target.value)} placeholder="Ex.: copo de plástico 300 ml" />
+          <button className={`${buttonClass} mt-2`} disabled={busy || !connection?.connected} onClick={() => void run(async () => { const result = await mlAction('pricing-categories', { title: categoryQuery }); if (mounted.current) { setCategories(result.categories); if (!result.categories.length) setMessage('Nenhuma categoria encontrada. Tente um nome mais específico.'); } })}>Buscar no Mercado Livre</button>
+          {categories.map(category => <button key={category.id} className={`${buttonClass} mt-2 block w-full text-left`} onClick={() => { change('categoryId',category.id); change('itemId',undefined); setCategoryName(category.name); setCategories([]); }}>{category.name} · {category.id}</button>)}
+          <p className="mt-2 text-xs text-slate-500">As sugestões vêm do Mercado Livre. Selecione a que corresponde ao produto.</p>
+        </details>
+        <details><summary className="cursor-pointer text-xs text-slate-500">Informar código da categoria</summary><input aria-label="Categoria do produto" className={fieldClass} value={draft.categoryId} placeholder="MLB…" onChange={e => { change('categoryId', e.target.value.toUpperCase()); change('itemId',undefined); setCategoryName(''); }} /></details>
       </div>
-
-      {/* 2. Tipo de Anúncio ML: Clássico vs Premium */}
-      <div className="apple-glass-card rounded-2xl p-3 space-y-2">
-        <label className="text-[11px] font-semibold text-[#86868b] uppercase tracking-wider block">
-          Modalidade de Anúncio Mercado Livre
-        </label>
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => setListingType('gold_special')}
-            className={`p-2.5 rounded-xl border text-left transition-all apple-press-spring ${
-              listingType === 'gold_special'
-                ? 'bg-blue-50/70 border-[#0071e3] text-[#0071e3] ring-2 ring-[#0071e3]/10'
-                : 'bg-white border-black/[0.08] text-[#1d1d1f] hover:border-black/[0.16]'
-            }`}
-          >
-            <div className="text-xs font-bold">Clássico</div>
-            <div className="text-[10px] opacity-75">~12% a 14% comissão</div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setListingType('gold_pro')}
-            className={`p-2.5 rounded-xl border text-left transition-all apple-press-spring ${
-              listingType === 'gold_pro'
-                ? 'bg-blue-50/70 border-[#0071e3] text-[#0071e3] ring-2 ring-[#0071e3]/10'
-                : 'bg-white border-black/[0.08] text-[#1d1d1f] hover:border-black/[0.16]'
-            }`}
-          >
-            <div className="text-xs font-bold">Premium</div>
-            <div className="text-[10px] opacity-75">~17% a 19% + 12x s/ juros</div>
-          </button>
-        </div>
-      </div>
-
-      {/* 3. Card de Entrada da Variável Chave (Valor Líquido, Margem ou Preço) */}
-      <div className="apple-glass-card rounded-2xl p-4 space-y-3">
-        {mode === 'target_profit' ? (
-          <div className="space-y-2">
-            <label className="flex items-center justify-between text-xs font-semibold text-[#1d1d1f]">
-              <span className="flex items-center gap-1.5">
-                <DollarSign className="w-4 h-4 text-emerald-600" />
-                <span>Valor Líquido que Quero Receber (R$)</span>
-              </span>
-              <span className="text-[10px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60">
-                Cálculo Reverso Automático
-              </span>
-            </label>
-
-            <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-[#86868b]">
-                R$
-              </span>
-              <input
-                type="number"
-                step="0.50"
-                min="0.50"
-                value={targetNetReceive || ''}
-                onChange={(e) => setTargetNetReceive(parseFloat(e.target.value) || 0)}
-                placeholder="Ex: 45,00"
-                className="w-full pl-9 pr-3 py-2.5 bg-white rounded-xl border border-black/[0.12] focus:border-[#0071e3] focus:ring-2 focus:ring-[#0071e3]/20 text-base font-bold font-mono text-[#1d1d1f] outline-none"
-              />
-            </div>
-
-            <p className="text-[11px] text-[#86868b] leading-relaxed">
-              Digite quanto quer receber limpo. A calculadora descobre o <strong>preço do anúncio</strong> cobrindo comissão ML, frete/taxa fixa, imposto e embalagem (R$ {packagingCost.toFixed(2)}).
-            </p>
-          </div>
-        ) : mode === 'target_margin' ? (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="flex items-center gap-1.5 text-xs font-semibold text-[#1d1d1f]">
-                <Percent className="w-3.5 h-3.5 text-[#0071e3]" />
-                <span>Margem Líquida Alvo Desejada</span>
-              </label>
-              <span className="text-xs font-bold text-[#0071e3] font-mono">
-                {targetMargin}%
-              </span>
-            </div>
-
-            <input
-              type="range"
-              min="5"
-              max="50"
-              step="1"
-              value={targetMargin}
-              onChange={(e) => setTargetMargin(Number(e.target.value))}
-              className="w-full accent-[#0071e3] cursor-pointer"
-            />
-
-            <div className="flex justify-between text-[10px] text-[#86868b] px-0.5">
-              <span>5% (Competitivo)</span>
-              <span>20% (Padrão)</span>
-              <span>35%+ (Alta Margem)</span>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-1.5">
-            <label className="flex items-center gap-1.5 text-xs font-semibold text-[#1d1d1f]">
-              <DollarSign className="w-3.5 h-3.5 text-[#0071e3]" />
-              <span>Preço de Venda Praticado (R$)</span>
-            </label>
-            <input
-              type="number"
-              step="0.10"
-              min="1"
-              value={freePrice || ''}
-              onChange={(e) => setFreePrice(parseFloat(e.target.value) || 0)}
-              placeholder="0,00"
-              className="w-full px-3 py-2 bg-white rounded-xl border border-black/[0.1] focus:border-[#0071e3] focus:ring-2 focus:ring-[#0071e3]/20 text-sm font-semibold text-[#1d1d1f] outline-none"
-            />
-          </div>
-        )}
-      </div>
-
-      {/* 4. Custos Operacionais, Embalagem, Peso e Imposto */}
-      <div className="apple-glass-card rounded-2xl p-3.5 space-y-2.5">
-        <div className="text-[11px] font-semibold text-[#86868b] uppercase tracking-wider">
-          Custos & Parâmetros do Cálculo
-        </div>
-
-        <div className="grid grid-cols-4 gap-2">
-          <div>
-            <label className="text-[10px] text-[#86868b] block mb-1">Embalagem R$</label>
-            <input
-              type="number"
-              step="0.25"
-              min="0"
-              value={packagingCost}
-              onChange={(e) => setPackagingCost(parseFloat(e.target.value) || 0)}
-              className="w-full px-2 py-1.5 bg-white rounded-lg border border-[#0071e3]/40 text-xs font-bold text-[#1d1d1f] outline-none focus:border-[#0071e3]"
-            />
-          </div>
-
-          <div>
-            <label className="text-[10px] text-[#86868b] block mb-1">Imposto %</label>
-            <input
-              type="number"
-              step="0.5"
-              min="0"
-              value={taxRate}
-              onChange={(e) => setTaxRate(parseFloat(e.target.value) || 0)}
-              className="w-full px-2 py-1.5 bg-white rounded-lg border border-black/[0.1] text-xs font-semibold outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="text-[10px] text-[#86868b] block mb-1">Peso Frete (kg)</label>
-            <input
-              type="number"
-              step="0.1"
-              min="0.1"
-              value={weightKg}
-              onChange={(e) => setWeightKg(parseFloat(e.target.value) || 0.5)}
-              className="w-full px-2 py-1.5 bg-white rounded-lg border border-black/[0.1] text-xs font-semibold outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="text-[10px] text-[#86868b] block mb-1">Custo CMV</label>
-            <div className="px-2 py-1.5 bg-black/[0.03] rounded-lg text-[11px] font-mono font-semibold text-[#1d1d1f] truncate">
-              {isCostComputable && typeof sheet.costPrice.value === 'number'
-                ? `R$ ${sheet.costPrice.value.toFixed(2)}`
-                : 'Opcional'}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 5. Painel de Resultados Principais (Hero Card) ou Bloqueio */}
-      {calcError ? (
-        <div className="apple-glass-card rounded-2xl p-4 text-center space-y-2 border-l-4 border-l-rose-500 bg-rose-50/30">
-          <div className="flex items-center justify-center gap-2 text-rose-800 font-semibold text-xs">
-            <ShieldAlert className="w-4 h-4 text-rose-600" />
-            <span>Não foi possível calcular</span>
-          </div>
-          <p className="text-xs text-[#86868b]">{calcError}</p>
-        </div>
-      ) : !canCalculate ? (
-        <div className="apple-glass-card rounded-2xl p-4 text-center space-y-2 border-l-4 border-l-amber-500 bg-amber-50/30">
-          <div className="flex items-center justify-center gap-2 text-amber-800 font-semibold text-xs">
-            <ShieldAlert className="w-4 h-4 text-amber-600" />
-            <span>
-              {mode === 'target_profit'
-                ? 'Informe o valor líquido desejado'
-                : 'Custo CMV necessário para Margem (%)'}
-            </span>
-          </div>
-          <p className="text-xs text-[#86868b]">
-            {mode === 'target_profit'
-              ? 'Digite acima quanto você deseja receber líquido para descobrir o valor do anúncio.'
-              : 'Para calcular sem informar custo CMV, use a aba "Valor Líquido".'}
-          </p>
-        </div>
-      ) : outputs && (
-        <div className="apple-glass-card rounded-2xl p-4 space-y-3 border-l-4 border-l-[#0071e3]">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-[#86868b] uppercase tracking-wider">
-              {mode === 'target_profit' ? 'Valor que Você Deve Anunciar' : 'Resultado Projetado'}
-            </span>
-            <span
-              className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                outputs.marketplaceFees.isSimulated
-                  ? 'bg-blue-50 text-blue-700 border border-blue-200/60'
-                  : 'bg-emerald-50 text-emerald-700 border border-emerald-200/60'
-              }`}
-            >
-              {outputs.marketplaceFees.providerName}
-            </span>
-          </div>
-
-          {/* Preço de Venda Final (Valor do Anúncio) */}
-          <div className="flex items-baseline justify-between pt-1">
-            <span className="text-xs text-[#1d1d1f] font-semibold">
-              Valor do Anúncio (Venda):
-            </span>
-            <span className="text-2xl font-bold font-mono text-[#0071e3] tracking-tight">
-              R$ {outputs.salePrice.toFixed(2)}
-            </span>
-          </div>
-
-          {/* Valor Líquido Recebido e Total de Taxas/Custos */}
-          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-black/[0.04]">
-            <div className="p-2.5 bg-emerald-50/60 border border-emerald-200/50 rounded-xl">
-              <div className="text-[10px] font-medium text-emerald-800">
-                Você Recebe Líquido
-              </div>
-              <div className="text-sm font-bold text-emerald-700 font-mono">
-                R$ {netReceivedValue.toFixed(2)}
-              </div>
-              <div className="text-[9px] text-emerald-700/80 mt-0.5">
-                Livre de taxas, frete, imposto e emb.
-              </div>
-            </div>
-
-            <div className="p-2.5 bg-rose-50/50 border border-rose-200/50 rounded-xl">
-              <div className="text-[10px] font-medium text-rose-800">
-                Total Taxas + Frete + Emb.
-              </div>
-              <div className="text-sm font-bold text-rose-700 font-mono">
-                - R$ {totalDeductionsWithoutCmv.toFixed(2)}
-              </div>
-              <div className="text-[9px] text-rose-700/80 mt-0.5">
-                {outputs.marketplaceFees.shippingCostToSeller > 0
-                  ? 'Com frete grátis incluso'
-                  : 'Com taxa fixa ML inclusa'}
-              </div>
-            </div>
-          </div>
-
-          {/* Se CMV estiver disponível, mostra também o Lucro sobre CMV e Ponto de Equilíbrio */}
-          {realProfitWithCmv !== null && (
-            <div className="flex items-center justify-between p-2 bg-blue-50/50 border border-blue-200/40 rounded-xl text-[11px]">
-              <span className="text-blue-900 font-medium">
-                Lucro Real (descontando CMV de R$ {(sheet.costPrice.value as number).toFixed(2)}):
-              </span>
-              <span className="font-mono font-bold text-[#0071e3]">
-                R$ {realProfitWithCmv.toFixed(2)}
-              </span>
-            </div>
-          )}
-
-          {outputs.breakEvenPrice > 0 && (
-            <div className="flex items-center justify-between p-2 bg-black/[0.02] rounded-xl text-[11px]">
-              <span className="text-[#86868b] flex items-center gap-1 font-medium">
-                <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
-                Ponto de Equilíbrio (Break-Even):
-              </span>
-              <span className="font-mono font-bold text-[#1d1d1f]">
-                R$ {outputs.breakEvenPrice.toFixed(2)}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 6. Detalhamento Itemizado de Taxas (MarketplaceFeeProvider) */}
-      {canCalculate && outputs && (
-        <div className="apple-glass-card rounded-2xl overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setShowFeeDetails(!showFeeDetails)}
-            className="w-full p-3.5 flex items-center justify-between text-xs font-semibold text-[#1d1d1f] hover:bg-black/[0.02] transition-colors"
-          >
-            <div className="flex items-center gap-1.5">
-              <Receipt className="w-3.5 h-3.5 text-[#0071e3]" />
-              <span>Detalhamento Completo do Cálculo</span>
-            </div>
-            {showFeeDetails ? (
-              <ChevronUp className="w-3.5 h-3.5 text-[#86868b]" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5 text-[#86868b]" />
-            )}
-          </button>
-
-          {showFeeDetails && (
-            <div className="px-3.5 pb-3.5 space-y-2 text-xs border-t border-black/[0.04]">
-              <div className="flex justify-between text-[#1d1d1f] font-semibold pt-1.5">
-                <span>Valor do Anúncio (Preço de Venda):</span>
-                <span className="font-mono text-[#0071e3]">
-                  R$ {outputs.salePrice.toFixed(2)}
-                </span>
-              </div>
-
-              <div className="flex justify-between text-[#86868b]">
-                <span>Comissão ML ({(outputs.marketplaceFees.percentageRate * 100).toFixed(0)}%):</span>
-                <span className="font-mono text-rose-600 font-medium">
-                  - R$ {outputs.marketplaceFees.percentageAmount.toFixed(2)}
-                </span>
-              </div>
-
-              {outputs.marketplaceFees.fixedFeeAmount > 0 && (
-                <div className="flex justify-between text-[#86868b]">
-                  <span>Taxa Fixa ML (abaixo de R$ {outputs.marketplaceFees.fixedFeeThreshold}):</span>
-                  <span className="font-mono text-rose-600 font-medium">
-                    - R$ {outputs.marketplaceFees.fixedFeeAmount.toFixed(2)}
-                  </span>
-                </div>
-              )}
-
-              {outputs.marketplaceFees.shippingCostToSeller > 0 && (
-                <div className="flex justify-between text-[#86868b]">
-                  <span className="flex items-center gap-1">
-                    <Truck className="w-3 h-3 text-amber-600" />
-                    Frete Estimado ({weightKg}kg):
-                  </span>
-                  <span className="font-mono text-rose-600 font-medium">
-                    - R$ {outputs.marketplaceFees.shippingCostToSeller.toFixed(2)}
-                  </span>
-                </div>
-              )}
-
-              <div className="flex justify-between text-[#86868b]">
-                <span>Imposto Fiscal Simples ({outputs.taxRatePercent}%):</span>
-                <span className="font-mono text-rose-600 font-medium">
-                  - R$ {outputs.taxAmount.toFixed(2)}
-                </span>
-              </div>
-
-              <div className="flex justify-between text-[#86868b]">
-                <span className="flex items-center gap-1">
-                  <Package className="w-3 h-3" />
-                  Embalagem:
-                </span>
-                <span className="font-mono text-rose-600 font-medium">
-                  - R$ {outputs.packagingCost.toFixed(2)}
-                </span>
-              </div>
-
-              <div className="pt-2 border-t border-black/[0.06] flex justify-between font-bold text-emerald-700">
-                <span>(=) Valor Líquido a Receber:</span>
-                <span className="font-mono">
-                  R$ {netReceivedValue.toFixed(2)}
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 7. Ações: Voltar e Aplicar Preço à Ficha */}
-      <div className="flex items-center gap-2 pt-2">
-        <button
-          type="button"
-          onClick={onPrev}
-          className="w-1/3 py-3 px-3 rounded-xl text-xs font-semibold bg-black/5 hover:bg-black/10 text-[#1d1d1f] apple-press-spring flex items-center justify-center gap-1"
-        >
-          <ArrowLeft className="w-3.5 h-3.5" />
-          <span>Voltar</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={handleApplyPrice}
-          disabled={!canCalculate || !outputs || outputs.salePrice <= 0}
-          className={`flex-1 py-3 px-4 rounded-xl text-xs font-semibold apple-press-spring flex items-center justify-center gap-2 shadow-sm transition-all ${
-            isSaved
-              ? 'bg-emerald-600 text-white'
-              : !canCalculate || !outputs || outputs.salePrice <= 0
-              ? 'bg-black/10 text-[#86868b] cursor-not-allowed'
-              : 'bg-[#0071e3] hover:bg-[#0077ed] text-white'
-          }`}
-        >
-          {isSaved ? (
-            <>
-              <Check className="w-4 h-4" />
-              <span>Preço Salvo na Ficha!</span>
-            </>
-          ) : (
-            <>
-              <Save className="w-3.5 h-3.5" />
-              <span>Salvar preço e preparar anúncio →</span>
-            </>
-          )}
-        </button>
-      </div>
+      <div className="grid grid-cols-2 gap-2">{(['gold_special','gold_pro'] as const).map(type => <button key={type} aria-pressed={draft.listingType === type} className={`rounded-xl border p-3 text-sm ${draft.listingType === type ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200'}`} onClick={() => change('listingType', type)}>{type === 'gold_special' ? 'Clássico' : 'Premium'}</button>)}</div>
+      <details open={!draft.logisticType}><summary className="cursor-pointer text-xs text-blue-700">Entrega e embalagem {draft.logisticType ? '· conferir' : '· falta preencher'}</summary><div className="mt-3 space-y-3">
+        <label className="block text-xs text-slate-600">Como você envia?<select aria-label="Como você envia?" className={fieldClass} value={draft.logisticType} onChange={e => { const value = e.target.value; change('logisticType', value); change('shippingMode', value === 'custom' ? 'custom' : value === 'default' ? 'me1' : value === 'not_specified' ? 'not_specified' : 'me2'); }}><option value="">Selecione a logística da sua loja</option>{[['drop_off','Mercado Envios · Correios'],['xd_drop_off','Mercado Envios · Agência'],['cross_docking','Mercado Envios · Coleta'],['fulfillment','Full'],['self_service','Flex'],['turbo','Turbo'],['default','Mercado Envios 1'],['custom','Envio por conta própria'],['not_specified','Sem envio definido']].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <label className="block text-xs text-slate-600">Condição<select className={fieldClass} value={draft.condition} onChange={e => change('condition', e.target.value as 'new' | 'used')}><option value="new">Novo</option><option value="used">Usado</option></select></label>
+        <label className="flex gap-2 text-xs"><input type="checkbox" checked={draft.freeShipping} onChange={e => change('freeShipping', e.target.checked)} />Frete grátis para o comprador</label>
+        <div className="grid grid-cols-2 gap-3">{['Altura (cm)','Largura (cm)','Comprimento (cm)','Peso (g)'].map((label,index) => <label key={label} className="text-xs text-slate-600">{label}<input aria-label={label} className={fieldClass} type="number" min="0" step={index === 3 ? '1' : '0.1'} value={(draft.dimensions || '').split(/[x,]/)[index] || ''} onChange={e => { const parts = (draft.dimensions || 'xx,').split(/[x,]/); parts[index] = e.target.value; change('dimensions',`${parts[0]}x${parts[1]}x${parts[2]},${parts[3]}`); }} /></label>)}</div>
+        <p className="text-xs text-slate-500">Usamos as medidas da ficha quando disponíveis. O peso faturável retornado pelo ML participa da consulta de taxas.</p>
+      </div></details>
     </div>
-  );
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4"><strong className="text-sm">2. Preço e seus custos</strong>{numberField('Preço de venda', 'price')}<div className="grid grid-cols-2 gap-3">{numberField('Custo do produto','cost')}{numberField('Imposto sobre a venda','taxPercent','%')}{numberField('Embalagem','packaging')}{numberField('Outros custos por venda','otherCosts')}</div><p className="text-xs text-slate-500">Custo preenchido a partir da ficha, quando disponível. Informe seu imposto; use 0 somente se não houver. Inclua anúncios pagos e outros gastos em “Outros custos”.</p>
+    <button disabled={busy || !connection?.connected || !ready} className="w-full rounded-xl bg-blue-600 p-3 text-sm font-semibold text-white disabled:opacity-40" onClick={() => void run(async () => { const expected = quoteKey; const result: MlPricingQuote = await mlAction('pricing-quote', { ...pricingRequest(draft) }); if (mounted.current && liveQuoteKey.current === expected) { setClock(Date.now()); setQuote({ value: result, signature: expected }); } })}>{busy ? 'Consultando Mercado Livre…' : 'Consultar taxas e calcular'}</button>
+    <details><summary className="cursor-pointer text-xs text-blue-700">Quero escolher quanto lucrar por unidade</summary><label className="block mt-3 text-xs text-slate-600">Lucro desejado (R$)<input className={fieldClass} type="number" min="0" step="0.01" disabled={busy} value={targetProfit ?? ''} onChange={e => setTargetProfit(e.target.value === '' ? null : Number(e.target.value))} /></label><p className="mt-2 text-xs text-slate-500">Após custo do produto, imposto, embalagem, outros gastos e taxas. Cada preço é conferido novamente no ML.</p><button disabled={busy || !connection?.connected || !draft.categoryId || !draft.logisticType || targetProfit === null} className={`${buttonClass} mt-2`} onClick={() => void run(async () => {
+      const expected = signature;
+      const result = await findPriceForProfit(draft,targetProfit!, candidate => mlAction('pricing-quote',{...pricingRequest(candidate)}), () => mounted.current && liveSignature.current === expected);
+      if (mounted.current && liveSignature.current === expected) { setDraft(result.draft); setClock(Date.now()); setQuote({value:result.quote,signature:pricingRequestKey(result.draft)}); }
+    })}>Encontrar preço com taxas do ML</button></details>
+    {!ready && <p className="text-xs text-amber-700">Informe categoria, preço e logística para consultar. Nenhuma taxa será inventada.</p>}</div>
+    {message && <p role="status" className="rounded-xl bg-blue-50 p-3 text-xs text-blue-900">{message}</p>}
+    {quote && !validQuote && <p role="status" className="text-xs text-amber-700">Os dados mudaram ou a cotação expirou. Consulte novamente antes de aplicar o preço.</p>}
+    {validQuote && <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3"><strong className="text-sm">3. Resultado por unidade</strong>
+      <p className="text-xs text-slate-500">API Mercado Livre · {new Date(validQuote.queriedAt).toLocaleTimeString('pt-BR')} · conta {validQuote.sellerId}</p>
+      {validQuote.shippingCost === null && <div className="rounded-xl bg-amber-50 p-3 space-y-2"><p className="text-xs text-amber-900">Frete não confirmado: {validQuote.shippingError}</p>{numberField('Frete pago por você (manual)','manualShipping')}<p className="text-xs">Este custo será identificado como manual. Não consideramos frete ausente como zero.</p></div>}
+      <dl className="space-y-2 text-sm"><div className="flex justify-between"><dt>Venda</dt><dd>{money(draft.price)}</dd></div><div className="flex justify-between"><dt>Tarifa total ML</dt><dd>− {money(validQuote.saleFee)}</dd></div>{validQuote.fixedFee !== null && <p className="text-xs text-slate-500">Já inclui {money(validQuote.fixedFee)} de tarifa fixa. Não é somada duas vezes.</p>}<div className="flex justify-between"><dt>Frete do vendedor {totals?.manualShipping ? '(manual)' : '(cotação ML)'}</dt><dd>{validQuote.shippingCost !== null ? '− ' + money(validQuote.shippingCost) : totals ? '− ' + money(totals.shipping) : 'Pendente'}</dd></div></dl>
+      {totals ? <><div className="border-t pt-3 space-y-2 text-sm">{[['Custo do produto',draft.cost!],['Imposto',totals.tax],['Embalagem',draft.packaging],['Outros custos',draft.otherCosts]].map(([label,value]) => <div className="flex justify-between" key={label}><span>{label}</span><span>− {money(value as number)}</span></div>)}</div><div className={`rounded-xl p-4 ${totals.profit >= 0 ? 'bg-emerald-50 text-emerald-900' : 'bg-red-50 text-red-900'}`}><p className="text-xs">{totals.profit >= 0 ? 'Sobra após os custos informados' : 'Prejuízo após os custos informados'}</p><strong className="block text-3xl mt-1">{money(totals.profit)}</strong><p className="mt-1 text-xs">Margem: {totals.margin.toFixed(1)}% do preço de venda</p></div><button className="w-full rounded-xl bg-slate-900 p-3 text-sm font-semibold text-white" onClick={() => {
+        if (!quote || liveQuoteKey.current !== quote.signature || Date.now() - Date.parse(quote.value.queriedAt) >= 300000) { setMessage('Consulte as taxas novamente.'); return; }
+        onUpdateSheet(s => ({ ...s, mlCalculator: draft, mlAppliedPricing: { quote: quote.value, costs: draft, appliedAt: new Date().toISOString() }, suggestedSalePrice: createAuditedField(draft.price, 'rule_engine', 1, 'approved', { capturedAt: quote.value.queriedAt, sourceName: 'Cotação API Mercado Livre', extractedSnippet: `Tarifa total: ${quote.value.saleFee}; frete: ${totals.shipping}; frete manual: ${totals.manualShipping}` }), categoryIdML: createAuditedField(draft.categoryId, 'user_manual', 1, 'edited') })); onFinish?.();
+      }}>Usar este preço no anúncio</button></> : <p className="rounded-xl bg-amber-50 p-3 text-xs text-amber-900">Para mostrar quanto sobra, preencha custo, imposto e frete. Valores ausentes não são considerados zero.</p>}
+      <p className="text-xs text-slate-500">Cotação para este preço e estas condições. Frete e cobranças finais podem mudar na venda. Não inclui despesas que você não informou.</p>
+    </div>}
+    <button className={buttonClass} onClick={onPrev}>← Voltar ao produto</button>
+  </section>;
 };

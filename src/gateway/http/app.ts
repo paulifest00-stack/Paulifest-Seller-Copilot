@@ -228,6 +228,9 @@ export class GatewayApp {
             case 'disconnect': result = await this.mlService.disconnect(auth.connectionId); break;
             case 'category': result = await this.mlService.category(auth.connectionId, body.categoryId); break;
             case 'quote': result = await this.mlService.quote(auth.connectionId, body.categoryId, body.price, body.listingType); break;
+            case 'pricing-categories': result = await this.mlService.pricingCategories(auth.connectionId, body.title); break;
+            case 'pricing-context': result = await this.mlService.pricingContext(auth.connectionId, body.itemId); break;
+            case 'pricing-quote': result = await this.mlService.pricingQuote(auth.connectionId, body); break;
             case 'picture': result = await this.mlService.upload(auth.connectionId, body.dataUrl); break;
             case 'prepare': result = await this.mlService.prepare(auth.connectionId, auth.sessionId!, body.draft); break;
             case 'publish':

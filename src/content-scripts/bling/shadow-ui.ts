@@ -47,13 +47,23 @@ export function formatQuickViewDisplay(quickView: BlingProductQuickView | null |
 const HOST_ID = 'paulifest-seller-copilot-host';
 
 export interface ShadowUiOptions {
-  onAction: (action: ContextualActionType) => void;
+  onAction: (action: ContextualActionType, options?: { openSidePanel?: boolean }) => Promise<any> | void;
+  onQuickGenerateSku?: () => { ok: boolean; value?: string; message: string };
+  onQuickGenerateEan?: () => { ok: boolean; value?: string; message: string };
+  onQuickApplyCost?: (costValue: number) => Promise<{ ok: boolean; message: string }>;
+  onQuickConnectBling?: () => void;
+  onQuickRetryBling?: () => void;
 }
 
 export class BlingShadowUi {
   private host: HTMLElement | null = null;
   private shadow: ShadowRoot | null = null;
-  private onAction: (action: ContextualActionType) => void;
+  private onAction: (action: ContextualActionType, options?: { openSidePanel?: boolean }) => Promise<any> | void;
+  private onQuickGenerateSku?: () => { ok: boolean; value?: string; message: string };
+  private onQuickGenerateEan?: () => { ok: boolean; value?: string; message: string };
+  private onQuickApplyCost?: (costValue: number) => Promise<{ ok: boolean; message: string }>;
+  private onQuickConnectBling?: () => void;
+  private onQuickRetryBling?: () => void;
   private currentUiState: TabContextUiState = {
     dockVisible: false,
     canImport: false,
@@ -64,13 +74,20 @@ export class BlingShadowUi {
   // Fase 4C.4B: Estado de conexão Bling — não persistido, hidratado via query/broadcast
   private blingConnectionStatus: BlingConnectionStatus = 'disconnected';
 
-  private isMinimized = true;
+  private isMinimized = false;
+  private isAppExpanded = false;
+  private embeddedIframe: HTMLIFrameElement | null = null;
   private readonly onViewportResize = () => this.applyPosition();
   private dragOffset: { x: number; y: number } | null = null;
   private customPos: { x: number; y: number } | null = null;
 
   constructor(options: ShadowUiOptions) {
     this.onAction = options.onAction;
+    this.onQuickGenerateSku = options.onQuickGenerateSku;
+    this.onQuickGenerateEan = options.onQuickGenerateEan;
+    this.onQuickApplyCost = options.onQuickApplyCost;
+    this.onQuickConnectBling = options.onQuickConnectBling;
+    this.onQuickRetryBling = options.onQuickRetryBling;
     this.loadSavedUiPrefs();
   }
 
@@ -81,6 +98,7 @@ export class BlingShadowUi {
         if (raw) {
           const parsed = JSON.parse(raw);
           if (typeof parsed.minimized === 'boolean') this.isMinimized = parsed.minimized;
+          if (typeof parsed.appExpanded === 'boolean') this.isAppExpanded = parsed.appExpanded;
           if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
             this.customPos = { x: parsed.x, y: parsed.y };
           }
@@ -98,6 +116,7 @@ export class BlingShadowUi {
           'paulifest_dock_ui_state',
           JSON.stringify({
             minimized: this.isMinimized,
+            appExpanded: this.isAppExpanded,
             x: this.customPos?.x,
             y: this.customPos?.y
           })
@@ -111,7 +130,7 @@ export class BlingShadowUi {
   private applyPosition(): void {
     if (!this.host || typeof window === 'undefined') return;
     if (this.customPos) {
-      const maxX = Math.max(8, (window.innerWidth || 1200) - (this.host.getBoundingClientRect?.().width || 340) - 16);
+      const maxX = Math.max(8, (window.innerWidth || 1200) - (this.host.getBoundingClientRect?.().width || 380) - 16);
       const maxY = Math.max(16, (window.innerHeight || 800) - (this.host.getBoundingClientRect?.().height || 80));
       const clampedX = Math.min(Math.max(8, this.customPos.x), maxX);
       const clampedY = Math.min(Math.max(8, this.customPos.y), maxY);
@@ -168,6 +187,7 @@ export class BlingShadowUi {
     }
     this.host = null;
     this.shadow = null;
+    this.embeddedIframe = null;
   }
 
   update(
@@ -186,12 +206,6 @@ export class BlingShadowUi {
     }
   }
 
-  /**
-   * Fase 4C.4B: Atualiza o estado de conexão Bling no Dock.
-   * Chamado pelo Content Script ao receber BLING_CONNECTION_STATUS_CHANGED do Background
-   * ou ao hidratar com BLING_GET_CONNECTION_STATUS na inicialização.
-   * Não persiste nada — estado é exclusivamente em memória do Content Script.
-   */
   updateConnectionStatus(status: BlingConnectionStatus): void {
     this.blingConnectionStatus = status;
     if (this.shadow) {
@@ -199,19 +213,75 @@ export class BlingShadowUi {
     }
   }
 
+  private openEmbeddedApp(targetScreen?: 'product' | 'connections' | 'library' | 'home', targetStep?: number): void {
+    if (!this.shadow) return;
+    this.isMinimized = false;
+    this.isAppExpanded = true;
+    const dockCard = this.shadow.getElementById('dock-card');
+    const btnMinimize = this.shadow.getElementById('btn-toggle-minimize');
+    if (dockCard) {
+      dockCard.classList?.remove?.('is-minimized');
+      dockCard.classList?.add?.('is-expanded-app');
+    }
+    if (btnMinimize) {
+      btnMinimize.textContent = '—';
+      btnMinimize.title = 'Minimizar painel';
+    }
+    const appWrap = this.shadow.getElementById('embedded-app-wrap');
+    const quickWrap = this.shadow.getElementById('quick-summary-wrap');
+    const btnToggleMode = this.shadow.getElementById('btn-toggle-app-mode');
+    if (appWrap) appWrap.hidden = false;
+    if (quickWrap) quickWrap.hidden = true;
+    if (btnToggleMode) btnToggleMode.textContent = '⚡ Modo Rápido';
+
+    if (!this.embeddedIframe && typeof chrome !== 'undefined' && chrome.runtime?.getURL && typeof document !== 'undefined') {
+      const iframe = document.createElement('iframe');
+      iframe.src = chrome.runtime.getURL('sidepanel.html?embedded=1');
+      iframe.className = 'embedded-app-frame';
+      iframe.title = 'Paulifest Seller Copilot';
+      iframe.onload = () => {
+        if (targetScreen || targetStep) {
+          iframe.contentWindow?.postMessage({ type: 'PAULIFEST_SYNC_WORKSPACE', targetScreen, targetStep }, '*');
+        }
+      };
+      this.embeddedIframe = iframe;
+      appWrap?.appendChild(iframe);
+    } else if (this.embeddedIframe?.contentWindow) {
+      this.embeddedIframe.contentWindow.postMessage({ type: 'PAULIFEST_SYNC_WORKSPACE', targetScreen, targetStep }, '*');
+    }
+    this.saveUiPrefs();
+    this.applyPosition();
+  }
+
+  private setQuickModeView(): void {
+    if (!this.shadow) return;
+    this.isAppExpanded = false;
+    const dockCard = this.shadow.getElementById('dock-card');
+    dockCard?.classList?.remove?.('is-expanded-app');
+    const appWrap = this.shadow.getElementById('embedded-app-wrap');
+    const quickWrap = this.shadow.getElementById('quick-summary-wrap');
+    const btnToggleMode = this.shadow.getElementById('btn-toggle-app-mode');
+    if (appWrap) appWrap.hidden = true;
+    if (quickWrap) quickWrap.hidden = false;
+    if (btnToggleMode) btnToggleMode.textContent = '✨ App Completo';
+    this.saveUiPrefs();
+    this.applyPosition();
+  }
+
   private render(): void {
     if (!this.shadow) return;
 
     if (!this.currentUiState.dockVisible || this.currentPageType === 'other') {
       this.shadow.innerHTML = '';
+      this.embeddedIframe = null;
       return;
     }
 
     const hasId = Boolean(this.currentDetectedProduct?.id);
     const isNew = this.currentPageType === 'product_form_new';
+    const isForm = isNew || this.currentPageType === 'product_form_edit';
 
     // Fase 4C.4B: Auth-awareness — o Dock bloqueia importação se sessão não estiver ready.
-    // AJUSTE OBRIGATÓRIO 3 e 4: semântica distinta por estado (não unificar gateway_unreachable com disconnected).
     const isConnected = this.blingConnectionStatus === 'connected';
     const isTransitoryBlocked = this.blingConnectionStatus === 'gateway_unreachable' ||
                                 this.blingConnectionStatus === 'refreshing';
@@ -222,12 +292,10 @@ export class BlingShadowUi {
                           this.blingConnectionStatus === 'connecting' ||
                           this.blingConnectionStatus === 'awaiting_oauth';
 
-    // canImport só é true se Bling connected + uiState.canImport + produto com ID
     const canImport = isConnected && this.currentUiState.canImport && hasId;
 
     this.applyPosition();
 
-    // Se o esqueleto ainda não foi criado no shadow root, inicializa a estrutura estática
     let dockRoot = this.shadow.getElementById('dock-root');
     if (!dockRoot) {
       this.shadow.innerHTML = `
@@ -236,40 +304,56 @@ export class BlingShadowUi {
           * { box-sizing: border-box; }
           [hidden] { display:none!important; }
           .dock-container { pointer-events: auto; display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
-          .dock-card { background:#fff; border:1px solid #dbe3ee; border-radius:18px; box-shadow:0 8px 32px #17243a26; width:min(340px,calc(100vw - 32px)); max-height:calc(100dvh - 32px); overflow:auto; }
-          .dock-header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px; border-bottom:1px solid #e9edf3; cursor:grab; touch-action:none; }
+          .dock-card { background:#fff; border:1px solid #dbe3ee; border-radius:18px; box-shadow:0 12px 40px #17243a33; width:min(380px,calc(100vw - 24px)); max-height:calc(100dvh - 24px); display:flex; flex-direction:column; overflow:hidden; transition:width .18s ease; }
+          .dock-card.is-expanded-app { width:min(460px,calc(100vw - 20px)); height:min(740px,calc(100dvh - 24px)); }
+          .dock-header { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:11px 14px; border-bottom:1px solid #e9edf3; cursor:grab; touch-action:none; background:#f8fafc; flex-shrink:0; }
           .dock-header:active { cursor:grabbing; }
-          .dock-title { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:700; }
-          .dock-logo { width:22px; height:22px; object-fit:contain; display:none; }
+          .dock-title { display:flex; align-items:center; gap:7px; font-size:13.5px; font-weight:700; white-space:nowrap; }
+          .dock-logo { width:22px; height:22px; object-fit:contain; display:none; background:#fff; border-radius:6px; padding:1px; }
           .drag-grip { color:#98a2b3; }
-          .header-controls { display:flex; align-items:center; gap:8px; }
-          .dock-badge { border-radius:6px; padding:3px 7px; background:#edf4ff; color:#2458d3; font-size:10px; font-weight:600; }
-          .icon-btn { width:30px; height:30px; border:1px solid #dbe3ee; background:#fff; color:#475467; border-radius:8px; font-size:18px; cursor:pointer; }
+          .header-controls { display:flex; align-items:center; gap:6px; }
+          .dock-badge { border-radius:6px; padding:2px 6px; background:#edf4ff; color:#2458d3; font-size:10px; font-weight:600; }
+          .mode-btn { border:1px solid #c7d7fe; background:#eef4ff; color:#1d4ed8; border-radius:7px; padding:4px 8px; font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap; }
+          .mode-btn:hover { background:#dbeafe; }
+          .sidepanel-link-btn { border:1px solid #dbe3ee; background:#fff; color:#475467; border-radius:7px; padding:4px 7px; font-size:11px; font-weight:600; cursor:pointer; }
+          .sidepanel-link-btn:hover { background:#f1f5f9; color:#1e293b; }
+          .icon-btn { width:28px; height:28px; border:1px solid #dbe3ee; background:#fff; color:#475467; border-radius:8px; font-size:16px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; }
           .icon-btn:hover { background:#edf4ff; }
           button:focus-visible { outline:3px solid #3483fa; outline-offset:2px; }
-          .dock-body { display:flex; flex-direction:column; gap:14px; padding:16px; }
-          .context-label { color:#667085; font-size:10px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:5px; }
-          .product-info { font-size:15px; font-weight:650; overflow-wrap:anywhere; }
+          .dock-body { display:flex; flex-direction:column; gap:12px; padding:14px 16px; overflow:auto; flex:1; }
+          .embedded-app-wrap { flex:1; display:flex; flex-direction:column; min-height:560px; height:100%; background:#f8fafc; }
+          .embedded-app-frame { width:100%; height:100%; flex:1; border:0; display:block; background:#fff; }
+          .context-label { color:#667085; font-size:10px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px; }
+          .product-info { font-size:14px; font-weight:650; overflow-wrap:anywhere; }
           .product-id-tag { color:#2458d3; }
           .context-help { margin:0; color:#667085; font-size:12px; }
           .quick-view-info { display:grid; gap:8px; }
           .quick-view-info:empty { display:none; }
-          .quick-view-row { background:#f3f6fc; border:1px solid #e9edf3; border-radius:10px; padding:11px 12px; }
-          .quick-view-item { color:#17243a; font-size:13px; font-weight:600; }
+          .quick-view-row { background:#f3f6fc; border:1px solid #e9edf3; border-radius:10px; padding:9px 12px; }
+          .quick-view-item { color:#17243a; font-size:12.5px; font-weight:600; }
+          .quick-tools-box { background:#f0fdf4; border:1px solid #bbf7d0; border-radius:12px; padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+          .quick-tools-title { font-size:10.5px; font-weight:700; color:#166534; text-transform:uppercase; letter-spacing:.05em; }
+          .quick-tools-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+          .quick-tool-btn { font:600 11.5px/1.3 system-ui,sans-serif; background:#fff; color:#15803d; border:1px solid #86efac; border-radius:8px; padding:7px 8px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:4px; }
+          .quick-tool-btn:hover { background:#dcfce7; border-color:#4ade80; }
+          .quick-cost-row { display:flex; align-items:center; gap:6px; }
+          .quick-cost-input { flex:1; min-width:0; border:1px solid #86efac; border-radius:8px; padding:6px 9px; font:600 12px system-ui,sans-serif; background:#fff; color:#0f172a; }
+          .quick-status-msg { font-size:11px; font-weight:600; color:#15803d; margin:0; }
+          .quick-status-msg:empty { display:none; }
           .dock-actions { display:flex; flex-direction:column; gap:8px; }
-          .btn { font:600 13px/1.4 system-ui,sans-serif; border:1px solid transparent; border-radius:10px; padding:11px 14px; cursor:pointer; }
+          .btn { font:600 13px/1.4 system-ui,sans-serif; border:1px solid transparent; border-radius:10px; padding:10px 14px; cursor:pointer; }
           .btn-primary { background:#2458d3; color:white; order:-1; }
           .btn-primary:hover:not(:disabled) { background:#1948b5; }
           .btn-secondary { background:white; border-color:#dbe3ee; color:#344054; }
           .btn-secondary:hover { background:#f3f6fc; }
           .btn:disabled { opacity:.5; cursor:not-allowed; }
-          .tooltip-notice { color:#854d0e; background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:10px; font-size:12px; }
-          .feedback-badge { max-width:340px; background:#edf4ff; color:#2458d3; border:1px solid #dbe3ee; border-radius:10px; padding:10px 14px; font-size:12px; }
+          .tooltip-notice { color:#854d0e; background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:10px; font-size:12px; display:flex; flex-direction:column; gap:6px; }
+          .feedback-badge { max-width:380px; background:#edf4ff; color:#2458d3; border:1px solid #dbe3ee; border-radius:10px; padding:10px 14px; font-size:12px; }
           .feedback-success { background:#ecfdf3; color:#067647; }
           .feedback-warning,.feedback-error,.feedback-auth_required { background:#fff3ed; color:#b93815; }
-          .dock-card.is-minimized { width:auto; border-radius:999px; background:#2458d3; color:white; }
-          .is-minimized .dock-body { display:none; }
-          .is-minimized .dock-header { border:0; padding:8px 12px; }
+          .dock-card.is-minimized { width:auto; height:auto; border-radius:999px; background:#2458d3; color:white; }
+          .is-minimized .dock-body, .is-minimized .embedded-app-wrap, .is-minimized .mode-btn, .is-minimized .sidepanel-link-btn { display:none!important; }
+          .is-minimized .dock-header { border:0; padding:8px 12px; background:transparent; }
           .is-minimized .dock-badge { display:none; }
           .is-minimized .icon-btn { border:0; color:#2458d3; }
           .is-minimized .drag-grip { color:#b6ccff; }
@@ -286,20 +370,27 @@ export class BlingShadowUi {
               </div>
               <div class="header-controls">
                 <div id="dock-badge" class="dock-badge">${this.currentUiState.isSimulatedMock ? 'Prévia' : 'Bling'}</div>
+                <button id="btn-toggle-app-mode" class="mode-btn" type="button" title="Alternar entre Resumo Rápido e Aplicativo Completo dentro do Pop-up">
+                  ✨ App Completo
+                </button>
+                <button id="btn-open-sidepanel-aux" class="sidepanel-link-btn" type="button" title="Abrir no painel lateral do navegador (apoio opcional)">
+                  ↗ Lateral
+                </button>
                 <button id="btn-toggle-minimize" class="icon-btn" type="button" aria-label="Expandir ou recolher Copilot" title="Expandir ou recolher painel">
                   —
                 </button>
               </div>
             </div>
 
-            <div class="dock-body">
+            <div id="quick-summary-wrap" class="dock-body">
               <div><div class="context-label">Seu espaço de trabalho</div><div id="product-info-container" class="product-info"></div></div>
               <p id="context-help" class="context-help"></p>
               <div id="quick-view-container" class="quick-view-info"></div>
+              <div id="quick-tools-container"></div>
 
               <div class="dock-actions">
                 <button id="btn-open-copilot" class="btn btn-secondary">
-                  Abrir painel lateral
+                  Abrir no pop-up flutuante
                 </button>
                 <button id="btn-prepare-ml" class="btn btn-primary">
                   Preparar anúncio no Mercado Livre
@@ -308,30 +399,71 @@ export class BlingShadowUi {
 
               <div id="tooltip-container"></div>
             </div>
+
+            <div id="embedded-app-wrap" class="embedded-app-wrap" hidden></div>
           </div>
         </div>
       `;
 
       const dockLogo = this.shadow.getElementById('dock-brand-logo') as HTMLImageElement | null;
       if (dockLogo && typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
-        dockLogo.src = chrome.runtime.getURL('icons/icon32.png');
+        dockLogo.src = chrome.runtime.getURL('icons/logo.png');
         dockLogo.style.display = 'inline-block';
       }
 
-      // Registra listeners fixos apenas uma vez na criação da árvore
+      // Botão principal "Criar ficha / Abrir no Pop-up" -> abre o App Completo DENTRO do pop-up flutuante!
       const btnOpen = this.shadow.getElementById('btn-open-copilot');
       if (btnOpen) {
         btnOpen.addEventListener('click', () => {
-          this.onAction('open_in_copilot');
+          const maybePromise = this.onAction('open_in_copilot', { openSidePanel: false });
+          const targetStep = this.currentPageType === 'product_form_new' ? 1 : 2;
+          if (maybePromise && typeof (maybePromise as Promise<any>).finally === 'function') {
+            void (maybePromise as Promise<any>).finally(() => this.openEmbeddedApp('product', targetStep));
+          } else {
+            this.openEmbeddedApp('product', targetStep);
+          }
         });
       }
 
+      // Botão "Preparar anúncio no Mercado Livre" -> importa e abre a aba 4. ML DENTRO do pop-up flutuante!
       const btnPrepare = this.shadow.getElementById('btn-prepare-ml');
       if (btnPrepare) {
         btnPrepare.addEventListener('click', () => {
           if (this.currentUiState.canImport && Boolean(this.currentDetectedProduct?.id)) {
-            this.onAction('prepare_mercadolivre');
+            const maybePromise = this.onAction('prepare_mercadolivre', { openSidePanel: false });
+            if (maybePromise && typeof (maybePromise as Promise<any>).finally === 'function') {
+              void (maybePromise as Promise<any>).finally(() => this.openEmbeddedApp('product', 4));
+            } else {
+              this.openEmbeddedApp('product', 4);
+            }
           }
+        });
+      }
+
+      // Alternador entre Resumo Rápido e App Completo dentro do Pop-up
+      const btnToggleMode = this.shadow.getElementById('btn-toggle-app-mode');
+      if (btnToggleMode && typeof btnToggleMode.addEventListener === 'function') {
+        btnToggleMode.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (this.isAppExpanded) {
+            this.setQuickModeView();
+          } else {
+            const maybePromise = this.onAction('open_in_copilot', { openSidePanel: false });
+            if (maybePromise && typeof (maybePromise as Promise<any>).finally === 'function') {
+              void (maybePromise as Promise<any>).finally(() => this.openEmbeddedApp());
+            } else {
+              this.openEmbeddedApp();
+            }
+          }
+        });
+      }
+
+      // Botão de apoio opcional para abrir no painel lateral do navegador
+      const btnSidepanelAux = this.shadow.getElementById('btn-open-sidepanel-aux');
+      if (btnSidepanelAux && typeof btnSidepanelAux.addEventListener === 'function') {
+        btnSidepanelAux.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.onAction('open_in_copilot', { openSidePanel: true });
         });
       }
 
@@ -342,6 +474,8 @@ export class BlingShadowUi {
           dockCard.classList?.add?.('is-minimized');
           btnMinimize.textContent = '+';
           btnMinimize.title = 'Expandir painel';
+        } else if (this.isAppExpanded) {
+          this.openEmbeddedApp();
         }
         if (typeof btnMinimize.addEventListener === 'function') {
           btnMinimize.addEventListener('click', (e) => {
@@ -366,7 +500,8 @@ export class BlingShadowUi {
       const dragHandle = this.shadow.getElementById('dock-drag-handle');
       if (dragHandle && typeof dragHandle.addEventListener === 'function' && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         dragHandle.addEventListener('pointerdown', (e: any) => {
-          if (e.target && (e.target as HTMLElement).id === 'btn-toggle-minimize') return;
+          const targetId = e.target && (e.target as HTMLElement).id;
+          if (targetId === 'btn-toggle-minimize' || targetId === 'btn-toggle-app-mode' || targetId === 'btn-open-sidepanel-aux') return;
           if (!this.host) return;
           const rect = this.host.getBoundingClientRect ? this.host.getBoundingClientRect() : { left: window.innerWidth - 280, top: window.innerHeight - 140 };
           this.dragOffset = {
@@ -400,10 +535,104 @@ export class BlingShadowUi {
     }
 
     const openButton = this.shadow.getElementById('btn-open-copilot');
-    if (openButton) openButton.textContent = this.currentPageType === 'product_form_new' ? 'Criar ficha do novo produto' : 'Abrir painel lateral';
+    if (openButton) {
+      openButton.textContent = isNew
+        ? '✨ Criar ficha com IA / Preço aqui no Pop-up'
+        : '✨ Abrir Ficha / Preço / IA aqui no Pop-up';
+    }
 
     const contextHelp = this.shadow.getElementById('context-help');
-    if (contextHelp) contextHelp.textContent = isNew ? 'Monte a ficha no painel lateral e traga os dados para este cadastro.' : hasId ? 'Confira os dados do produto e prepare seu anúncio a partir desta ficha.' : 'Abra um produto para ver seus dados ou use o painel lateral para começar uma ficha.';
+    if (contextHelp) {
+      contextHelp.textContent = isNew
+        ? 'Use os botões rápidos abaixo (ou nos campos do site) ou abra tudo aqui no pop-up sem precisar do painel lateral.'
+        : hasId
+          ? 'Edite SKU, EAN e Custo direto aqui ou prepare tudo dentro deste pop-up.'
+          : 'Use este pop-up flutuante para gerenciar tudo sem precisar abrir o painel lateral.';
+    }
+
+    // Renderiza a Barra de Ações Rápidas (SKU, EAN, Custo direto no Pop-up!)
+    const quickToolsContainer = this.shadow.getElementById('quick-tools-container');
+    if (quickToolsContainer) {
+      quickToolsContainer.replaceChildren();
+      if (isForm && typeof document !== 'undefined') {
+        const box = document.createElement('div');
+        box.className = 'quick-tools-box';
+
+        const title = document.createElement('div');
+        title.className = 'quick-tools-title';
+        title.textContent = isNew ? 'Ações Diretas no Novo Produto' : 'Ações Diretas no Formulário';
+
+        const grid = document.createElement('div');
+        grid.className = 'quick-tools-grid';
+
+        const statusMsg = document.createElement('p');
+        statusMsg.className = 'quick-status-msg';
+
+        const btnSku = document.createElement('button');
+        btnSku.type = 'button';
+        btnSku.className = 'quick-tool-btn';
+        btnSku.textContent = '⚡ Gerar SKU';
+        btnSku.onclick = () => {
+          if (this.onQuickGenerateSku) {
+            const res = this.onQuickGenerateSku();
+            statusMsg.textContent = res.message;
+          }
+        };
+
+        const btnEan = document.createElement('button');
+        btnEan.type = 'button';
+        btnEan.className = 'quick-tool-btn';
+        btnEan.textContent = '⚡ Gerar EAN-13';
+        btnEan.onclick = () => {
+          if (this.onQuickGenerateEan) {
+            const res = this.onQuickGenerateEan();
+            statusMsg.textContent = res.message;
+          }
+        };
+
+        grid.appendChild(btnSku);
+        grid.appendChild(btnEan);
+
+        const costRow = document.createElement('div');
+        costRow.className = 'quick-cost-row';
+
+        const costInput = document.createElement('input');
+        costInput.type = 'text';
+        costInput.className = 'quick-cost-input';
+        costInput.placeholder = 'Custo R$ (ex: 25,90)';
+        costInput.inputMode = 'decimal';
+        if (this.currentUiState.quickView?.costPrice != null) {
+          costInput.value = this.currentUiState.quickView.costPrice.toFixed(2).replace('.', ',');
+        }
+
+        const btnSaveCost = document.createElement('button');
+        btnSaveCost.type = 'button';
+        btnSaveCost.className = 'quick-tool-btn';
+        btnSaveCost.textContent = '💰 Aplicar Custo';
+        btnSaveCost.onclick = async () => {
+          const raw = costInput.value.trim().replace(/\./g, '').replace(',', '.');
+          const parsed = Number(raw);
+          if (!raw || !Number.isFinite(parsed) || parsed < 0) {
+            statusMsg.textContent = 'Informe um valor válido (ex: 25,90)';
+            return;
+          }
+          if (this.onQuickApplyCost) {
+            statusMsg.textContent = 'Aplicando custo...';
+            const res = await this.onQuickApplyCost(parsed);
+            statusMsg.textContent = res.message;
+          }
+        };
+
+        costRow.appendChild(costInput);
+        costRow.appendChild(btnSaveCost);
+
+        box.appendChild(title);
+        box.appendChild(grid);
+        box.appendChild(costRow);
+        box.appendChild(statusMsg);
+        quickToolsContainer.appendChild(box);
+      }
+    }
 
     // 1. Renderiza Feedback com textContent (anti-XSS)
     const feedbackContainer = this.shadow.getElementById('feedback-container');
@@ -494,37 +723,49 @@ export class BlingShadowUi {
       btnPrepare.hidden = !hasId || isNew;
     }
 
-    // 4. Renderiza tooltip/notice com textContent (anti-XSS)
+    // 4. Renderiza tooltip/notice com textContent (anti-XSS) + botão direto de conectar Bling
     const tooltipContainer = this.shadow.getElementById('tooltip-container');
     if (tooltipContainer) {
       tooltipContainer.replaceChildren();
 
-      // AJUSTE OBRIGATÓRIO 3: gateway_unreachable é transitório (não é disconnected).
-      // AJUSTE OBRIGATÓRIO 4: refreshing bloqueia temporariamente sem parecer logout.
       if (isTransitoryBlocked) {
         const notice = document.createElement('div');
         notice.className = 'tooltip-notice';
         if (this.blingConnectionStatus === 'gateway_unreachable') {
           notice.textContent = '⚠️ Gateway temporariamente indisponível. Tente novamente em instantes.';
+          if (this.onQuickRetryBling) {
+            const retryBtn = document.createElement('button');
+            retryBtn.type = 'button';
+            retryBtn.className = 'quick-tool-btn';
+            retryBtn.textContent = '🔄 Tentar reconectar agora';
+            retryBtn.onclick = () => this.onQuickRetryBling?.();
+            notice.appendChild(retryBtn);
+          }
         } else {
-          // refreshing
           notice.textContent = '⏳ Renovando sessão com o Bling… aguarde.';
         }
         tooltipContainer.appendChild(notice);
       } else if (isPermBlocked && !isConnected) {
-        // Conectar/Reconectar — orienta o usuário sem fornecer detalhes internos
         const notice = document.createElement('div');
         notice.className = 'tooltip-notice';
         if (this.blingConnectionStatus === 'connecting' || this.blingConnectionStatus === 'awaiting_oauth') {
           notice.textContent = '⏳ Aguardando conexão com o Bling…';
         } else {
-          notice.textContent = '🔗 Conecte o Bling pelo Copilot para continuar.';
+          notice.textContent = '🔗 Conecte o Bling direto por aqui para liberar todas as funções:';
+          if (this.onQuickConnectBling) {
+            const connectBtn = document.createElement('button');
+            connectBtn.type = 'button';
+            connectBtn.className = 'quick-tool-btn';
+            connectBtn.textContent = '🔗 Conectar conta Bling agora';
+            connectBtn.onclick = () => this.onQuickConnectBling?.();
+            notice.appendChild(connectBtn);
+          }
         }
         tooltipContainer.appendChild(notice);
       } else if (isNew) {
         const notice = document.createElement('div');
         notice.className = 'tooltip-notice';
-        notice.textContent = 'Novo cadastro: clique em Criar ficha para começar, sem precisar de ID.';
+        notice.textContent = 'Novo cadastro: gere SKU, EAN e Custo pelos botões acima ou nos campos do site, ou abra o App Completo aqui no pop-up.';
         tooltipContainer.appendChild(notice);
       }
     }

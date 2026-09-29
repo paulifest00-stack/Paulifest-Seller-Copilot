@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { encryptPayload, decryptPayload } from '../../crypto/aes-gcm.ts';
 import { MlApiClient, MlApiError } from './api-client.ts';
+import { quotePricing, readPricingContext } from './pricing.ts';
 import { buildMlPayload, validateMlDraft } from '../../../integrations/mercadolivre/listing.ts';
 import type { MlPreparedListing } from '../../../shared/mercadolivre-contracts.ts';
 
@@ -89,6 +90,27 @@ export class MlService {
       const [category, attributes] = await Promise.all([this.api.request('/categories/' + id, token), this.api.request('/categories/' + id + '/attributes', token)]);
       if (category?.id !== id || !Array.isArray(attributes)) throw new Error('Categoria retornada é inválida.');
       return { category, attributes };
+    });
+  }
+  async pricingCategories(owner: string, title: unknown) {
+    if (typeof title !== 'string' || title.trim().length < 3 || title.length > 250) throw new Error('Informe o nome do produto, com 3 a 250 caracteres.');
+    return this.locked(owner, async db => {
+      const { token } = await this.access(db, owner);
+      const rows = await this.api.request('/sites/MLB/domain_discovery/search?' + new URLSearchParams({ q: title.trim(), limit: '4' }), token);
+      if (!Array.isArray(rows)) throw new Error('O ML não retornou sugestões de categoria.');
+      return { categories: rows.filter(r => /^MLB\d+$/.test(r?.category_id) && typeof r.category_name === 'string').slice(0, 4).map(r => ({ id: r.category_id, name: r.category_name })) };
+    });
+  }
+  async pricingContext(owner: string, itemId: unknown) {
+    return this.locked(owner, async db => {
+      const { token, sellerId } = await this.access(db, owner);
+      return readPricingContext(this.api, token, sellerId, itemId);
+    });
+  }
+  async pricingQuote(owner: string, raw: unknown) {
+    return this.locked(owner, async db => {
+      const { token, sellerId } = await this.access(db, owner);
+      return quotePricing(this.api, token, sellerId, raw);
     });
   }
   async quote(owner: string, categoryId: string, price: number, listingType: string) {

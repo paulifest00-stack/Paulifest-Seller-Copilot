@@ -20,10 +20,10 @@ export function MlPublishPanel({ sheet, onUpdateSheet }: Props) {
   const [familyName, setFamilyName] = useState(sheet.titleBling?.value || sheet.title.value);
   const [price, setPrice] = useState(sheet.suggestedSalePrice.value ?? sheet.currentSalePrice.value ?? 0);
   const [quantity, setQuantity] = useState(reviewed(sheet.stockInfo) ? Math.max(0, Math.floor(sheet.stockInfo!.value.virtualTotal)) : 0);
-  const [listingType, setListingType] = useState<'gold_special' | 'gold_pro'>('gold_special');
-  const [condition, setCondition] = useState<'new' | 'used'>('new');
-  const [freeShipping, setFreeShipping] = useState(false), [pickup, setPickup] = useState(false);
-  const [shippingMode, setShippingMode] = useState<'me2' | 'custom'>('me2');
+  const [listingType, setListingType] = useState<'gold_special' | 'gold_pro'>(sheet.mlCalculator?.listingType || sheet.pricingDraft?.listingType || 'gold_special');
+  const [condition, setCondition] = useState<'new' | 'used'>(sheet.mlCalculator?.condition || 'new');
+  const [freeShipping, setFreeShipping] = useState(sheet.mlCalculator?.freeShipping ?? false), [pickup, setPickup] = useState(false);
+  const [shippingMode, setShippingMode] = useState<'me2' | 'custom'>(sheet.mlCalculator?.shippingMode === 'custom' ? 'custom' : 'me2');
   const [attributes, setAttributes] = useState<MlAttribute[]>(sheetMlAttributes(sheet));
   const [metadata, setMetadata] = useState<{ id: string; name: string; attributes: CategoryAttribute[] } | null>(null);
   const [fees, setFees] = useState<any>(null);
@@ -76,7 +76,7 @@ export function MlPublishPanel({ sheet, onUpdateSheet }: Props) {
       <label className="block">Envio<select className="border rounded-lg p-2 ml-2" value={shippingMode} onChange={e => setShippingMode(e.target.value as typeof shippingMode)}><option value="me2">Mercado Envios</option><option value="custom">Combinar com comprador</option></select></label>
       <label className="block"><input type="checkbox" checked={freeShipping} onChange={e => setFreeShipping(e.target.checked)} /> Oferecer frete grátis</label>
       <label className="block"><input type="checkbox" checked={pickup} onChange={e => setPickup(e.target.checked)} /> Permitir retirada</label>
-      <button className="border rounded-lg p-2" onClick={() => void run('quote', async () => { const data = await mlAction('quote', { categoryId, price, listingType }); if (mounted.current) setFees({ ...data, signature: JSON.stringify([categoryId, price, listingType]) }); })}>Consultar comissão na API ML</button>
+      <button className="border rounded-lg p-2" onClick={() => void run('quote', async () => { const quote = await mlAction('pricing-quote', { categoryId, price, listingType, shippingMode, logisticType: sheet.mlCalculator?.logisticType || '', condition, freeShipping, dimensions: sheet.mlCalculator?.dimensions }); const data = { queriedAt: quote.queriedAt, fees: { sale_fee_amount: quote.saleFee } }; if (mounted.current) setFees({ ...data, signature: JSON.stringify([categoryId, price, listingType]) }); })}>Consultar comissão na API ML</button><p className="text-slate-500">A logística e as medidas vêm da etapa Preço. Confira-as lá antes de consultar.</p>
       {fees?.signature === JSON.stringify([categoryId, price, listingType]) && <div className="rounded-xl bg-blue-50 p-3 space-y-1">{(Array.isArray(fees.fees) ? fees.fees : [fees.fees]).map((fee: any, i: number) => <p key={i}>Comissão de venda: {typeof fee?.sale_fee_amount === 'number' ? fee.sale_fee_amount.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : 'não retornada'}</p>)}<p>Consulta em {new Date(fees.queriedAt).toLocaleString('pt-BR')}. A tarifa fixa já está incluída. Frete, impostos e outros custos são separados.</p></div>}
       {shownAttributes.length > 0 && <details open><summary className="font-semibold cursor-pointer">Atributos da categoria</summary><div className="space-y-2 mt-3">{shownAttributes.map(attr => {
         const current = attributes.find(a => a.id === attr.id); const enumerable = (attr.values?.length || 0) > 0 && (attr.values?.length || 0) <= 100;

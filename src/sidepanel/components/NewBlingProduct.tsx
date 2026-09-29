@@ -9,6 +9,9 @@ export function NewBlingProduct({ sheet, target }: { sheet: CentralProductSheet;
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const values = buildNewProductFormValues(sheet);
+  const costPrice = typeof sheet.costPrice?.value === 'number' && Number.isFinite(sheet.costPrice.value) && sheet.costPrice.value >= 0
+    ? sheet.costPrice.value
+    : undefined;
   const labels: Record<string, string> = {
     nome: 'Nome',
     codigo: 'SKU',
@@ -24,12 +27,12 @@ export function NewBlingProduct({ sheet, target }: { sheet: CentralProductSheet;
     try {
       const result = await chrome.tabs.sendMessage(
         target.tabId,
-        { type: 'BLING_FILL_NEW_PRODUCT', pageInstanceId: target.pageInstanceId, url: target.url, values },
+        { type: 'BLING_FILL_NEW_PRODUCT', pageInstanceId: target.pageInstanceId, url: target.url, values, costPrice },
         { frameId: 0 }
       );
       if (!result?.ok) throw new Error(result?.error || 'O Bling não confirmou o preenchimento.');
       setMessage(
-        `Preenchidos: ${result.filled.map((k: string) => labels[k] || k).join(', ') || 'nenhum'}. ${
+        `Preenchidos: ${result.filled.map((k: string) => labels[k] || k).join(', ') || 'nenhum'}${costPrice !== undefined ? `, Custo (R$ ${costPrice.toFixed(2).replace('.', ',')})` : ''}. ${
           result.skipped.length
             ? 'Campos já preenchidos ou ocultos: ' + result.skipped.map((k: string) => labels[k] || k).join(', ') + '.'
             : ''
