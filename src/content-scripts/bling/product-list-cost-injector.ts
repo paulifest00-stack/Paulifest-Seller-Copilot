@@ -538,11 +538,11 @@ export class ProductListCostInjector {
       if (text.length >= 2 && text.length <= 30) {
         allHeaderCentersX.push((rect.left + rect.right) / 2);
       }
-      if (!skuHeaderRect && (text === 'código' || text === 'codigo' || text === 'sku')) {
+      if (!skuHeaderRect && (text.includes('código') || text.includes('codigo') || text === 'sku')) {
         skuHeaderRect = rect;
-      } else if (!descHeaderRect && (text === 'descrição' || text === 'descricao')) {
+      } else if (!descHeaderRect && text.includes('descri')) {
         descHeaderRect = rect;
-      } else if (!stockHeaderEl && (text === 'estoque' || text === 'saldo' || text === 'estoque atual')) {
+      } else if (!stockHeaderEl && (text.includes('estoque') || text.includes('saldo'))) {
         stockHeaderEl = el;
         stockHeaderRect = rect;
       }
@@ -558,6 +558,18 @@ export class ProductListCostInjector {
         }
       }
       return true;
+    };
+
+    const isWithinColumn = (el: HTMLElement, elRect: DOMRect, headerRect: DOMRect): boolean => {
+      const td = (el.tagName.toLowerCase() === 'td' ? el : el.closest('td')) as HTMLElement | null;
+      if (td) {
+        const tdRect = td.getBoundingClientRect();
+        const tdCenter = (tdRect.left + tdRect.right) / 2;
+        if (tdCenter >= headerRect.left - 6 && tdCenter <= headerRect.right + 6) return true;
+      }
+      const elCenter = (elRect.left + elRect.right) / 2;
+      if (elCenter >= headerRect.left - 6 && elCenter <= headerRect.right + 6) return true;
+      return isClosestColumnCenter(elCenter, (headerRect.left + headerRect.right) / 2, Math.max(headerRect.width * 0.85, 60));
     };
 
     const resolveRowMeta = (el: HTMLElement, elCenterY: number) => {
@@ -613,7 +625,6 @@ export class ProductListCostInjector {
 
     // 1. Encontra todas as células de valor de custo alinhadas exclusivamente abaixo de "Preço de Custo"
     if (costHeaderEl && costHeaderRect) {
-      const costCenterX = (costHeaderRect.left + costHeaderRect.right) / 2;
       for (const el of allElements) {
         if (el === costHeaderEl || el.contains(costHeaderEl)) continue;
         if (el.classList.contains(CELL_CLASS) || el.closest(`.${CELL_CLASS}, .${STOCK_CELL_CLASS}, .paulifest-cost-editor, .paulifest-stock-editor`)) continue;
@@ -625,8 +636,7 @@ export class ProductListCostInjector {
         const rect = el.getBoundingClientRect();
         if (rect.width < 8 || rect.height < 8 || rect.top <= costHeaderRect.bottom) continue;
 
-        const elCenterX = (rect.left + rect.right) / 2;
-        if (!isClosestColumnCenter(elCenterX, costCenterX, Math.max(costHeaderRect.width * 0.65, 38))) continue;
+        if (!isWithinColumn(el, rect, costHeaderRect)) continue;
 
         const elCenterY = (rect.top + rect.bottom) / 2;
         const { rowContainer, rowSku, rowName, productId, rowKey } = resolveRowMeta(el, elCenterY);
@@ -656,7 +666,6 @@ export class ProductListCostInjector {
 
     // 2. Encontra todas as células de saldo alinhadas exclusivamente abaixo de "Estoque" (sem tocar em "Preço")
     if (stockHeaderEl && stockHeaderRect) {
-      const stockCenterX = (stockHeaderRect.left + stockHeaderRect.right) / 2;
       for (const el of allElements) {
         if (el === stockHeaderEl || el.contains(stockHeaderEl)) continue;
         if (el.classList.contains(STOCK_CELL_CLASS) || el.classList.contains(CELL_CLASS) || el.closest(`.${STOCK_CELL_CLASS}, .${CELL_CLASS}, .paulifest-stock-editor, .paulifest-cost-editor`)) continue;
@@ -668,8 +677,7 @@ export class ProductListCostInjector {
         const rect = el.getBoundingClientRect();
         if (rect.width < 8 || rect.height < 8 || rect.top <= stockHeaderRect.bottom) continue;
 
-        const elCenterX = (rect.left + rect.right) / 2;
-        if (!isClosestColumnCenter(elCenterX, stockCenterX, Math.max(stockHeaderRect.width * 0.65, 38))) continue;
+        if (!isWithinColumn(el, rect, stockHeaderRect)) continue;
 
         const elCenterY = (rect.top + rect.bottom) / 2;
         const { rowContainer, rowSku, rowName, productId, rowKey } = resolveRowMeta(el, elCenterY);
@@ -751,7 +759,7 @@ export class ProductListCostInjector {
       if (ths[i].id === HEADER_ID || text.includes('custo')) {
         nativeCostColIndex = i;
       }
-      if (ths[i].id === STOCK_HEADER_ID || text === 'estoque' || text === 'saldo') {
+      if (ths[i].id === STOCK_HEADER_ID || text.includes('estoque') || text.includes('saldo')) {
         nativeStockColIndex = i;
       }
     }

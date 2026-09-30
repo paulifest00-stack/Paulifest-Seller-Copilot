@@ -9,6 +9,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: 22.13.0
       - key: DATABASE_SSL_CA_PATH
         value: config/certs/supabase-prod-ca-2021.crt
       - key: GATEWAY_TRUST_PROXY

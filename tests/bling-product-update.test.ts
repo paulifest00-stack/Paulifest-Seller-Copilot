@@ -216,7 +216,7 @@ export async function runBlingProductUpdateTests() {
     assert.equal(currentSimulatedStock, 2);
 
     const env = await setupRouter();
-    await tabContextManager.registerOrUpdateTab(900, { url: 'https://www.bling.com.br/produtos.php', domain: 'www.bling.com.br', pageType: 'product_list', isSupported: true, pageInstanceId: 'document-A' });
+    await tabContextManager.registerOrUpdateTab(900, { url: 'https://www.bling.com.br/produtos.php', platform: 'bling', pageType: 'product_list', pageInstanceId: 'document-A' });
     (globalThis as any).chrome.tabs.sendMessage = async () => ({ ok: true });
     let gatewayPatch: any;
     env.client.updateBlingProduct = async (id, body) => {

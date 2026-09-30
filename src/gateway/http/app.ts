@@ -261,7 +261,7 @@ export class GatewayApp {
         this.sendJson(res, 200, {
           status: 'ok',
           environment: this.config.environment,
-            capabilities: ['bling-cost-update-v1'],
+            capabilities: ['bling-cost-update-v1', 'bling-stock-update-v1'],
           timestamp: new Date().toISOString()
         });
         return;

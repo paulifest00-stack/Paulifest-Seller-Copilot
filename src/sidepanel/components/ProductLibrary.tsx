@@ -97,7 +97,7 @@ export function ProductLibrary({
       if (request !== revision.current) return;
       if (!result?.ok) throw new Error(result?.error || 'Não foi possível consultar o catálogo do Bling.');
       setItems(Array.isArray(result.items) ? result.items : []);
-      setPage(targetPage);
+      setPage(result.page !== undefined ? result.page : targetPage);
       setHasMore(Boolean(result.hasMore));
     } catch (e) {
       if (request === revision.current) setError(e instanceof Error ? e.message : 'Falha na consulta ao Bling.');

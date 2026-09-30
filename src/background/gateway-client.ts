@@ -961,27 +961,80 @@ export class GatewayClient {
   }
   async searchBlingProducts(query: string, page: number, searchBy: 'name' | 'sku') {
     const generation = this.authGeneration;
-    const params = new URLSearchParams({ query, page: String(page), searchBy });
-    const request = (gst: string) => this.fetchWithLocalFallback('/integrations/bling/products?' + params, {
-      headers: { Authorization: 'Bearer ' + gst, Accept: 'application/json' }, signal: AbortSignal.timeout(10000)
-    });
+
+    // Tokeniza a query para busca flexível por qualquer palavra/trecho do nome
+    const tokens = query.trim().toLocaleLowerCase().split(/\s+/).filter(t => t.length > 0);
+
+    // Função auxiliar que faz UMA chamada ao gateway (uma página) com auto-refresh de token
+    const fetchOnePage = async (gst: string, apiPage: number): Promise<{ items: any[]; hasMore: boolean; gst: string }> => {
+      // O gateway remoto repassa a query ao Bling, que faz busca por prefixo.
+      // Quando há múltiplos tokens, enviamos uma query vazia para buscar tudo e filtrar aqui.
+      // Quando há um único token (ex: "bat"), o Bling vai trazer os que COMEÇAM com "bat",
+      // mas pode deixar de trazer os que têm "bat" no meio. Por isso também filtramos aqui.
+      const searchQuery = searchBy === 'sku' ? query.trim() : '';
+      const params = new URLSearchParams({ query: searchQuery, page: String(apiPage), searchBy });
+      const res = await this.fetchWithLocalFallback('/integrations/bling/products?' + params, {
+        headers: { Authorization: 'Bearer ' + gst, Accept: 'application/json' },
+        signal: AbortSignal.timeout(15000)
+      });
+      this.assertAuthGeneration(generation);
+      if (res.status === 401) {
+        const session = await this.loadSession();
+        this.assertAuthGeneration(generation);
+        if (!session?.gatewayRefreshToken) throw new GatewayAuthRequiredError('Reconecte o Bling para consultar o catálogo.');
+        gst = await this.executeSingleFlightRefresh(session.gatewayRefreshToken);
+        this.assertAuthGeneration(generation);
+        const retryRes = await this.fetchWithLocalFallback('/integrations/bling/products?' + params, {
+          headers: { Authorization: 'Bearer ' + gst, Accept: 'application/json' },
+          signal: AbortSignal.timeout(15000)
+        });
+        this.assertAuthGeneration(generation);
+        const retryBody = await retryRes.json();
+        if (!retryRes.ok) throw new GatewayProductError(retryBody.error || 'GATEWAY_ERROR', retryBody.message || 'Falha na consulta do catálogo.', retryRes.status);
+        if (!retryBody.ok || !Array.isArray(retryBody.items)) throw new GatewayProductError('INVALID_GATEWAY_PAYLOAD', 'Resposta inválida do catálogo.', 422);
+        return { items: retryBody.items, hasMore: Boolean(retryBody.hasMore), gst };
+      }
+      const body = await res.json();
+      if (!res.ok) throw new GatewayProductError(body.error || 'GATEWAY_ERROR', res.status === 404 ? 'O catálogo precisa da atualização do Gateway. Suas fichas salvas continuam disponíveis.' : body.message || 'Falha na consulta do catálogo.', res.status);
+      if (!body.ok || !Array.isArray(body.items)) throw new GatewayProductError('INVALID_GATEWAY_PAYLOAD', 'Resposta inválida do catálogo.', 422);
+      return { items: body.items, hasMore: Boolean(body.hasMore), gst };
+    };
+
+    let currentPage = page;
+    let filteredItems: any[] = [];
+    let hasMoreInRemote = true;
     let gst = await this.getValidGst();
     this.assertAuthGeneration(generation);
-    let response = await request(gst);
-    this.assertAuthGeneration(generation);
-    if (response.status === 401) {
-      const session = await this.loadSession();
-      this.assertAuthGeneration(generation);
-      if (!session?.gatewayRefreshToken) throw new GatewayAuthRequiredError('Reconecte o Bling para consultar o catálogo.');
-      gst = await this.executeSingleFlightRefresh(session.gatewayRefreshToken);
-      this.assertAuthGeneration(generation);
-      response = await request(gst);
+    const maxPages = 60; // varrer até 60 páginas de 30 itens = 1800 produtos
+    let loopCount = 0;
+
+    while (loopCount < maxPages && filteredItems.length < 10 && hasMoreInRemote) {
+      const pageResult = await fetchOnePage(gst, currentPage);
+      gst = pageResult.gst;
+      hasMoreInRemote = pageResult.hasMore;
+
+      if (searchBy === 'name' && tokens.length > 0) {
+        const matched = pageResult.items.filter((item: any) => {
+          const lowerName = String(item.name || '').toLocaleLowerCase();
+          return tokens.every(token => lowerName.includes(token));
+        });
+        filteredItems = filteredItems.concat(matched);
+      } else {
+        filteredItems = filteredItems.concat(pageResult.items);
+      }
+
+      if (filteredItems.length < 10 && hasMoreInRemote) {
+        currentPage++;
+        loopCount++;
+        // Pausa mínima para não saturar o gateway/Bling
+        await new Promise(r => setTimeout(r, 150));
+        this.assertAuthGeneration(generation);
+      } else {
+        break;
+      }
     }
-    const body = await response.json();
-    this.assertAuthGeneration(generation);
-    if (!response.ok) throw new GatewayProductError(body.error || 'GATEWAY_ERROR', response.status === 404 ? 'O catálogo precisa da atualização do Gateway. Suas fichas salvas continuam disponíveis.' : body.message || 'Falha na consulta do catálogo.', response.status);
-    if (!body.ok || !Array.isArray(body.items) || body.page !== page) throw new GatewayProductError('INVALID_GATEWAY_PAYLOAD', 'Resposta inválida do catálogo.', 422);
-    return body;
+
+    return { ok: true, items: filteredItems, page: currentPage, hasMore: hasMoreInRemote };
   }
 
   private async rawFetchProduct(productId: string, gst: string): Promise<Response> {

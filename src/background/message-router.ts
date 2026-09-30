@@ -48,6 +48,21 @@ class StaleWriteError extends Error {
   }
 }
 
+function urlsMatchForPage(stateUrl?: string, expectedUrl?: string, pageType?: string): boolean {
+  if (!stateUrl || !expectedUrl) return false;
+  if (stateUrl === expectedUrl) return true;
+  try {
+    const u1 = new URL(stateUrl);
+    const u2 = new URL(expectedUrl);
+    if (pageType === 'product_list') {
+      return u1.origin === u2.origin && u1.pathname.replace(/\/+$/, '') === u2.pathname.replace(/\/+$/, '');
+    }
+    return `${u1.origin}${u1.pathname}`.toLowerCase() === `${u2.origin}${u2.pathname}`.toLowerCase();
+  } catch {
+    return stateUrl.split(/[?#]/)[0] === expectedUrl.split(/[?#]/)[0];
+  }
+}
+
 export class MessageRouter {
   private gatewayClient: GatewayClient;
   private authOrchestrator: BlingAuthOrchestrator;
@@ -249,7 +264,7 @@ export class MessageRouter {
       const validSupplier=message.supplierId===undefined || (typeof message.supplierId==='string' && /^[1-9]\d{0,19}$/.test(message.supplierId));
       if(!trusted || tabId===undefined || !state || state.platform!=='bling' ||
           !['product_list','product_form_edit'].includes(state.pageType) || state.pageInstanceId!==message.pageInstanceId ||
-          state.url!==message.expectedUrl || !isValidProductId(message.productId) || message.confirmed!==true ||
+          !urlsMatchForPage(state.url, message.expectedUrl, state.pageType) || !isValidProductId(message.productId) || message.confirmed!==true ||
           !validCost(message.value) || (message.expected!==null && !validCost(message.expected)) || !validSupplier ||
           (state.pageType==='product_form_edit' && state.detectedProduct?.id!==message.productId)) {
         sendResponse({ok:false,error:'Página ou produto mudou. Atualize antes de editar o custo.'});return true;
@@ -288,7 +303,7 @@ export class MessageRouter {
       const validDeposit = message.depositId === undefined || (typeof message.depositId === 'string' && /^[1-9]\d{0,19}$/.test(message.depositId));
       if (!trusted || tabId === undefined || !state || state.platform !== 'bling' ||
           !['product_list', 'product_form_edit'].includes(state.pageType) || state.pageInstanceId !== message.pageInstanceId ||
-          state.url !== message.expectedUrl || !isValidProductId(message.productId) || message.confirmed !== true ||
+          !urlsMatchForPage(state.url, message.expectedUrl, state.pageType) || !isValidProductId(message.productId) || message.confirmed !== true ||
           !validStock(message.value) || (message.expected !== null && !validStock(message.expected)) || !validDeposit ||
           (state.pageType === 'product_form_edit' && state.detectedProduct?.id !== message.productId)) {
         sendResponse({ ok: false, error: 'Página ou produto mudou. Atualize antes de editar o estoque.' });
@@ -727,8 +742,6 @@ export class MessageRouter {
           assertCurrent();
           await commitImportedSheet(reconciled.sheet, assertCurrent, async () => {
             assertCurrent();
-            await saveWorkspace({ sheetId: reconciled.sheet.id, step: 4 });
-            assertCurrent();
             const hasConflicts = reconciled.conflictedFields.length > 0 || reconciled.sheet.hasUnresolvedConflicts;
             await tabContextManager.linkSheetToTab(tabId, reconciled.sheet.id, {
               assertCurrent,
@@ -746,7 +759,7 @@ export class MessageRouter {
                   sheetId: reconciled.sheet.id, conflictedFields: reconciled.conflictedFields});
               }
             });
-          }, persistedBase ?? undefined);
+          }, persistedBase ?? undefined, { sheetId: reconciled.sheet.id, step: 4 });
         });
         return;
       }

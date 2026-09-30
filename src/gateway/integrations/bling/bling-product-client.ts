@@ -64,27 +64,83 @@ export class BlingProductClient {
   static parseCostPrice = parseCostPrice;
 
   async searchProducts(query: string, page: number, searchBy: 'name' | 'sku', accessToken: string) {
-    const params = new URLSearchParams({ pagina: String(page), limite: '30' });
-    if (query.trim()) params.set(searchBy === 'sku' ? 'codigo' : 'nome', query.trim());
-    let response: Response;
-    try {
-      response = await fetch(this.baseUrl + '/Api/v3/produtos?' + params, {
-        headers: { Authorization: 'Bearer ' + accessToken, Accept: 'application/json', 'enable-jwt': '1' },
-        signal: AbortSignal.timeout(this.timeoutMs)
+    const tokens = query.trim().toLocaleLowerCase().split(/\s+/).filter(t => t.length > 0);
+    
+    let currentApiPage = page;
+    let filteredItems: any[] = [];
+    let hasMoreInApi = true;
+    let loopCount = 0;
+    const maxLoops = 60; // Busca profunda de até 6000 produtos por clique (aprox 20s no pior caso)
+
+    while (loopCount < maxLoops && filteredItems.length < 10 && hasMoreInApi) {
+      if (loopCount > 0) {
+        // Pausa de 333ms para respeitar o rate limit do Bling (3 req/s)
+        await new Promise(r => setTimeout(r, 333));
+      }
+
+      const params = new URLSearchParams({ pagina: String(currentApiPage), limite: '100' });
+      
+      // Se for busca por SKU, a API do Bling faz busca exata, então mandamos.
+      if (searchBy === 'sku' && tokens.length > 0) {
+        params.set('codigo', query.trim());
+      }
+      // NOTA: Se for busca por nome, não enviamos o parâmetro 'nome' para o Bling.
+      // O Bling v3 apenas suporta busca "Começa com" (prefixo), o que quebra buscas por
+      // palavras no meio do nome. Então baixamos as páginas e filtramos no JavaScript.
+
+      let response: Response;
+      try {
+        response = await fetch(this.baseUrl + '/Api/v3/produtos?' + params, {
+          headers: { Authorization: 'Bearer ' + accessToken, Accept: 'application/json', 'enable-jwt': '1' },
+          signal: AbortSignal.timeout(this.timeoutMs)
+        });
+      } catch { throw new BlingProductError('Não foi possível acessar o catálogo do Bling.', 502, 'BLING_NETWORK_ERROR'); }
+      
+      if (!response.ok) {
+        if (response.status === 429) {
+          const retryAfterHeader = response.headers.get('retry-after');
+          const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 4;
+          const retryAfterMs = (!isNaN(retryAfterSeconds) && retryAfterSeconds > 0) ? retryAfterSeconds * 1000 : 4000;
+          await new Promise(r => setTimeout(r, retryAfterMs));
+          continue; // Tenta a mesma página novamente após aguardar
+        }
+        const status = response.status;
+        throw new BlingProductError(status === 403 ? 'Sua conexão não tem permissão de leitura de produtos.' : status === 429 ? 'Limite de consultas atingido. Aguarde e tente novamente.' : 'Falha ao consultar o catálogo Bling (HTTP ' + status + ').', status, status === 401 ? 'UNAUTHORIZED' : 'BLING_API_ERROR', status === 429 ? 5000 : undefined);
+      }
+      
+      let body: any;
+      try { body = await response.json(); } catch { throw new BlingProductError('Resposta inválida do catálogo.', 422, 'INVALID_BLING_PAYLOAD'); }
+      if (!Array.isArray(body?.data)) throw new BlingProductError('Lista de produtos inválida.', 422, 'INVALID_BLING_PAYLOAD');
+      
+      hasMoreInApi = body.data.length === 100;
+
+      const items = body.data.map((item: any) => {
+        if (!item || !/^\d+$/.test(String(item.id)) || typeof item.nome !== 'string') throw new BlingProductError('Produto inválido no catálogo.', 422, 'INVALID_BLING_PAYLOAD');
+        return { id: String(item.id), name: item.nome, sku: typeof item.codigo === 'string' ? item.codigo : '', price: typeof item.preco === 'number' && Number.isFinite(item.preco) ? item.preco : null };
       });
-    } catch { throw new BlingProductError('Não foi possível acessar o catálogo do Bling.', 502, 'BLING_NETWORK_ERROR'); }
-    if (!response.ok) {
-      const status = response.status;
-      throw new BlingProductError(status === 403 ? 'Sua conexão não tem permissão de leitura de produtos.' : status === 429 ? 'Limite de consultas atingido. Aguarde e tente novamente.' : 'Falha ao consultar o catálogo Bling (HTTP ' + status + ').', status, status === 401 ? 'UNAUTHORIZED' : 'BLING_API_ERROR', status === 429 ? 5000 : undefined);
+
+      if (searchBy === 'name' && tokens.length > 0) {
+        filteredItems = filteredItems.concat(items.filter((item: any) => {
+          const lowerName = item.name.toLocaleLowerCase();
+          return tokens.every(token => lowerName.includes(token));
+        }));
+      } else {
+        filteredItems = filteredItems.concat(items);
+      }
+
+      if (filteredItems.length < 10 && hasMoreInApi) {
+        currentApiPage++;
+        loopCount++;
+      } else {
+        break;
+      }
     }
-    let body: any;
-    try { body = await response.json(); } catch { throw new BlingProductError('Resposta inválida do catálogo.', 422, 'INVALID_BLING_PAYLOAD'); }
-    if (!Array.isArray(body?.data)) throw new BlingProductError('Lista de produtos inválida.', 422, 'INVALID_BLING_PAYLOAD');
-    const items = body.data.map((item: any) => {
-      if (!item || !/^\d+$/.test(String(item.id)) || typeof item.nome !== 'string') throw new BlingProductError('Produto inválido no catálogo.', 422, 'INVALID_BLING_PAYLOAD');
-      return { id: String(item.id), name: item.nome, sku: typeof item.codigo === 'string' ? item.codigo : '', price: typeof item.preco === 'number' && Number.isFinite(item.preco) ? item.preco : null };
-    });
-    return { items, page, hasMore: body.data.length === 30 };
+
+    // currentApiPage points to the LAST page we fetched in this loop.
+    // By returning `page: currentApiPage`, the frontend will set its state to `currentApiPage`.
+    // When the user clicks "Próx", it will request `currentApiPage + 1`, which is perfectly correct.
+    
+    return { items: filteredItems, page: currentApiPage, hasMore: hasMoreInApi };
   }
 
 

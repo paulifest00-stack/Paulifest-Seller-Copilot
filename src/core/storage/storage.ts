@@ -88,7 +88,7 @@ const SHEET_STORAGE_PREFIX = 'paulifest_sheet_';
  * Salva uma ficha de produto pelo seu próprio ID no storage permanente (chrome.storage.local).
  * Garante validação de integridade com Schema v3 antes da gravação.
  */
-async function saveSheetUnlocked(sheet: CentralProductSheet): Promise<void> {
+async function saveSheetUnlocked(sheet: CentralProductSheet, workspace?: ProductWorkspace): Promise<void> {
   const validation = validateSheetV3(sheet);
   if (!validation.isValid) {
     throw new Error(`Não é possível salvar ficha inválida no storage: ${validation.errors.join('; ')}`);
@@ -101,11 +101,13 @@ async function saveSheetUnlocked(sheet: CentralProductSheet): Promise<void> {
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     await chrome.storage.local.set({
       [sheetKey]: sheet,
-      [STORAGE_KEYS.ACTIVE_SHEET]: sheet
+      [STORAGE_KEYS.ACTIVE_SHEET]: sheet,
+      ...(workspace ? { [WORKSPACE_KEY]: workspace } : {})
     });
   } else {
     setStorageItem(sheetKey, JSON.stringify(sheet));
     setStorageItem(STORAGE_KEYS.ACTIVE_SHEET, JSON.stringify(sheet));
+    if (workspace) setStorageItem(WORKSPACE_KEY, JSON.stringify(workspace));
   }
 }
 
@@ -368,11 +370,12 @@ export function clearAllSavedSheets(): Promise<void> {
  */
 export function commitImportedSheet(
   sheet: CentralProductSheet, assertCurrent: () => unknown, publish: () => Promise<void>,
-  expectedBase?: CentralProductSheet
+  expectedBase?: CentralProductSheet, workspace?: ProductWorkspace
 ): Promise<void> {
   return withSheetLock(async () => {
     assertCurrent();
     const keys = [SHEET_STORAGE_PREFIX + sheet.id, STORAGE_KEYS.ACTIVE_SHEET];
+    if (workspace) keys.push(WORKSPACE_KEY);
     const before = new Map<string, any>();
     for (const key of keys) {
       const raw = typeof chrome !== 'undefined' && chrome.storage?.local
@@ -389,7 +392,7 @@ export function commitImportedSheet(
     }
     try {
       assertCurrent();
-      await saveSheetUnlocked(sheet);
+      await saveSheetUnlocked(sheet, workspace);
       assertCurrent();
       await publish();
     } catch (error) {
