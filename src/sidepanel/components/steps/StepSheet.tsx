@@ -17,7 +17,8 @@ import {
   Cpu,
   Copy,
   Plus,
-  Trash2
+  Trash2,
+  Tag
 } from 'lucide-react';
 import type { CentralProductSheet, FieldStatus, AuditedField, TechnicalAttribute } from '../../../core/schema/product.ts';
 import { createAuditedField, resolveFieldConflict } from '../../../core/schema/product.ts';
@@ -314,6 +315,106 @@ export const StepSheet: React.FC<StepSheetProps> = ({
 
   return (
     <div className="space-y-2.5 animate-fade-in">
+      {/* 0. Códigos Rápidos de Identificação (SKU, EAN, NCM) */}
+      <div className="apple-glass-card rounded-xl p-3 space-y-2 border border-blue-200/80 bg-gradient-to-br from-white to-blue-50/40 shadow-xs">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-bold text-[#1d1d1f] flex items-center gap-1.5">
+            <Tag className="w-3.5 h-3.5 text-[#0071e3]" />
+            <span>Códigos Principais</span>
+          </span>
+          {(sheet.sku.value || sheet.ean.value || sheet.ncm.value) && (
+            <button
+              type="button"
+              onClick={() => {
+                const lines = [
+                  sheet.sku.value ? `SKU: ${sheet.sku.value}` : null,
+                  sheet.ean.value ? `EAN: ${sheet.ean.value}` : null,
+                  sheet.ncm.value ? `NCM: ${sheet.ncm.value}` : null
+                ].filter(Boolean).join('\n');
+                handleCopy('all_codes', lines);
+              }}
+              className="text-[10px] text-[#0071e3] hover:underline font-semibold flex items-center gap-1 bg-white px-2 py-0.5 rounded-md border border-blue-200/70 shadow-2xs"
+              title="Copiar SKU, EAN e NCM juntos"
+            >
+              {copiedKey === 'all_codes' ? (
+                <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
+              ) : (
+                <Copy className="w-2.5 h-2.5" />
+              )}
+              <span>{copiedKey === 'all_codes' ? 'Copiados!' : 'Copiar Todos'}</span>
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-3 gap-1.5">
+          {/* SKU */}
+          <div className="bg-white/95 border border-black/[0.08] rounded-lg p-2 flex flex-col justify-between shadow-2xs">
+            <span className="text-[9px] font-bold text-[#86868b] uppercase tracking-wider">SKU</span>
+            <div
+              className={`font-mono text-[11px] truncate my-1 select-all ${
+                sheet.sku.value ? 'font-bold text-[#1d1d1f]' : 'text-slate-400 italic'
+              }`}
+              title={sheet.sku.value || 'SKU não informado'}
+            >
+              {sheet.sku.value || '—'}
+            </div>
+            <button
+              type="button"
+              disabled={!sheet.sku.value}
+              onClick={() => handleCopy('quick_sku', sheet.sku.value)}
+              className="w-full text-[9.5px] font-medium text-[#0071e3] hover:text-[#0077ed] flex items-center justify-center gap-1 bg-slate-50 hover:bg-blue-50 py-1 rounded border border-black/[0.06] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <Copy className="w-2.5 h-2.5" />
+              <span>{copiedKey === 'quick_sku' ? 'Copiado' : 'Copiar'}</span>
+            </button>
+          </div>
+
+          {/* EAN */}
+          <div className="bg-white/95 border border-black/[0.08] rounded-lg p-2 flex flex-col justify-between shadow-2xs">
+            <span className="text-[9px] font-bold text-[#86868b] uppercase tracking-wider">EAN / GTIN</span>
+            <div
+              className={`font-mono text-[11px] truncate my-1 select-all ${
+                sheet.ean.value ? 'font-bold text-[#1d1d1f]' : 'text-slate-400 italic'
+              }`}
+              title={sheet.ean.value || 'EAN não informado'}
+            >
+              {sheet.ean.value || '—'}
+            </div>
+            <button
+              type="button"
+              disabled={!sheet.ean.value}
+              onClick={() => handleCopy('quick_ean', sheet.ean.value)}
+              className="w-full text-[9.5px] font-medium text-[#0071e3] hover:text-[#0077ed] flex items-center justify-center gap-1 bg-slate-50 hover:bg-blue-50 py-1 rounded border border-black/[0.06] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <Copy className="w-2.5 h-2.5" />
+              <span>{copiedKey === 'quick_ean' ? 'Copiado' : 'Copiar'}</span>
+            </button>
+          </div>
+
+          {/* NCM */}
+          <div className="bg-white/95 border border-black/[0.08] rounded-lg p-2 flex flex-col justify-between shadow-2xs">
+            <span className="text-[9px] font-bold text-[#86868b] uppercase tracking-wider">NCM</span>
+            <div
+              className={`font-mono text-[11px] truncate my-1 select-all ${
+                sheet.ncm.value ? 'font-bold text-[#1d1d1f]' : 'text-slate-400 italic'
+              }`}
+              title={sheet.ncm.value || 'NCM não informado'}
+            >
+              {sheet.ncm.value || '—'}
+            </div>
+            <button
+              type="button"
+              disabled={!sheet.ncm.value}
+              onClick={() => handleCopy('quick_ncm', sheet.ncm.value)}
+              className="w-full text-[9.5px] font-medium text-[#0071e3] hover:text-[#0077ed] flex items-center justify-center gap-1 bg-slate-50 hover:bg-blue-50 py-1 rounded border border-black/[0.06] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <Copy className="w-2.5 h-2.5" />
+              <span>{copiedKey === 'quick_ncm' ? 'Copiado' : 'Copiar'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* 1. Nome no Bling */}
       <div className="apple-glass-card rounded-xl p-3 space-y-1.5">
         <div className="flex items-center justify-between">
@@ -614,7 +715,19 @@ export const StepSheet: React.FC<StepSheetProps> = ({
             <ShieldCheck className="w-3.5 h-3.5 text-[#0071e3]" />
             <span>NCM</span>
           </label>
-          {renderStatusBadge('ncm', sheet.ncm)}
+          <div className="flex items-center gap-2">
+            {sheet.ncm.value && (
+              <button
+                type="button"
+                onClick={() => handleCopy('ncm', sheet.ncm.value)}
+                className="text-[10px] text-[#86868b] hover:text-[#0071e3] flex items-center gap-1 font-medium"
+              >
+                <Copy className="w-2.5 h-2.5" />
+                <span>{copiedKey === 'ncm' ? 'Copiado' : 'Copiar'}</span>
+              </button>
+            )}
+            {renderStatusBadge('ncm', sheet.ncm)}
+          </div>
         </div>
         <input
           type="text"

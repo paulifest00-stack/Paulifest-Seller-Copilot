@@ -210,7 +210,11 @@ import type {
 
     chrome.runtime.onMessage.addListener((message,sender,sendResponse)=>{
       if(message?.type!=='BLING_VERIFY_COST_TARGET')return;
-      if(sender.id!==chrome.runtime.id || message.pageInstanceId!==pageInstanceId || message.expectedUrl!==location.href){sendResponse({ok:false});return;}
+      const urlsMatch = (u1: string, u2: string) => {
+        try { const a = new URL(u1); const b = new URL(u2); return a.origin === b.origin && a.pathname === b.pathname; }
+        catch { return u1 === u2; }
+      };
+      if(sender.id!==chrome.runtime.id || message.pageInstanceId!==pageInstanceId || !urlsMatch(message.expectedUrl, location.href)){sendResponse({ok:false});return;}
       const context=classifyBlingUrl(location.href);
       const pid = String(message.productId || '');
       const hasProductInDoc = (doc: Document): boolean => (

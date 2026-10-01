@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Trash2, RefreshCw, ArrowRight, Search } from 'lucide-react';
+import { Trash2, RefreshCw, ArrowRight, Search, Copy, Check } from 'lucide-react';
 import type { CentralProductSheet } from '../../core/schema/product.ts';
 import { createInitialSheet } from '../../core/schema/product.ts';
 import { clearAllSavedSheets, deleteSheet, listSavedSheets, saveSheet } from '../../core/storage/storage.ts';
@@ -39,6 +39,7 @@ export function ProductLibrary({
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [copiedSku, setCopiedSku] = useState<string | null>(null);
   const [error, setError] = useState('');
   const revision = useRef(0);
   const autoLoadedBling = useRef(false);
@@ -372,21 +373,51 @@ export function ProductLibrary({
               : items.map(item => (
                   <div
                     key={item.id}
-                    className="flex items-center justify-between gap-2 border border-black/[0.07] rounded-lg p-2 hover:border-emerald-300 transition-all"
+                    className="flex items-center justify-between gap-2 border border-black/[0.07] rounded-lg p-2 hover:border-emerald-300 hover:bg-emerald-50/20 transition-all"
                   >
-                    <div className="min-w-0 flex-1">
-                      <strong className="block truncate text-[11px] text-[#1d1d1f]">{item.name}</strong>
-                      <span className="text-[10px] text-[#86868b] font-mono">
-                        {item.sku || `#${item.id}`}
+                    <button
+                      type="button"
+                      disabled={busy || !connected}
+                      onClick={() => void importProduct(item.id, 2)}
+                      className="min-w-0 flex-1 text-left cursor-pointer group"
+                      title="Abrir ficha e ver EAN, SKU e NCM"
+                    >
+                      <strong className="block truncate text-[11px] text-[#1d1d1f] group-hover:text-emerald-700">
+                        {item.name}
+                      </strong>
+                      <span className="text-[10px] text-[#86868b] font-mono flex items-center gap-1">
+                        <span>{item.sku || `#${item.id}`}</span>
                         {item.price !== null ? ` · R$ ${item.price.toFixed(2).replace('.', ',')}` : ''}
+                        {item.sku && (
+                          <span
+                            role="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (navigator?.clipboard?.writeText) {
+                                navigator.clipboard.writeText(item.sku);
+                                setCopiedSku(item.id);
+                                setTimeout(() => setCopiedSku(null), 1500);
+                              }
+                            }}
+                            className="p-0.5 rounded text-slate-400 hover:text-emerald-700 hover:bg-slate-100"
+                            title="Copiar SKU"
+                          >
+                            {copiedSku === item.id ? (
+                              <Check className="w-2.5 h-2.5 text-emerald-600 inline" />
+                            ) : (
+                              <Copy className="w-2.5 h-2.5 inline" />
+                            )}
+                          </span>
+                        )}
                       </span>
-                    </div>
+                    </button>
                     <div className="flex items-center gap-1 flex-shrink-0">
                       <button
                         type="button"
                         disabled={busy || !connected}
                         onClick={() => void importProduct(item.id, 2)}
                         className="px-2 py-1 rounded-md border border-black/[0.1] bg-white hover:bg-slate-50 text-[#1d1d1f] font-medium text-[10px]"
+                        title="Abrir ficha do produto"
                       >
                         Ficha
                       </button>

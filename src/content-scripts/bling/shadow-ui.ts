@@ -608,6 +608,116 @@ const STYLES = /* css */`
     margin-top: 3px;
   }
 
+  /* ── Códigos do produto & Botões de cópia rápida ── */
+  .pf-codes-card {
+    background: var(--pf-surface-2);
+    border: 1px solid var(--pf-border);
+    border-radius: var(--pf-r-sm);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .pf-code-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--pf-border);
+  }
+  .pf-code-row:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  .pf-code-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+  .pf-code-title {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: var(--pf-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .pf-code-value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--pf-text);
+    user-select: all;
+    -webkit-user-select: all;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pf-code-value.empty {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--pf-muted);
+    font-family: inherit;
+  }
+  .pf-copy-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--pf-border);
+    background: #fff;
+    color: var(--pf-blue);
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 120ms ease;
+    flex-shrink: 0;
+  }
+  .pf-copy-chip:hover {
+    background: rgba(18,120,249,0.08);
+    border-color: var(--pf-blue);
+  }
+  .pf-copy-chip:active {
+    transform: scale(0.95);
+  }
+  .pf-copy-chip.copied {
+    background: #ecfdf5;
+    border-color: #10b981;
+    color: #059669;
+  }
+  .pf-copy-chip:disabled {
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .pf-copy-all-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px dashed rgba(18,120,249,0.4);
+    background: rgba(18,120,249,0.04);
+    color: var(--pf-blue);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 120ms ease;
+    margin-top: 2px;
+  }
+  .pf-copy-all-btn:hover {
+    background: rgba(18,120,249,0.09);
+    border-color: var(--pf-blue);
+  }
+  .pf-copy-all-btn.copied {
+    background: #ecfdf5;
+    border-color: #10b981;
+    color: #059669;
+  }
+
   /* ── Separator ── */
   .pf-sep { height: 1px; background: var(--pf-border); margin: 0; }
 
@@ -886,7 +996,7 @@ export class BlingShadowUi {
   private readonly SCREEN_HEIGHTS: Record<ScreenId, number> = {
     home:    420,
     catalog: 500,
-    product: 500,
+    product: 520,
     cost:    340,
     connect: 360,
     ml:      460,
@@ -1476,6 +1586,126 @@ export class BlingShadowUi {
     hero.appendChild(info);
     el.appendChild(hero);
 
+    // Códigos Principais (EAN, SKU, NCM) com Cópia Rápida
+    const codesSection = document.createElement('div');
+    codesSection.className = 'pf-section';
+    const lblCodes = document.createElement('div');
+    lblCodes.className = 'pf-section-label';
+    lblCodes.textContent = 'Identificação (EAN · SKU · NCM)';
+    codesSection.appendChild(lblCodes);
+
+    const codesCard = document.createElement('div');
+    codesCard.className = 'pf-codes-card';
+    codesSection.appendChild(codesCard);
+    el.appendChild(codesSection);
+
+    const copyToClipboard = (text: string, btn: HTMLButtonElement) => {
+      if (!text || text === '—') return;
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      btn.classList.add('copied');
+      btn.innerHTML = '✓ Copiado!';
+      setTimeout(() => {
+        btn.classList.remove('copied');
+        btn.innerHTML = '📋 Copiar';
+      }, 1500);
+    };
+
+    const renderCodes = () => {
+      const curProduct = this.selectedProduct;
+      const skuVal = curProduct?.codigo || codigo || '';
+      const eanVal = curProduct?.gtin || '';
+      const ncmVal = curProduct?.ncm || '';
+      const isLoadingDetails = !curProduct?.gtin && !curProduct?.ncm && Boolean(productId);
+
+      codesCard.innerHTML = `
+        <div class="pf-code-row">
+          <div class="pf-code-meta">
+            <span class="pf-code-title">SKU</span>
+            <span class="pf-code-value ${skuVal ? '' : 'empty'}" title="Clique para selecionar">${escHtml(skuVal || 'Não informado')}</span>
+          </div>
+          <button type="button" class="pf-copy-chip pf-copy-sku" ${skuVal ? '' : 'disabled'}>
+            📋 Copiar
+          </button>
+        </div>
+
+        <div class="pf-code-row">
+          <div class="pf-code-meta">
+            <span class="pf-code-title">EAN / Código de Barras</span>
+            <span class="pf-code-value ${eanVal ? '' : 'empty'}" title="Clique para selecionar">${escHtml(eanVal || (isLoadingDetails ? 'Consultando...' : 'Não informado'))}</span>
+          </div>
+          <button type="button" class="pf-copy-chip pf-copy-ean" ${eanVal ? '' : 'disabled'}>
+            📋 Copiar
+          </button>
+        </div>
+
+        <div class="pf-code-row">
+          <div class="pf-code-meta">
+            <span class="pf-code-title">NCM</span>
+            <span class="pf-code-value ${ncmVal ? '' : 'empty'}" title="Clique para selecionar">${escHtml(ncmVal || (isLoadingDetails ? 'Consultando...' : 'Não informado'))}</span>
+          </div>
+          <button type="button" class="pf-copy-chip pf-copy-ncm" ${ncmVal ? '' : 'disabled'}>
+            📋 Copiar
+          </button>
+        </div>
+
+        <button type="button" class="pf-copy-all-btn" ${(skuVal || eanVal || ncmVal) ? '' : 'disabled'}>
+          📄 Copiar EAN, SKU e NCM juntos
+        </button>
+      `;
+
+      codesCard.querySelector('.pf-copy-sku')?.addEventListener('click', (e) => {
+        copyToClipboard(skuVal, e.currentTarget as HTMLButtonElement);
+      });
+      codesCard.querySelector('.pf-copy-ean')?.addEventListener('click', (e) => {
+        copyToClipboard(eanVal, e.currentTarget as HTMLButtonElement);
+      });
+      codesCard.querySelector('.pf-copy-ncm')?.addEventListener('click', (e) => {
+        copyToClipboard(ncmVal, e.currentTarget as HTMLButtonElement);
+      });
+      codesCard.querySelector('.pf-copy-all-btn')?.addEventListener('click', (e) => {
+        const textToCopy = [
+          skuVal ? `SKU: ${skuVal}` : null,
+          eanVal ? `EAN: ${eanVal}` : null,
+          ncmVal ? `NCM: ${ncmVal}` : null
+        ].filter(Boolean).join('\n');
+        copyToClipboard(textToCopy, e.currentTarget as HTMLButtonElement);
+      });
+    };
+
+    renderCodes();
+
+    // Se ainda não temos GTIN ou NCM e há productId, busca detalhes completos via BLING_CATALOG_PRODUCT
+    if (productId && (!product?.gtin || !product?.ncm) && typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'BLING_CATALOG_PRODUCT', productId: String(productId) }, (res) => {
+        if (res?.ok && res.product) {
+          const bp = res.product;
+          this.selectedProduct = {
+            ...(this.selectedProduct || {}),
+            id: String(bp.id || productId),
+            nome: bp.nome || this.selectedProduct?.nome || nome,
+            codigo: bp.codigo || this.selectedProduct?.codigo || codigo,
+            gtin: bp.gtin || bp.gtinEmbalagem || '',
+            ncm: bp.tributacao?.ncm || bp.ncm || '',
+            marca: bp.marca || this.selectedProduct?.marca,
+            precoCusto: typeof bp.precoCusto === 'number' ? bp.precoCusto : this.selectedProduct?.precoCusto,
+            preco: typeof bp.preco === 'number' ? bp.preco : this.selectedProduct?.preco,
+            pesoBruto: bp.pesoBruto ?? this.selectedProduct?.pesoBruto,
+            formato: bp.formato ?? this.selectedProduct?.formato
+          };
+          renderCodes();
+        }
+      });
+    }
+
     // Stats
     const { costText, stockText } = product
       ? { costText: product.precoCusto != null ? `R$ ${product.precoCusto.toFixed(2).replace('.', ',')}` : '—', stockText: '—' }
@@ -1500,7 +1730,7 @@ export class BlingShadowUi {
     el.appendChild(statsCard);
 
     // Extra Info
-    if (product?.gtin || product?.ncm || product?.marca || product?.formato) {
+    if (product?.marca || product?.formato || product?.pesoBruto != null) {
       const extraSection = document.createElement('div');
       extraSection.className = 'pf-section';
       const lblExtra = document.createElement('div');
@@ -1512,8 +1742,6 @@ export class BlingShadowUi {
       extraCard.className = 'pf-card';
       extraCard.style.cssText = 'padding: 8px 12px; font-size: 11px; line-height: 1.6; color: var(--pf-muted); display: grid; grid-template-columns: 1fr 1fr; gap: 4px;';
       
-      if (product.gtin) extraCard.innerHTML += `<div><strong>Cód. Barras:</strong> <br/><span style="user-select:all;color:var(--pf-text)">${escHtml(product.gtin)}</span></div>`;
-      if (product.ncm) extraCard.innerHTML += `<div><strong>NCM:</strong> <br/><span style="user-select:all;color:var(--pf-text)">${escHtml(product.ncm)}</span></div>`;
       if (product.marca) extraCard.innerHTML += `<div><strong>Marca:</strong> <br/><span style="user-select:all;color:var(--pf-text)">${escHtml(product.marca)}</span></div>`;
       if (product.formato) extraCard.innerHTML += `<div><strong>Formato:</strong> <br/><span style="user-select:all;color:var(--pf-text)">${escHtml(product.formato)}</span></div>`;
       if (product.pesoBruto != null) extraCard.innerHTML += `<div><strong>Peso Bruto:</strong> <br/><span style="user-select:all;color:var(--pf-text)">${product.pesoBruto} kg</span></div>`;
