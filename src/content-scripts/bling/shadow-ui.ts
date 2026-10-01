@@ -1,4 +1,4 @@
-// Componente de UI Contextual Injetada no Bling ERP via Shadow DOM (Fase 4B)
+﻿// Componente de UI Contextual Injetada no Bling ERP via Shadow DOM (Fase 4B)
 // Atualizado na Fase 4C.4B: auth-awareness mínima no Dock (feedback de estado de conexão).
 import type {
   BlingPageType,
@@ -301,63 +301,63 @@ export class BlingShadowUi {
     if (!dockRoot) {
       this.shadow.innerHTML = `
         <style>
-          :host { all: initial; font: 13px/1.5 system-ui, sans-serif; color: #17243a; position: fixed; right: 20px; bottom: 20px; z-index: 999999; pointer-events: none; }
+          :host { all: initial; font: 13px/1.5 system-ui, sans-serif; color: #1e293b; position: fixed; right: 20px; bottom: 20px; z-index: 999999; pointer-events: none; }
           * { box-sizing: border-box; }
           [hidden] { display:none!important; }
           .dock-container { pointer-events: auto; display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
-          .dock-card { background:#fff; border:1px solid #dbe3ee; border-radius:18px; box-shadow:0 12px 40px #17243a33; width:min(380px,calc(100vw - 24px)); max-height:calc(100dvh - 24px); display:flex; flex-direction:column; overflow:hidden; transition:width .18s ease; }
+          .dock-card { background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; box-shadow:0 8px 30px rgba(10,31,68,0.18); width:min(380px,calc(100vw - 24px)); max-height:calc(100dvh - 24px); display:flex; flex-direction:column; overflow:hidden; transition:width .18s ease; }
           .dock-card.is-expanded-app { width:min(460px,calc(100vw - 20px)); height:min(740px,calc(100dvh - 24px)); }
-          .dock-header { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:11px 14px; border-bottom:1px solid #e9edf3; cursor:grab; touch-action:none; background:#f8fafc; flex-shrink:0; }
+          .dock-header { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:13px 16px; cursor:grab; touch-action:none; background:linear-gradient(135deg,#1278f9,#094eb0); flex-shrink:0; }
           .dock-header:active { cursor:grabbing; }
-          .dock-title { display:flex; align-items:center; gap:7px; font-size:13.5px; font-weight:700; white-space:nowrap; }
-          .dock-logo { width:22px; height:22px; object-fit:contain; display:none; background:#fff; border-radius:6px; padding:1px; }
-          .drag-grip { color:#98a2b3; }
-          .header-controls { display:flex; align-items:center; gap:6px; }
-          .dock-badge { border-radius:6px; padding:2px 6px; background:#edf4ff; color:#2458d3; font-size:10px; font-weight:600; }
-          .mode-btn { border:1px solid #c7d7fe; background:#eef4ff; color:#1d4ed8; border-radius:7px; padding:4px 8px; font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap; }
-          .mode-btn:hover { background:#dbeafe; }
-          .sidepanel-link-btn { border:1px solid #dbe3ee; background:#fff; color:#475467; border-radius:7px; padding:4px 7px; font-size:11px; font-weight:600; cursor:pointer; }
-          .sidepanel-link-btn:hover { background:#f1f5f9; color:#1e293b; }
-          .icon-btn { width:28px; height:28px; border:1px solid #dbe3ee; background:#fff; color:#475467; border-radius:8px; font-size:16px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; }
-          .icon-btn:hover { background:#edf4ff; }
-          button:focus-visible { outline:3px solid #3483fa; outline-offset:2px; }
-          .dock-body { display:flex; flex-direction:column; gap:12px; padding:14px 16px; overflow:auto; flex:1; }
+          .dock-title { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:800; white-space:nowrap; color:#fff; }
+          .dock-logo { width:26px; height:26px; object-fit:contain; display:none; background:#fff; border-radius:7px; padding:2px; box-shadow:0 1px 4px rgba(0,0,0,0.15); }
+          .drag-grip { color:rgba(255,255,255,0.45); font-size:15px; }
+          .header-controls { display:flex; align-items:center; gap:5px; }
+          .dock-badge { border-radius:20px; padding:3px 9px; background:#10b981; color:#fff; font-size:10px; font-weight:800; letter-spacing:0.5px; text-transform:uppercase; }
+          .mode-btn { border:1px solid rgba(255,255,255,0.35); background:rgba(255,255,255,0.15); color:#fff; border-radius:7px; padding:5px 9px; font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap; font-family:system-ui,sans-serif; }
+          .mode-btn:hover { background:rgba(255,255,255,0.28); }
+          .sidepanel-link-btn { border:1px solid rgba(255,255,255,0.35); background:rgba(255,255,255,0.12); color:#fff; border-radius:7px; padding:5px 9px; font-size:11px; font-weight:600; cursor:pointer; font-family:system-ui,sans-serif; }
+          .sidepanel-link-btn:hover { background:rgba(255,255,255,0.25); }
+          .icon-btn { width:28px; height:28px; border:1px solid rgba(255,255,255,0.35); background:rgba(255,255,255,0.12); color:#fff; border-radius:8px; font-size:15px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; font-family:system-ui,sans-serif; }
+          .icon-btn:hover { background:rgba(255,255,255,0.28); }
+          button:focus-visible { outline:3px solid rgba(255,255,255,0.7); outline-offset:2px; }
+          .dock-body { display:flex; flex-direction:column; gap:10px; padding:14px; overflow:auto; flex:1; }
           .embedded-app-wrap { flex:1; display:flex; flex-direction:column; min-height:560px; height:100%; background:#f8fafc; }
           .embedded-app-frame { width:100%; height:100%; flex:1; border:0; display:block; background:#fff; }
-          .context-label { color:#667085; font-size:10px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px; }
-          .product-info { font-size:14px; font-weight:650; overflow-wrap:anywhere; }
-          .product-id-tag { color:#2458d3; }
-          .context-help { margin:0; color:#667085; font-size:12px; }
-          .quick-view-info { display:grid; gap:8px; }
+          .card-section { background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:14px; box-shadow:0 1px 3px rgba(0,0,0,0.05); }
+          .card-title { font-weight:700; font-size:11px; color:#475569; text-transform:uppercase; letter-spacing:.07em; margin-bottom:8px; }
+          .product-info { font-size:14px; font-weight:700; overflow-wrap:anywhere; color:#0f172a; }
+          .product-id-tag { color:#1278f9; }
+          .context-help { margin:4px 0 0; color:#64748b; font-size:12px; line-height:1.4; }
+          .quick-view-info { display:grid; gap:6px; }
           .quick-view-info:empty { display:none; }
-          .quick-view-row { background:#f3f6fc; border:1px solid #e9edf3; border-radius:10px; padding:9px 12px; }
-          .quick-view-item { color:#17243a; font-size:12.5px; font-weight:600; }
-          .quick-tools-box { background:#f0fdf4; border:1px solid #bbf7d0; border-radius:12px; padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
-          .quick-tools-title { font-size:10.5px; font-weight:700; color:#166534; text-transform:uppercase; letter-spacing:.05em; }
+          .quick-view-row { background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:9px 12px; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
+          .quick-view-item { color:#1e293b; font-size:12.5px; font-weight:600; }
+          .quick-tools-box { background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px; display:flex; flex-direction:column; gap:8px; box-shadow:0 1px 3px rgba(0,0,0,0.05); }
+          .quick-tools-title { font-size:10px; font-weight:800; color:#475569; text-transform:uppercase; letter-spacing:.06em; }
           .quick-tools-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
-          .quick-tool-btn { font:600 11.5px/1.3 system-ui,sans-serif; background:#fff; color:#15803d; border:1px solid #86efac; border-radius:8px; padding:7px 8px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:4px; }
-          .quick-tool-btn:hover { background:#dcfce7; border-color:#4ade80; }
+          .quick-tool-btn { font:600 11.5px/1.3 system-ui,sans-serif; background:#f1f5f9; color:#334155; border:1px solid #cbd5e1; border-radius:6px; padding:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:4px; }
+          .quick-tool-btn:hover { background:#e2e8f0; }
           .quick-cost-row { display:flex; align-items:center; gap:6px; }
-          .quick-cost-input { flex:1; min-width:0; border:1px solid #86efac; border-radius:8px; padding:6px 9px; font:600 12px system-ui,sans-serif; background:#fff; color:#0f172a; }
-          .quick-status-msg { font-size:11px; font-weight:600; color:#15803d; margin:0; }
+          .quick-cost-input { flex:1; min-width:0; border:1px solid #cbd5e1; border-radius:6px; padding:8px 10px; font:600 12px system-ui,sans-serif; background:#fff; color:#0f172a; outline:none; }
+          .quick-cost-input:focus { border-color:#1278f9; box-shadow:0 0 0 2px rgba(18,120,249,0.12); }
+          .quick-status-msg { font-size:11px; font-weight:600; color:#16a34a; margin:0; }
           .quick-status-msg:empty { display:none; }
           .dock-actions { display:flex; flex-direction:column; gap:8px; }
-          .btn { font:600 13px/1.4 system-ui,sans-serif; border:1px solid transparent; border-radius:10px; padding:10px 14px; cursor:pointer; }
-          .btn-primary { background:#2458d3; color:white; order:-1; }
-          .btn-primary:hover:not(:disabled) { background:#1948b5; }
-          .btn-secondary { background:white; border-color:#dbe3ee; color:#344054; }
-          .btn-secondary:hover { background:#f3f6fc; }
+          .btn { font:700 13px/1.4 system-ui,sans-serif; border:1px solid transparent; border-radius:6px; padding:10px 14px; cursor:pointer; width:100%; }
+          .btn-primary { background:#1278f9; color:#fff; }
+          .btn-primary:hover:not(:disabled) { background:#0b63d3; }
+          .btn-secondary { background:#fff; border-color:#cbd5e1; color:#334155; }
+          .btn-secondary:hover { background:#f1f5f9; }
           .btn:disabled { opacity:.5; cursor:not-allowed; }
-          .tooltip-notice { color:#854d0e; background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:10px; font-size:12px; display:flex; flex-direction:column; gap:6px; }
-          .feedback-badge { max-width:380px; background:#edf4ff; color:#2458d3; border:1px solid #dbe3ee; border-radius:10px; padding:10px 14px; font-size:12px; }
-          .feedback-success { background:#ecfdf3; color:#067647; }
-          .feedback-warning,.feedback-error,.feedback-auth_required { background:#fff3ed; color:#b93815; }
-          .dock-card.is-minimized { width:auto; height:auto; border-radius:999px; background:#2458d3; color:white; }
-          .is-minimized .dock-body, .is-minimized .embedded-app-wrap, .is-minimized .mode-btn, .is-minimized .sidepanel-link-btn { display:none!important; }
-          .is-minimized .dock-header { border:0; padding:8px 12px; background:transparent; }
-          .is-minimized .dock-badge { display:none; }
-          .is-minimized .icon-btn { border:0; color:#2458d3; }
-          .is-minimized .drag-grip { color:#b6ccff; }
+          .tooltip-notice { color:#92400e; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:10px 12px; font-size:12px; display:flex; flex-direction:column; gap:6px; }
+          .feedback-badge { background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; border-radius:8px; padding:10px 14px; font-size:12px; margin-bottom:4px; }
+          .feedback-success { background:#f0fdf4; color:#15803d; border-color:#bbf7d0; }
+          .feedback-warning,.feedback-error,.feedback-auth_required { background:#fff7ed; color:#c2410c; border-color:#fed7aa; }
+          .dock-card.is-minimized { width:auto; height:auto; border-radius:999px; background:linear-gradient(135deg,#1278f9,#094eb0); border-color:transparent; }
+          .is-minimized .dock-body,.is-minimized .embedded-app-wrap,.is-minimized .mode-btn,.is-minimized .sidepanel-link-btn,.is-minimized .dock-badge { display:none!important; }
+          .is-minimized .dock-header { border:0; padding:10px 14px; background:transparent; }
+          .is-minimized .drag-grip { color:rgba(255,255,255,0.5); }
         </style>
 
         <div id="dock-root" class="dock-container">
@@ -367,14 +367,14 @@ export class BlingShadowUi {
               <div class="dock-title">
                 <span class="drag-grip" aria-hidden="true">⠿</span>
                 <img id="dock-brand-logo" class="dock-logo" alt="" />
-                <span>Copilot</span>
+                <span>Paulifest Copilot</span>
               </div>
               <div class="header-controls">
-                <div id="dock-badge" class="dock-badge">${this.currentUiState.isSimulatedMock ? 'Prévia' : 'Bling'}</div>
+                <div id="dock-badge" class="dock-badge">${this.currentUiState.isSimulatedMock ? 'Prévia' : '⚡ Pro'}</div>
                 <button id="btn-toggle-app-mode" class="mode-btn" type="button" title="Alternar entre Resumo Rápido e Aplicativo Completo dentro do Pop-up">
                   ✨ App Completo
                 </button>
-                <button id="btn-open-sidepanel-aux" class="sidepanel-link-btn" type="button" title="Abrir no painel lateral do navegador (apoio opcional)">
+                <button id="btn-open-sidepanel-aux" class="sidepanel-link-btn" type="button" title="Abrir no painel lateral do navegador">
                   ↗ Lateral
                 </button>
                 <button id="btn-toggle-minimize" class="icon-btn" type="button" aria-label="Expandir ou recolher Copilot" title="Expandir ou recolher painel">
@@ -384,8 +384,11 @@ export class BlingShadowUi {
             </div>
 
             <div id="quick-summary-wrap" class="dock-body">
-              <div><div class="context-label">Seu espaço de trabalho</div><div id="product-info-container" class="product-info"></div></div>
-              <p id="context-help" class="context-help"></p>
+              <div class="card-section">
+                <div class="card-title">🗂️ Seu espaço de trabalho</div>
+                <div id="product-info-container" class="product-info"></div>
+                <p id="context-help" class="context-help"></p>
+              </div>
               <div id="quick-view-container" class="quick-view-info"></div>
               <div id="quick-tools-container"></div>
 
