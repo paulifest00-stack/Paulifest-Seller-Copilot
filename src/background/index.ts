@@ -136,7 +136,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     let trusted = false;
     try { trusted = sender.id === chrome.runtime.id && sender.frameId === 0 && isMlHost(new URL(sender.url || '').hostname); } catch { /* Invalid origin. */ }
     if (!trusted || !sender.tab?.id) { sendResponse({ok:false}); return false; }
-    chrome.sidePanel.open({tabId:sender.tab.id}).then(() => sendResponse({ok:true})).catch(() => sendResponse({ok:false}));
+    chrome.sidePanel.open({tabId:sender.tab.id}).then(() => {
+      sendResponse({ok:true});
+      if (typeof message.targetStep === 'number') {
+        setTimeout(() => {
+          chrome.runtime.sendMessage({
+            type: 'PAULIFEST_NAVIGATE_WORKSPACE',
+            targetStep: message.targetStep,
+            targetScreen: message.targetScreen || 'product'
+          }).catch(() => {});
+        }, 300);
+      }
+    }).catch(() => sendResponse({ok:false}));
     return true;
   }
   // Open synchronously from the click message: storage awaits can lose Chrome's user gesture.

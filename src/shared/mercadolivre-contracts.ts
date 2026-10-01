@@ -12,3 +12,16 @@ export interface MlPreparedListing {
 }
 export type MlAction = 'status' | 'start' | 'disconnect' | 'category' | 'quote' | 'picture' | 'prepare' | 'publish' | 'item' | 'sync' | 'pricing-context' | 'pricing-quote' | 'pricing-categories';
 export const ML_ACTIONS: MlAction[] = ['status', 'start', 'disconnect', 'category', 'quote', 'picture', 'prepare', 'publish', 'item', 'sync', 'pricing-context', 'pricing-quote', 'pricing-categories'];
+
+export type MlConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+export interface MlConnectionInfo {
+  connected: boolean;
+  status: MlConnectionStatus;
+  sellerId?: string;
+  nickname?: string;
+  siteId?: string;
+  authType?: 'oauth' | 'direct_token';
+  lastValidatedAt?: string;
+  error?: string;
+}

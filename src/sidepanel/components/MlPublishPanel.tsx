@@ -33,7 +33,11 @@ export function MlPublishPanel({ sheet, onUpdateSheet }: Props) {
   const lock = useRef(false), mounted = useRef(true), live = useRef(sheet); live.current = sheet;
   const signature = JSON.stringify({ sheet, categoryId, familyName, price, quantity, listingType, condition, attributes, freeShipping, pickup, shippingMode });
   const liveSignature = useRef(signature); liveSignature.current = signature;
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    void refresh();
+    return () => { mounted.current = false; };
+  }, []);
   const run = async (label: string, fn: () => Promise<void>) => {
     if (lock.current) return; lock.current = true; setBusy(label); setMessage('');
     try { await fn(); } catch (e) { if (mounted.current) setMessage(e instanceof Error ? e.message : 'Falha na integração.'); }
@@ -43,25 +47,58 @@ export function MlPublishPanel({ sheet, onUpdateSheet }: Props) {
   const shownAttributes = metadata?.id === categoryId ? metadata.attributes.filter(a => !a.tags?.read_only && !a.tags?.hidden) : [];
   const canReview = prepared?.signature === signature;
   const refresh = async () => {
-    const value = await mlAction('status');
-    if (!mounted.current) return;
-    setConnection(value);
-    const recovered = value.operations?.find((op: any) => op.sheetId === sheet.id && op.state === 'published' && op.itemId);
-    if (recovered) {
-      setItemId(recovered.itemId);
-      onUpdateSheet(s => s.id !== sheet.id || s.externalReferences.some(r => r.system === 'mercadolivre' && r.externalId === recovered.itemId) ? s : ({ ...s, externalReferences: [...s.externalReferences, { system: 'mercadolivre', externalId: recovered.itemId, importedAt: new Date().toISOString(), metadata: { operationId: recovered.id } }] }));
-      setMessage('Publicação recuperada: ' + recovered.itemId + '. ' + (recovered.warning || ''));
-    }
+    try {
+      const value = await mlAction('status');
+      if (!mounted.current) return;
+      setConnection(value);
+      const recovered = value.operations?.find((op: any) => op.sheetId === sheet.id && op.state === 'published' && op.itemId);
+      if (recovered) {
+        setItemId(recovered.itemId);
+        onUpdateSheet(s => s.id !== sheet.id || s.externalReferences.some(r => r.system === 'mercadolivre' && r.externalId === recovered.itemId) ? s : ({ ...s, externalReferences: [...s.externalReferences, { system: 'mercadolivre', externalId: recovered.itemId, importedAt: new Date().toISOString(), metadata: { operationId: recovered.id } }] }));
+        setMessage('Publicação recuperada: ' + recovered.itemId + '. ' + (recovered.warning || ''));
+      }
+    } catch {}
   };
   return <section className="rounded-2xl border bg-white p-4 space-y-4 text-xs">
     <h3 className="font-bold text-base">Publicação e sincronização</h3>
-    <p>Conecte sua conta, confira os requisitos da categoria e revise o anúncio completo antes da publicação real.</p>
-    <div className="flex gap-2 flex-wrap"><button disabled={!!busy} className="border rounded-lg p-2" onClick={() => void run('status', refresh)}>Verificar conexão ML</button><button disabled={!!busy} className="border rounded-lg p-2" onClick={() => void run('connect', async () => {
-      const result = await mlAction('start'); const url = new URL(result.authorizationUrl);
-      if (url.origin !== 'https://auth.mercadolivre.com.br' || url.pathname !== '/authorization') throw new Error('Endereço de autorização inválido.');
-      await chrome.tabs.create({ url: url.href }); setMessage('Conclua o login no Mercado Livre e clique em Verificar conexão ML.');
-    })}>Conectar Mercado Livre</button>{connection?.connected && <button disabled={!!busy} className="text-red-700 p-2" onClick={() => void run('disconnect', async () => { await mlAction('disconnect'); setConnection({ configured: true, connected: false }); setPrepared(null); })}>Desconectar</button>}</div>
-    {connection && <p>{connection.connected ? `Conta conectada: ${connection.sellerId}` : connection.configured ? 'Conta ainda não conectada.' : 'A aplicação Mercado Livre precisa ser configurada no Gateway.'}</p>}
+    <p className="text-slate-600">Confira os requisitos da categoria e revise o anúncio completo antes da publicação oficial no Mercado Livre.</p>
+    
+    {connection?.connected ? (
+      <div className="flex items-center justify-between p-2.5 rounded-xl bg-emerald-50/80 border border-emerald-200 text-emerald-900">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          <span className="font-semibold text-xs">
+            Mercado Livre Conectado ({connection.nickname || connection.sellerId || 'Conta'})
+          </span>
+        </div>
+        <button
+          type="button"
+          disabled={!!busy}
+          onClick={() => void run('status', refresh)}
+          className="text-[11px] text-emerald-700 hover:text-emerald-900 font-medium underline"
+        >
+          {busy === 'status' ? 'Verificando…' : 'Atualizar'}
+        </button>
+      </div>
+    ) : (
+      <div className="p-3 rounded-xl bg-amber-50 border border-amber-200/80 text-amber-900 space-y-2">
+        <div className="flex items-center gap-1.5 font-semibold text-xs text-amber-800">
+          <span>⚠️ Mercado Livre não conectado</span>
+        </div>
+        <p className="text-[11px] text-amber-700 leading-relaxed">
+          Para publicar ou sincronizar anúncios, configure sua chave de API ou conecte sua conta na aba <strong>Conexões</strong>.
+        </p>
+        <button
+          type="button"
+          onClick={() => {
+            window.postMessage({ type: 'PAULIFEST_SYNC_WORKSPACE', targetScreen: 'connections' }, '*');
+          }}
+          className="text-xs font-semibold px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition-colors inline-flex items-center gap-1"
+        >
+          Abrir Conexões →
+        </button>
+      </div>
+    )}
     {connection?.operations?.filter((op: any) => op.sheetId === sheet.id && ['publishing', 'uncertain', 'failed'].includes(op.state)).map((op: any) => <p key={op.id} role="status" className="bg-amber-50 rounded-lg p-3">{op.state === 'failed' ? 'A tentativa anterior foi recusada.' : 'Há uma tentativa sem resultado confirmado. Confira sua conta Mercado Livre antes de criar outro anúncio.'} {op.error || ''}</p>)}
     <fieldset disabled={!!busy} className="space-y-3 disabled:opacity-70">
       <label className="block">Categoria ML<input value={categoryId} onChange={e => { setCategoryId(e.target.value.toUpperCase()); setMetadata(null); }} className="w-full border rounded-lg p-2 mt-1" placeholder="MLB…" /></label>

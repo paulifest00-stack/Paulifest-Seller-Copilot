@@ -96,6 +96,29 @@ export class MessageRouter {
   setMockMode(enabled: boolean): void {
     this.mockMode = enabled;
   }
+  private async getDirectMlAuth(): Promise<{ token: string; sellerId?: string; nickname?: string; siteId?: string; savedAt?: string } | null> {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return null;
+    return new Promise((resolve) => {
+      chrome.storage.local.get(['paulifest_ml_direct_auth'], (res) => {
+        resolve(res?.paulifest_ml_direct_auth || null);
+      });
+    });
+  }
+
+  private async saveDirectMlAuth(data: { token: string; sellerId: string; nickname: string; siteId: string; savedAt: string }): Promise<void> {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
+    return new Promise((resolve) => {
+      chrome.storage.local.set({ paulifest_ml_direct_auth: data }, () => resolve());
+    });
+  }
+
+  private async clearDirectMlAuth(): Promise<void> {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
+    return new Promise((resolve) => {
+      chrome.storage.local.remove(['paulifest_ml_direct_auth'], () => resolve());
+    });
+  }
+
   /**
    * Ponto central de despacho para mensagens recebidas via chrome.runtime.onMessage.
    */
@@ -108,20 +131,187 @@ export class MessageRouter {
       return false;
     }
 
+    // ── Conexão Mercado Livre (Chave API ou OAuth) ───────────────────────────
+    if (message.type === 'ML_GET_CONNECTION_STATUS') {
+      const trusted = typeof chrome !== 'undefined' && sender.id === chrome.runtime.id;
+      if (!trusted) { sendResponse({ ok: false, error: 'Não autorizado.' }); return true; }
+
+      const direct = await this.getDirectMlAuth();
+      if (direct?.token) {
+        sendResponse({
+          ok: true,
+          connected: true,
+          status: 'connected',
+          authType: 'direct_token',
+          sellerId: direct.sellerId,
+          nickname: direct.nickname,
+          siteId: direct.siteId,
+          lastValidatedAt: direct.savedAt
+        });
+        return true;
+      }
+
+      try {
+        const gwStatus = await this.gatewayClient.mercadoLivre('status');
+        if (gwStatus?.connected) {
+          sendResponse({
+            ok: true,
+            connected: true,
+            status: 'connected',
+            authType: 'oauth',
+            sellerId: gwStatus.sellerId,
+            nickname: gwStatus.sellerId ? `Vendedor ${gwStatus.sellerId}` : 'Mercado Livre',
+            siteId: 'MLB'
+          });
+          return true;
+        }
+      } catch {}
+
+      sendResponse({
+        ok: true,
+        connected: false,
+        status: 'disconnected'
+      });
+      return true;
+    }
+
+    if (message.type === 'ML_SAVE_API_KEY') {
+      const trusted = typeof chrome !== 'undefined' && sender.id === chrome.runtime.id;
+      if (!trusted) { sendResponse({ ok: false, error: 'Não autorizado.' }); return true; }
+      const token = String(message.apiKey || '').trim();
+      if (!token) {
+        sendResponse({ ok: false, error: 'Informe a Chave de API / Access Token.' });
+        return true;
+      }
+      try {
+        const res = await fetch('https://api.mercadolivre.com/users/me', {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.message || `Token inválido (HTTP ${res.status}).`);
+        }
+        const data = await res.json();
+        const sellerId = String(data.id || '');
+        const nickname = String(data.nickname || sellerId);
+        const siteId = String(data.site_id || 'MLB');
+        const now = new Date().toISOString();
+
+        await this.saveDirectMlAuth({
+          token,
+          sellerId,
+          nickname,
+          siteId,
+          savedAt: now
+        });
+
+        chrome.runtime?.sendMessage?.({
+          type: 'ML_CONNECTION_STATUS_CHANGED',
+          connected: true,
+          status: 'connected',
+          sellerId,
+          nickname,
+          authType: 'direct_token'
+        }).catch(() => {});
+
+        sendResponse({
+          ok: true,
+          connected: true,
+          status: 'connected',
+          sellerId,
+          nickname,
+          siteId,
+          authType: 'direct_token',
+          lastValidatedAt: now
+        });
+      } catch (err: any) {
+        sendResponse({ ok: false, error: err.message || 'Falha ao validar a chave no Mercado Livre.' });
+      }
+      return true;
+    }
+
+    if (message.type === 'ML_DISCONNECT') {
+      const trusted = typeof chrome !== 'undefined' && sender.id === chrome.runtime.id;
+      if (!trusted) { sendResponse({ ok: false, error: 'Não autorizado.' }); return true; }
+      await this.clearDirectMlAuth();
+      try {
+        await this.gatewayClient.mercadoLivre('disconnect');
+      } catch {}
+
+      chrome.runtime?.sendMessage?.({
+        type: 'ML_CONNECTION_STATUS_CHANGED',
+        connected: false,
+        status: 'disconnected'
+      }).catch(() => {});
+
+      sendResponse({ ok: true, connected: false, status: 'disconnected' });
+      return true;
+    }
+
     if (message.type === 'ML_ACTION') {
-      const panelUrl = typeof chrome !== 'undefined' ? chrome.runtime?.getURL?.('sidepanel.html') : '';
-      const trusted = typeof chrome !== 'undefined' && sender.id === chrome.runtime.id && Boolean(panelUrl && sender.url?.startsWith(panelUrl));
-      if (!trusted) { sendResponse({ ok: false, error: 'Operação ML disponível somente no painel da extensão.' }); return true; }
+      const trusted = typeof chrome !== 'undefined' && sender.id === chrome.runtime.id;
+      if (!trusted) { sendResponse({ ok: false, error: 'Operação ML disponível somente na extensão.' }); return true; }
       try {
         if (!ML_ACTIONS.includes(message.action) || !message.payload || typeof message.payload !== 'object' || Array.isArray(message.payload) || JSON.stringify(message.payload).length > (message.action === 'picture' ? 6_100_000 : 65000)) throw new Error('Operação Mercado Livre inválida.');
+
+        // Se status for pedido e temos direct token:
+        if (message.action === 'status') {
+          const direct = await this.getDirectMlAuth();
+          if (direct?.token) {
+            sendResponse({
+              ok: true,
+              configured: true,
+              connected: true,
+              sellerId: direct.sellerId,
+              nickname: direct.nickname,
+              authType: 'direct_token',
+              operations: []
+            });
+            return true;
+          }
+        }
+
+        // Tenta via direct token para busca rápida de categorias se disponível
+        const direct = await this.getDirectMlAuth();
+        if (direct?.token && message.action === 'pricing-categories') {
+          const q = encodeURIComponent(String(message.payload.title || '').trim());
+          const resp = await fetch(`https://api.mercadolivre.com/sites/MLB/domain_discovery/search?q=${q}&limit=4`, {
+            headers: { Authorization: `Bearer ${direct.token}` }
+          });
+          if (resp.ok) {
+            const rows = await resp.json();
+            sendResponse({
+              ok: true,
+              categories: Array.isArray(rows)
+                ? rows.filter(r => /^MLB\d+$/.test(r?.category_id) && typeof r.category_name === 'string').map(r => ({ id: r.category_id, name: r.category_name }))
+                : []
+            });
+            return true;
+          }
+        }
+
+        if (direct?.token && message.action === 'category' && typeof message.payload.categoryId === 'string') {
+          const catId = message.payload.categoryId;
+          const [catRes, attrRes] = await Promise.all([
+            fetch(`https://api.mercadolivre.com/categories/${catId}`, { headers: { Authorization: `Bearer ${direct.token}` } }),
+            fetch(`https://api.mercadolivre.com/categories/${catId}/attributes`, { headers: { Authorization: `Bearer ${direct.token}` } })
+          ]);
+          if (catRes.ok && attrRes.ok) {
+            const category = await catRes.json();
+            const attributes = await attrRes.json();
+            sendResponse({ ok: true, category, attributes });
+            return true;
+          }
+        }
+
         sendResponse(await this.gatewayClient.mercadoLivre(message.action, message.payload));
       } catch (e) { sendResponse({ ok: false, error: e instanceof Error ? e.message : 'Falha na integração ML.' }); }
       return true;
     }
     if (message.type === 'BLING_SEARCH_PRODUCTS' || message.type === 'BLING_CATALOG_PRODUCT') {
-      const panelUrl = typeof chrome !== 'undefined' ? chrome.runtime?.getURL?.('sidepanel.html') : '';
-      const trusted = typeof chrome !== 'undefined' && Boolean(panelUrl) && sender.id === chrome.runtime.id && Boolean(sender.url?.startsWith(panelUrl));
-      if (!trusted) { sendResponse({ ok: false, error: 'Consulta permitida apenas no painel da extensão.' }); return true; }
+      // Confiamos em: sidepanel OU content scripts da mesma extensão (popup nativo no Shadow DOM)
+      const trusted = typeof chrome !== 'undefined' && sender.id === chrome.runtime.id;
+      if (!trusted) { sendResponse({ ok: false, error: 'Consulta permitida apenas dentro da extensão.' }); return true; }
       const generation = this.gatewayClient.getAuthGeneration();
       try {
         let result;

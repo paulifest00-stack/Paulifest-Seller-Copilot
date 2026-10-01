@@ -39,10 +39,27 @@ export function readMarketPage(doc: Document, href: string): MarketSnapshot {
 export function installMarketReader(): void {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!['ML_READ_PAGE', 'ML_READ_PRICING'].includes(message?.type)) return;
-    if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('sidepanel.html') || message.expectedUrl !== location.href) {
-      sendResponse({ ok: false, error: 'A aba mudou ou a origem é inválida. Capture novamente.' }); return;
+    if (sender.id !== chrome.runtime.id) {
+      sendResponse({ ok: false, error: 'Origem não autorizada.' });
+      return;
     }
-    try { sendResponse(message.type === 'ML_READ_PRICING' ? { ok: true, context: readPricingPage(document, location.href) } : { ok: true, snapshot: readMarketPage(document, location.href) }); }
-    catch (e) { sendResponse({ ok: false, error: e instanceof Error ? e.message : 'Não foi possível ler a página.' }); }
+    if (message.expectedUrl && message.expectedUrl !== location.href) {
+      // Tolera pequenas variações de hash ou trailing slash
+      const cleanExpected = message.expectedUrl.split('#')[0].replace(/\/$/, '');
+      const cleanActual = location.href.split('#')[0].replace(/\/$/, '');
+      if (cleanExpected !== cleanActual) {
+        sendResponse({ ok: false, error: 'A aba mudou de página. Capture novamente.' });
+        return;
+      }
+    }
+    try {
+      sendResponse(
+        message.type === 'ML_READ_PRICING'
+          ? { ok: true, context: readPricingPage(document, location.href) }
+          : { ok: true, snapshot: readMarketPage(document, location.href) }
+      );
+    } catch (e) {
+      sendResponse({ ok: false, error: e instanceof Error ? e.message : 'Não foi possível ler a página.' });
+    }
   });
 }

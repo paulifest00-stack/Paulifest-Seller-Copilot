@@ -42,7 +42,10 @@ import { StepInput } from '../sidepanel/components/steps/StepInput.tsx';
 import { StepSheet } from '../sidepanel/components/steps/StepSheet.tsx';
 import { StepPricing } from '../sidepanel/components/steps/StepPricing.tsx';
 import { BlingConnectionCard } from '../sidepanel/components/BlingConnectionCard.tsx';
+import { MlConnectionCard } from '../sidepanel/components/MlConnectionCard.tsx';
 import type { BlingConnectionStatus, BlingUpdateProductMessageResponse } from '../shared/gateway-contracts.ts';
+import type { MlConnectionInfo } from '../shared/mercadolivre-contracts.ts';
+import { mlAction } from '../integrations/mercadolivre/client.ts';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -287,6 +290,10 @@ export const PopupApp: React.FC = () => {
   const [blingStatusLoaded, setBlingStatusLoaded] = useState<boolean>(false);
   const [blingDisconnecting, setBlingDisconnecting] = useState<boolean>(false);
 
+  // 6. Estado de Conexão Mercado Livre
+  const [mlInfo, setMlInfo] = useState<MlConnectionInfo>({ status: 'disconnected', connected: false });
+  const [mlStatusLoaded, setMlStatusLoaded] = useState<boolean>(false);
+
   // Carrega a ficha persistida e escuta o contexto do Service Worker
   useEffect(() => {
     let disposed = false;
@@ -344,6 +351,19 @@ export const PopupApp: React.FC = () => {
         }
         setBlingStatusLoaded(true);
       });
+      chrome.runtime.sendMessage({ type: 'ML_GET_CONNECTION_STATUS' }, (res) => {
+        if (res && res.ok) {
+          setMlInfo({
+            connected: res.connected || false,
+            status: res.status || (res.connected ? 'connected' : 'disconnected'),
+            sellerId: res.sellerId,
+            nickname: res.nickname,
+            authType: res.authType,
+            lastValidatedAt: res.lastValidatedAt
+          });
+        }
+        setMlStatusLoaded(true);
+      });
     } else {
       setContext((prev) => ({
         ...prev,
@@ -351,6 +371,7 @@ export const PopupApp: React.FC = () => {
         summaryLabel: 'Abra a extensão no Chrome para acompanhar a página'
       }));
       setBlingStatusLoaded(true);
+      setMlStatusLoaded(true);
     }
 
     const listener = (message: any) => {
@@ -364,6 +385,16 @@ export const PopupApp: React.FC = () => {
         setBlingStatus(message.status);
         setBlingLastRefreshAt(message.lastRefreshAt ?? null);
         setBlingStatusLoaded(true);
+      }
+      if (message.type === 'ML_CONNECTION_STATUS_CHANGED') {
+        setMlInfo({
+          connected: message.connected || false,
+          status: message.status || (message.connected ? 'connected' : 'disconnected'),
+          sellerId: message.sellerId,
+          nickname: message.nickname,
+          authType: message.authType
+        });
+        setMlStatusLoaded(true);
       }
     };
 
@@ -656,6 +687,59 @@ export const PopupApp: React.FC = () => {
           setBlingLastRefreshAt(res.lastRefreshAt ?? null);
         }
       });
+    }
+  };
+
+  // ── Mercado Livre Connection Handlers ──────────────────────────────────────
+
+  const handleSaveMlApiKey = async (apiKey: string): Promise<{ ok: boolean; error?: string }> => {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+      return { ok: false, error: 'Extensão não disponível no momento.' };
+    }
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'ML_SAVE_API_KEY', apiKey }, (res) => {
+        const err = chrome.runtime.lastError?.message;
+        if (err) {
+          resolve({ ok: false, error: err });
+          return;
+        }
+        if (res?.ok) {
+          setMlInfo({
+            connected: true,
+            status: 'connected',
+            sellerId: res.sellerId,
+            nickname: res.nickname,
+            authType: 'direct_token',
+            lastValidatedAt: res.lastValidatedAt
+          });
+          resolve({ ok: true });
+        } else {
+          resolve({ ok: false, error: res?.error || 'Erro ao validar Token de Acesso.' });
+        }
+      });
+    });
+  };
+
+  const handleDisconnectMl = async (): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'ML_DISCONNECT' }, () => {
+        setMlInfo({ connected: false, status: 'disconnected' });
+        resolve();
+      });
+    });
+  };
+
+  const handleStartMlOAuth = async () => {
+    try {
+      const result = await mlAction('start');
+      const url = new URL(result.authorizationUrl);
+      if (url.origin !== 'https://auth.mercadolivre.com.br' || url.pathname !== '/authorization') {
+        throw new Error('Endereço de autorização inválido.');
+      }
+      await chrome.tabs.create({ url: url.href });
+    } catch (err: any) {
+      console.error('Falha ao iniciar OAuth do Mercado Livre:', err);
     }
   };
 
@@ -1213,8 +1297,8 @@ export const PopupApp: React.FC = () => {
 
         {/* ═══ CONNECTIONS ═══ */}
         {screen === 'connections' && (
-          <div>
-            <Card>
+          <div className="space-y-3">
+            <Card className="mb-0">
               <CardTitle>🔗 Bling ERP</CardTitle>
               <p className="text-xs text-[#475569] mb-3">
                 {importAfterConnect
@@ -1232,6 +1316,14 @@ export const PopupApp: React.FC = () => {
                 onRetry={handleBlingRetry}
               />
             </Card>
+
+            <MlConnectionCard
+              info={mlInfo}
+              isHydrating={!mlStatusLoaded}
+              onSaveApiKey={handleSaveMlApiKey}
+              onDisconnect={handleDisconnectMl}
+              onStartOAuth={handleStartMlOAuth}
+            />
 
             {/* Open linked sheet */}
             {tabContext?.activeSheetId && tabContext.activeSheetId !== sheet.id && (

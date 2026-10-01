@@ -34,7 +34,10 @@ import { StepInput } from './components/steps/StepInput.tsx';
 import { StepSheet } from './components/steps/StepSheet.tsx';
 import { StepPricing } from './components/steps/StepPricing.tsx';
 import { BlingConnectionCard } from './components/BlingConnectionCard.tsx';
+import { MlConnectionCard } from './components/MlConnectionCard.tsx';
 import type { BlingConnectionStatus, BlingUpdateProductMessageResponse } from '../shared/gateway-contracts.ts';
+import type { MlConnectionInfo } from '../shared/mercadolivre-contracts.ts';
+import { mlAction } from '../integrations/mercadolivre/client.ts';
 
 export const App: React.FC = () => {
   const contextSyncRef = useRef<SidepanelContextSync | null>(null);
@@ -71,6 +74,10 @@ export const App: React.FC = () => {
   const [blingLastRefreshAt, setBlingLastRefreshAt] = useState<string | null>(null);
   const [blingStatusLoaded, setBlingStatusLoaded] = useState<boolean>(false);
   const [blingDisconnecting, setBlingDisconnecting] = useState<boolean>(false);
+
+  // 6. Estado de Conexão Mercado Livre
+  const [mlInfo, setMlInfo] = useState<MlConnectionInfo>({ status: 'disconnected', connected: false });
+  const [mlStatusLoaded, setMlStatusLoaded] = useState<boolean>(false);
 
   // Carrega a ficha persistida e escuta o contexto do Service Worker
   useEffect(() => {
@@ -110,10 +117,25 @@ export const App: React.FC = () => {
         // Marca hidratação concluída independente de sucesso/erro
         setBlingStatusLoaded(true);
       });
+
+      chrome.runtime.sendMessage({ type: 'ML_GET_CONNECTION_STATUS' }, (res) => {
+        if (res && res.ok) {
+          setMlInfo({
+            connected: res.connected || false,
+            status: res.status || (res.connected ? 'connected' : 'disconnected'),
+            sellerId: res.sellerId,
+            nickname: res.nickname,
+            authType: res.authType,
+            lastValidatedAt: res.lastValidatedAt
+          });
+        }
+        setMlStatusLoaded(true);
+      });
     } else {
 
       setContext(prev => ({ ...prev, title: 'Prévia local', summaryLabel: 'Abra a extensão no Chrome para acompanhar a página' }));
       setBlingStatusLoaded(true); // Ambiente sem chrome.runtime — marca como carregado
+      setMlStatusLoaded(true);
     }
 
     // Listener para eventos em tempo real
@@ -130,6 +152,16 @@ export const App: React.FC = () => {
         setBlingLastRefreshAt(message.lastRefreshAt ?? null);
         // Garante que hidratação seja marcada mesmo se evento chegar antes da query inicial
         setBlingStatusLoaded(true);
+      }
+      if (message.type === 'ML_CONNECTION_STATUS_CHANGED') {
+        setMlInfo({
+          connected: message.connected || false,
+          status: message.status || (message.connected ? 'connected' : 'disconnected'),
+          sellerId: message.sellerId,
+          nickname: message.nickname,
+          authType: message.authType
+        });
+        setMlStatusLoaded(true);
       }
     };
 
@@ -370,6 +402,62 @@ export const App: React.FC = () => {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Handlers de Conexão Mercado Livre
+  // Suporte a API Key (Access Token direto) e OAuth
+  // ---------------------------------------------------------------------------
+
+  const handleSaveMlApiKey = async (apiKey: string): Promise<{ ok: boolean; error?: string }> => {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+      return { ok: false, error: 'Extensão não disponível no momento.' };
+    }
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'ML_SAVE_API_KEY', apiKey }, (res) => {
+        const err = chrome.runtime.lastError?.message;
+        if (err) {
+          resolve({ ok: false, error: err });
+          return;
+        }
+        if (res?.ok) {
+          setMlInfo({
+            connected: true,
+            status: 'connected',
+            sellerId: res.sellerId,
+            nickname: res.nickname,
+            authType: 'direct_token',
+            lastValidatedAt: res.lastValidatedAt
+          });
+          resolve({ ok: true });
+        } else {
+          resolve({ ok: false, error: res?.error || 'Erro ao validar Token de Acesso.' });
+        }
+      });
+    });
+  };
+
+  const handleDisconnectMl = async (): Promise<void> => {
+    if (typeof chrome !== 'undefined' || !chrome.runtime?.sendMessage) return;
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'ML_DISCONNECT' }, () => {
+        setMlInfo({ connected: false, status: 'disconnected' });
+        resolve();
+      });
+    });
+  };
+
+  const handleStartMlOAuth = async () => {
+    try {
+      const result = await mlAction('start');
+      const url = new URL(result.authorizationUrl);
+      if (url.origin !== 'https://auth.mercadolivre.com.br' || url.pathname !== '/authorization') {
+        throw new Error('Endereço de autorização inválido.');
+      }
+      await chrome.tabs.create({ url: url.href });
+    } catch (err: any) {
+      console.error('Falha ao iniciar OAuth do Mercado Livre:', err);
+    }
+  };
+
   // Cores e Ícones dinâmicos de Contexto
 
   useEffect(() => {
@@ -480,24 +568,54 @@ export const App: React.FC = () => {
             }}
           />
         )}
-        {screen === 'connections' && <>
-          <h2 className="text-sm font-bold">Conexões</h2>
-          <p className="text-xs text-slate-600">{importAfterConnect ? 'Conecte o Bling para buscar seus produtos.' : 'Conecte sua conta do Bling ERP.'}</p>
-        <BlingConnectionCard
-          status={blingStatus}
-          lastRefreshAt={blingLastRefreshAt}
-          isHydrating={!blingStatusLoaded}
-          isDisconnecting={blingDisconnecting}
-          onConnect={handleBlingConnect}
-          onDisconnect={handleBlingDisconnect}
-          onFocusOAuthTab={handleBlingFocusOAuthTab}
-          onRetry={handleBlingRetry}
-        />
-          {tabContext?.activeSheetId && tabContext.activeSheetId !== sheet.id && <button className="w-full p-3 rounded-xl border text-xs text-blue-700" onClick={() => {
-            void loadSheet(tabContext.activeSheetId).then(value => value && openSavedProduct(value)).catch(() => setStartError('Não foi possível abrir a ficha da página.'));
-          }}>Abrir a ficha vinculada à página atual</button>}
-          <button onClick={handleRefresh} className="text-xs text-blue-700">{refreshSpin ? 'Atualizando…' : 'Atualizar página conectada'}</button>
-        {/* Card de Contexto Atual da Página */}
+        {screen === 'connections' && (
+          <div className="space-y-3.5">
+            <div>
+              <h2 className="text-sm font-bold text-[#1d1d1f]">Conexões de Contas</h2>
+              <p className="text-xs text-[#86868b]">
+                {importAfterConnect
+                  ? 'Conecte sua conta para buscar seus produtos.'
+                  : 'Gerencie suas contas integradas do Bling ERP e do Mercado Livre.'}
+              </p>
+            </div>
+
+            <BlingConnectionCard
+              status={blingStatus}
+              lastRefreshAt={blingLastRefreshAt}
+              isHydrating={!blingStatusLoaded}
+              isDisconnecting={blingDisconnecting}
+              onConnect={handleBlingConnect}
+              onDisconnect={handleBlingDisconnect}
+              onFocusOAuthTab={handleBlingFocusOAuthTab}
+              onRetry={handleBlingRetry}
+            />
+
+            <MlConnectionCard
+              info={mlInfo}
+              isHydrating={!mlStatusLoaded}
+              onSaveApiKey={handleSaveMlApiKey}
+              onDisconnect={handleDisconnectMl}
+              onStartOAuth={handleStartMlOAuth}
+            />
+
+            {tabContext?.activeSheetId && tabContext.activeSheetId !== sheet.id && (
+              <button
+                className="w-full p-3 rounded-xl border text-xs text-blue-700 bg-white"
+                onClick={() => {
+                  void loadSheet(tabContext.activeSheetId)
+                    .then((value) => value && openSavedProduct(value))
+                    .catch(() => setStartError('Não foi possível abrir a ficha da página.'));
+                }}
+              >
+                Abrir a ficha vinculada à página atual
+              </button>
+            )}
+
+            <button onClick={handleRefresh} className="text-xs text-blue-700">
+              {refreshSpin ? 'Atualizando…' : 'Atualizar página conectada'}
+            </button>
+
+            {/* Card de Contexto Atual da Página */}
         <section className="apple-glass-card rounded-2xl p-3 space-y-1.5 animate-fade-in">
           <div className="flex items-center justify-between">
             <span className="text-[9px] font-bold tracking-wider text-[#86868b] uppercase">
@@ -595,8 +713,8 @@ export const App: React.FC = () => {
             )}
           </section>
         )}
-
-        </>}
+      </div>
+    )}
         {screen === 'product' && activeFlow && (
           <section className="space-y-2.5">
             {/* Cabeçalho compacto do Fluxo */}
