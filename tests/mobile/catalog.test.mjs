@@ -432,3 +432,20 @@ test("custom field changes preserve unrelated fields and their ERP link IDs",()=
  assert.equal(patch.camposCustomizados[1].valor,'Preservar');
  assert.throws(()=>validateMobileInput({...input(),customFields:[{id:'invalid',value:'a'}]}));
 });
+
+test("formatted NCM and CEST load and save without dropping leading zeros", () => {
+  const raw = { id: 1, nome: "Teste", codigo: "TEST-1",
+    tributacao: { ncm: "0101.21.00", cest: "01.001.00", origem: 0, extra: "preservar" } };
+  const p = mapProduct(raw);
+  assert.equal(p.ncm, "01012100");
+  assert.equal(p.cest, "0100100");
+  validateMobileInput({ ...input(), ncm: "0101.21.00", cest: "01.001.00" });
+  const patch = productPayload({ ...p, ncm: "0101.29.00" }, p, raw);
+  assert.equal(patch.tributacao.ncm, "01012900");
+  assert.equal(patch.tributacao.cest, "0100100");
+  assert.equal(patch.tributacao.extra, "preservar");
+  assert.equal(productPayload(p, p, raw).tributacao, undefined);
+  assert.throws(() => validateMobileInput({ ...input(), ncm: "9505.A0.00" }));
+  assert.throws(() => validateMobileInput({ ...input(), ncm: "123456789" }));
+  assert.throws(() => validateMobileInput({ ...input(), cest: "01.001.000" }));
+});

@@ -1,3 +1,4 @@
+import { normalizeFiscalCode, normalizeFiscalInput } from "./fiscal.ts";
 import {
   createHash,
   createHmac,
@@ -85,8 +86,8 @@ export function mapProduct(raw: Raw): Product {
     sku: text(raw.codigo),
     gtin: text(raw.gtin),
     gtinPackage: text(raw.gtinEmbalagem),
-    ncm: text(raw.tributacao?.ncm),
-    cest: text(raw.tributacao?.cest),
+    ncm: normalizeFiscalCode(text(raw.tributacao?.ncm)),
+    cest: normalizeFiscalCode(text(raw.tributacao?.cest)),
     taxOrigin:
       raw.tributacao?.origem == null ? "" : String(raw.tributacao.origem),
     category: raw.categoria?.id ? String(raw.categoria.id) : "",
@@ -142,8 +143,8 @@ export function validateMobileInput(input: ProductInput) {
     if (input[k] && !validGtin(input[k])) fail("GTIN/EAN inválido.");
   if (input.gtinPackage.length === 14)
     fail("O GTIN da embalagem deve ter 8, 12 ou 13 dígitos.");
-  if (input.ncm && !/^\d{8}$/.test(input.ncm)) fail("NCM deve ter 8 dígitos.");
-  if (input.cest && !/^\d{7}$/.test(input.cest))
+  if (input.ncm && !/^\d{8}$/.test(normalizeFiscalCode(input.ncm))) fail("NCM deve ter 8 dígitos.");
+  if (input.cest && !/^\d{7}$/.test(normalizeFiscalCode(input.cest)))
     fail("CEST deve ter 7 dígitos.");
   if (input.taxOrigin && !/^[0-8]$/.test(input.taxOrigin))
     fail("Origem fiscal inválida.");
@@ -199,6 +200,7 @@ export function productPayload(
   previous?: Product,
   raw?: Raw,
 ): Raw {
+  input = normalizeFiscalInput(input);
   const out: Raw = {};
   const mapping: Record<string, string> = {
     name: "nome",
@@ -621,6 +623,7 @@ export class MobileCatalog {
     id?: string,
   ) {
     validateMobileInput(input);
+    input = normalizeFiscalInput(input);
     if (!/^[\w-]{16,100}$/.test(requestId))
       fail("Identificador de operação ausente.");
     const hash = createHash("sha256")
