@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { OFFICIAL_BLING_AUTH_URL } from '../shared/gateway-contracts.ts';
 
 export interface GatewayConfig {
+  descriptionApiKey?: string;
+  descriptionModel?: string;
   mobilePublicUrl?: string;
   allowedWebOrigins?: string[];
   blingClientId: string;
@@ -95,6 +97,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     }
 
     return {
+      descriptionApiKey: env.OPENAI_API_KEY?.trim(), descriptionModel: env.OPENAI_DESCRIPTION_MODEL?.trim() || "gpt-4.1-mini",
       mobilePublicUrl, allowedWebOrigins,
     blingClientId,
       blingClientSecret,
@@ -157,6 +160,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     }
 
     return {
+      descriptionApiKey: env.OPENAI_API_KEY?.trim(), descriptionModel: env.OPENAI_DESCRIPTION_MODEL?.trim() || "gpt-4.1-mini",
       mobilePublicUrl, allowedWebOrigins,
     blingClientId,
       blingClientSecret,
@@ -202,6 +206,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
   }
 
   return {
+    descriptionApiKey: env.OPENAI_API_KEY?.trim(), descriptionModel: env.OPENAI_DESCRIPTION_MODEL?.trim() || "gpt-4.1-mini",
     mobilePublicUrl, allowedWebOrigins,
     blingClientId,
     blingClientSecret,

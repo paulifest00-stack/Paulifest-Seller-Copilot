@@ -4,6 +4,7 @@ import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import {
   MobileCatalog,
+  stockMovements,
   mapProduct,
   productPayload,
   validateMobileInput,
@@ -167,7 +168,7 @@ async function fixture() {
       const payload = JSON.parse(body);
       stockWrites.push(payload);
       const balances = stocks.get(String(payload.produto.id));
-      balances[payload.deposito.id] = payload.quantidade;
+      balances[payload.deposito.id] += payload.operacao === "E" ? payload.quantidade : -payload.quantidade;
       data = { id: 999 };
     } else data = [];
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -329,19 +330,59 @@ test("stock balance affects selected deposit and preserves other deposits", asyn
     assert.equal(f.stockWrites.length, 1);
     assert.equal(f.stockWrites[0].deposito.id, 1);
     assert.equal(f.stockWrites[0].quantidade, 3);
-    assert.equal(f.stockWrites[0].operacao, "B");
-    await assert.rejects(
-      f.catalog.mutate(
-        "account",
-        "stock-invalid-123456",
-        { ...adjusted, name: "Não salvar", stock: 2, depositId: "1" },
-        created.id,
-      ),
-      (e) => e.code === "validation",
-    );
-    assert.equal(f.products.get(created.id).nome, "Teste");
-    assert.equal(f.stockWrites.length, 1);
+    assert.equal(f.stockWrites[0].operacao, "E");
+    const reduced = await f.catalog.mutate("account", "request-reduce1234", { ...adjusted, stock: 2 }, created.id);
+    assert.equal(reduced.stock, 2);
+    assert.equal(f.stockWrites.reduce((sum, m) => sum + (m.operacao === "S" ? m.quantidade : 0), 0), 6);
   } finally {
     await f.close();
   }
+});
+
+test("automatic movements handle 5→10, 5→3 and split withdrawals", () => {
+  const balance = { saldoFisicoTotal: 5, depositos: [{ id: 1, saldoFisico: 5 }] };
+  const deposits = [{ id: 1, padrao: true }, { id: 2 }];
+  assert.deepEqual(stockMovements(balance, deposits, 10), [{ deposito: { id: 1 }, operacao: "E", quantidade: 5 }]);
+  assert.deepEqual(stockMovements(balance, deposits, 3), [{ deposito: { id: 1 }, operacao: "S", quantidade: 2 }]);
+  assert.deepEqual(stockMovements(balance, deposits, 5), []);
+  const split = stockMovements({ saldoFisicoTotal: 8, depositos: [{ id: 1, saldoFisico: 3 }, { id: 2, saldoFisico: 5 }] }, deposits, 0);
+  assert.deepEqual(split.map(m => m.quantidade), [3, 5]);
+  assert.throws(() => stockMovements(balance, [], 10));
+});
+
+test("cost discovers the existing default record without a supplier contact", async () => {
+  const { BlingProductClient } = await import('../../dist-gateway/gateway/integrations/bling/bling-product-client.js');
+  const original = globalThis.fetch;
+  let cost = 4, writes = 0;
+  globalThis.fetch = async (url, options) => {
+    const path = new URL(url).pathname;
+    if (options.method === 'PUT') {
+      const body = JSON.parse(options.body);
+      assert.equal(body.fornecedor, undefined);
+      cost = body.precoCusto; writes++;
+      return new Response('{}', { status: 200 });
+    }
+    const data = path.endsWith('/produtos/100') ? { id:100, precoCusto:cost } : path.endsWith('/fornecedores') ? [{ id:77, produto:{id:100}, padrao:true }] : { id:77, produto:{id:100}, precoCusto:cost, padrao:true };
+    return Response.json({data});
+  };
+  try {
+    const client = new BlingProductClient();
+    const result = await client.updateProduct('100', {costUpdate:{value:8, expected:4}}, 'test');
+    assert.equal(result.ok, true); assert.equal(cost,8); assert.equal(writes,1);
+  } finally { globalThis.fetch = original; }
+});
+
+test("AI description sends only catalogue facts and requires server configuration", async () => {
+  const { generateDescription } = await import('../../dist-gateway/gateway/mobile/description.js');
+  await assert.rejects(generateDescription({name:'Balão'}), e => e.code === 'ai_not_configured');
+  const original = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    const facts = JSON.parse(payload.messages[1].content);
+    assert.equal(facts.cost, undefined); assert.equal(facts.stock, undefined); assert.equal(facts.supplierId, undefined);
+    assert.equal(facts.name,'Balão azul');
+    return Response.json({choices:[{message:{content:'Balão azul para sua decoração.'}}]});
+  };
+  try { assert.equal((await generateDescription({name:'Balão azul',cost:3,stock:20,supplierId:'10'},'test')).description,'Balão azul para sua decoração.'); }
+  finally { globalThis.fetch = original; }
 });

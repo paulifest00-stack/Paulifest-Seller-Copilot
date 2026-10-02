@@ -387,9 +387,18 @@ export class BlingProductClient {
     const product=await request(`produtos/${encodeURIComponent(productId)}`);
     if(String(product?.id)!==productId)throw new BlingProductError('Produto retornado não corresponde ao solicitado.',422,'INVALID_BLING_PAYLOAD');
     let linkId=String(product?.fornecedor?.id||'');
+    // A default cost record can exist without a named supplier contact.
+    if (!/^[1-9]\d{0,19}$/.test(linkId)) {
+      const links = await request(`produtos/fornecedores?idProduto=${encodeURIComponent(productId)}&limite=100`);
+      if (Array.isArray(links)) {
+        const matching = links.filter((l:any) => String(l.produto?.id) === productId);
+        const defaultLink = matching.find((l:any) => l.padrao === true) ?? (matching.length === 1 ? matching[0] : undefined);
+        linkId = String(defaultLink?.id || '');
+      }
+    }
     if(!/^[1-9]\d{0,19}$/.test(linkId)){
       const supplierId=String(change.supplierId||'');
-      if(!/^[1-9]\d{0,19}$/.test(supplierId))throw new BlingProductError('O produto não tem vínculo de fornecedor identificado. Cadastre o fornecedor no Bling para salvar o custo por aqui.',409,'COST_SUPPLIER_REQUIRED');
+      if(!/^[1-9]\d{0,19}$/.test(supplierId))throw new BlingProductError('O Bling não retornou um registro de custo padrão para este produto. Abra o custo no Bling e salve-o uma vez; depois atualize aqui. Não é necessário selecionar fornecedor no catálogo.',409,'COST_SUPPLIER_REQUIRED');
       const prodCost=parseCostPrice(product?.fornecedor?.precoCusto??product?.precoCusto);
       const expectedNorm=change.expected??0;
       const actualNorm=prodCost??0;

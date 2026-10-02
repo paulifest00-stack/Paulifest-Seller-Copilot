@@ -24,6 +24,29 @@ const fail = (message: string, status = 422, code = "validation"): never => {
 };
 const version = (raw: Raw) =>
   createHash("sha256").update(JSON.stringify(raw)).digest("hex");
+/** Convert the desired total into entry/exit movements, preserving other balances. */
+export function stockMovements(balance: Raw, deposits: Raw[], desired: number, preferred?: string) {
+  const current = Number(balance?.saldoFisicoTotal ?? 0);
+  const delta = Math.round((desired - current) * 1e8) / 1e8;
+  if (!delta) return [];
+  const active = deposits.filter(d => /^[1-9]\d*$/.test(String(d.id)));
+  const chosen = preferred ? active.find(d => String(d.id) === preferred) :
+    active.find(d => d.padrao === true) ?? active.find(d => balance?.depositos?.some((b: Raw) => String(b.id) === String(d.id))) ?? active[0];
+  if (!chosen) return fail("Nenhum depósito ativo encontrado no Bling.");
+  if (delta > 0) return [{ deposito: { id: Number(chosen.id) }, operacao: "E", quantidade: delta }];
+  let remaining = -delta;
+  const ordered = [chosen, ...active.filter(d => d.id !== chosen.id)];
+  const moves: Raw[] = [];
+  for (const deposit of ordered) {
+    const available = Number(balance?.depositos?.find((b: Raw) => String(b.id) === String(deposit.id))?.saldoFisico ?? 0);
+    const quantity = Math.min(remaining, Math.max(0, available));
+    if (quantity > 0) moves.push({ deposito: { id: Number(deposit.id) }, operacao: "S", quantidade: quantity });
+    remaining = Math.round((remaining - quantity) * 1e8) / 1e8;
+    if (!remaining) break;
+  }
+  if (remaining > 1e-8) fail("Não há saldo suficiente nos depósitos ativos para esse ajuste.");
+  return moves;
+}
 export function validGtin(code: string): boolean {
   if (!/^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(code)) return false;
   const ds = code.split("").map(Number);
@@ -474,11 +497,17 @@ export class MobileCatalog {
       );
       if (!Array.isArray(batch)) fail("Categorias inválidas.");
       rows.push(...batch);
-      if (batch.length < 100)
-        return rows.map((r) => ({
-          id: String(r.id),
-          name: text(r.descricao ?? r.nome),
-        }));
+      if (batch.length < 100) {
+        const byId = new Map(rows.map(r => [String(r.id), r]));
+        const path = (r: Raw, seen = new Set<string>()): string => {
+          const id = String(r.id), name = text(r.descricao ?? r.nome);
+          if (seen.has(id)) return name;
+          seen.add(id);
+          const parent = byId.get(String(r.categoriaPai?.id));
+          return parent ? `${path(parent, seen)} › ${name}` : name;
+        };
+        return rows.map(r => ({ id: String(r.id), name: path(r) })).sort((a,b) => a.name.localeCompare(b.name, "pt-BR"));
+      }
     }
     fail("Quantidade de categorias excedida.");
   }
@@ -539,33 +568,8 @@ export class MobileCatalog {
           409,
           "conflict",
         );
-      const depositId = (input as ProductInput & { depositId?: string })
-        .depositId;
-      if (
-        input.stock !== null &&
-        input.stock !== (current?.product.stock ?? 0)
-      ) {
-        if (!depositId || !/^[1-9]\d*$/.test(depositId))
-          fail("Selecione um depósito para alterar o estoque.");
-        const deposits = await this.deposits(connection);
-        if (
-          !Array.isArray(deposits) ||
-          !deposits.some((d) => String(d.id) === depositId)
-        )
-          fail("Depósito inválido.");
-        if (current) {
-          const selected = current.balance?.depositos?.find(
-            (d: Raw) => String(d.id) === depositId,
-          );
-          const others =
-            Number(current.balance?.saldoFisicoTotal ?? 0) -
-            Number(selected?.saldoFisico ?? 0);
-          if (input.stock < others)
-            fail(
-              "O saldo total informado é menor que o saldo nos outros depósitos.",
-            );
-        }
-      }
+      if (input.stock !== null && input.stock !== (current?.product.stock ?? 0) && current)
+        stockMovements(current.balance, await this.deposits(connection), input.stock, input.depositId);
       const found = await this.find(connection, input.sku);
       if (found && found.id !== id)
         fail(`SKU já usado em ${found.name}.`, 409, "duplicate");
@@ -574,19 +578,11 @@ export class MobileCatalog {
         if (found && found.id !== id)
           fail(`EAN já usado em ${found.name}.`, 409, "duplicate");
       }
-      if (
-        input.cost !== null &&
-        input.cost !== current?.product.cost &&
-        !current?.raw.fornecedor?.id
-      ) {
-        if (!input.supplierId || !/^[1-9]\d*$/.test(input.supplierId))
-          fail("Escolha o fornecedor para salvar o custo.");
-        const supplier = await this.request(
-          connection,
-          `contatos/${input.supplierId}`,
-        );
-        if (String(supplier?.id) !== input.supplierId)
-          fail("Fornecedor inválido.");
+      if (current && input.cost !== null && input.cost !== current.product.cost && !current.raw.fornecedor?.id) {
+        const links = await this.request(connection, `produtos/fornecedores?idProduto=${id}&limite=100`);
+        const matching = Array.isArray(links) ? links.filter((l: Raw) => String(l.produto?.id) === id) : [];
+        if (!matching.some((l: Raw) => l.padrao === true) && matching.length !== 1)
+          fail("O Bling não retornou um registro de custo padrão. Salve o custo uma vez no Bling e recarregue aqui.");
       }
       if (current && input.cost === null && current.product.cost !== null)
         fail("Para zerar o custo, informe zero.");
@@ -631,38 +627,17 @@ export class MobileCatalog {
         input.stock !== null &&
         input.stock !== (current?.product.stock ?? 0)
       ) {
-        const depositId = (input as ProductInput & { depositId?: string })
-          .depositId;
-        if (!depositId || !/^[1-9]\d*$/.test(depositId))
-          fail("Selecione um depósito para alterar o estoque.");
-        const deposits = await this.deposits(connection);
-        if (
-          !Array.isArray(deposits) ||
-          !deposits.some((d) => String(d.id) === depositId)
-        )
-          fail("Depósito inválido.");
         const fresh = await this.get(connection, productId!);
         if (current && fresh.product.stock !== current.product.stock)
           fail("Estoque alterado durante o salvamento.", 409, "conflict");
-        const selected = fresh.balance?.depositos?.find(
-          (d: Raw) => String(d.id) === depositId,
-        );
-        const others =
-          Number(fresh.balance?.saldoFisicoTotal ?? 0) -
-          Number(selected?.saldoFisico ?? 0);
-        const quantity = input.stock - others;
-        if (quantity < 0)
-          fail(
-            "O saldo total informado é menor que o saldo nos outros depósitos.",
-          );
-        changed = true;
-        await this.request(connection, "estoques", "POST", {
-          produto: { id: Number(productId) },
-          deposito: { id: Number(depositId) },
-          operacao: "B",
-          quantidade: quantity,
-          observacoes: "Ajuste pelo catálogo mobile Paulifest",
-        });
+        const moves = stockMovements(fresh.balance, await this.deposits(connection), input.stock, input.depositId);
+        for (const movement of moves) {
+          changed = true;
+          await this.request(connection, "estoques", "POST", {
+            produto: { id: Number(productId) }, ...movement,
+            observacoes: "Ajuste pelo catálogo Paulifest: saldo desejado " + input.stock,
+          });
+        }
       }
       const final = (await this.get(connection, productId!)).product;
       if (input.stock !== null && final.stock !== input.stock)
