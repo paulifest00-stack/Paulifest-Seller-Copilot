@@ -269,7 +269,8 @@ export class GatewayApp {
         this.sendJson(res, 200, {
           status: 'ok',
           environment: this.config.environment,
-            capabilities: ['bling-cost-update-v1', 'bling-stock-update-v1'],
+            capabilities: ['bling-cost-update-v1', 'bling-stock-update-v1', ...(this.mobileCatalog ? ['bling-mobile-catalog-v1', 'bling-signed-webhooks-v1'] : [])],
+          mobileConfiguration: { publicUrlConfigured: !!this.config.mobilePublicUrl, webOriginsConfigured: !!this.config.allowedWebOrigins?.length },
           timestamp: new Date().toISOString()
         });
         return;
