@@ -1,3 +1,4 @@
+import { MobileCatalog } from '../mobile/catalog.ts';
 import { MlService } from '../integrations/mercadolivre/ml-service.ts';
 import { MlApiError } from '../integrations/mercadolivre/api-client.ts';
 import { ML_ACTIONS } from '../../shared/mercadolivre-contracts.ts';
@@ -33,6 +34,7 @@ import type {
 import type { BlingProductUpdatePatch } from '../../shared/gateway-contracts.ts';
 
 export interface GatewayAppOptions {
+  mobileCatalog?: MobileCatalog;
   mlService?: MlService;
   config?: GatewayConfig;
   repository?: IGatewayRepository;
@@ -44,6 +46,7 @@ export interface GatewayAppOptions {
 }
 
 export class GatewayApp {
+  private mobileCatalog?: MobileCatalog;
   private mlService?: MlService;
   private config: GatewayConfig;
   private repository: IGatewayRepository;
@@ -55,6 +58,7 @@ export class GatewayApp {
   private server?: Server;
 
   constructor(options: GatewayAppOptions = {}) {
+    this.mobileCatalog = options.mobileCatalog;
     this.mlService = options.mlService;
     this.config = options.config || loadGatewayConfig();
     this.repository = options.repository || gatewayRepository;
@@ -129,6 +133,7 @@ export class GatewayApp {
     }
 
     // 2. Verificação exata contra allowlist explícita
+    if (this.config.allowedWebOrigins?.includes(origin)) return true;
     const allowed = this.config.allowedExtensionOrigins || [];
     if (allowed.includes(origin)) {
       return true;
@@ -200,6 +205,9 @@ export class GatewayApp {
     }
 
     try {
+      if (pathname.startsWith('/mobile/') && this.mobileCatalog) {
+        await this.handleMobile(req, res, parsedUrl, clientIp); return;
+      }
       if (pathname === '/auth/mercadolivre/callback' && method === 'GET') {
         res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
         try {
@@ -345,6 +353,50 @@ export class GatewayApp {
   // ---------------------------------------------------------------------------
   // Handlers dos Endpoints
   // ---------------------------------------------------------------------------
+
+  private async handleMobile(req: IncomingMessage, res: ServerResponse, url: URL, clientIp: string): Promise<void> {
+    const catalog = this.mobileCatalog!;
+    try {
+      if (req.method === 'GET' && /^\/mobile\/images\/[a-f0-9-]{36}$/.test(url.pathname)) {
+        const image = await catalog.image(url.pathname.split('/').pop()!);
+        if (!image) { this.sendJson(res,404,{ok:false,error:'not_found'}); return; }
+        res.writeHead(200,{'Content-Type':image.mime,'Cache-Control':'public, max-age=31536000, immutable','X-Content-Type-Options':'nosniff'});res.end(image.content);return;
+      }
+      if (req.method === 'POST' && url.pathname === '/mobile/webhooks/bling') {
+        const chunks: Buffer[]=[]; let size=0;
+        for await (const chunk of req) { size+=chunk.length;if(size>1024*1024){this.sendJson(res,413,{ok:false});return;}chunks.push(Buffer.from(chunk)); }
+        await catalog.webhook(Buffer.concat(chunks),String(req.headers['x-bling-signature-256']||''));
+        this.sendJson(res,200,{ok:true});return;
+      }
+      const auth = await this.authenticateWithGst(req,res);if(!auth)return;
+      const rate = productReadLimiter.check(clientIp);if(!rate.allowed){this.sendJson(res,429,{ok:false,error:'unknown',message:'Aguarde antes de tentar novamente.'});return;}
+      const connection = await this.repository.getConnection(auth.connectionId);
+      if(connection?.status!=='connected'){this.sendJson(res,401,{ok:false,error:'unauthorized',message:'Conecte novamente ao Bling.'});return;}
+      let result:unknown;
+      const productMatch = url.pathname.match(/^\/mobile\/products\/(\d+)$/);
+      if(req.method==='GET' && url.pathname==='/mobile/products'){
+        const query=url.searchParams.get('query')||'';const page=Number(url.searchParams.get('cursor')||1);const limit=Number(url.searchParams.get('limit')||20);
+        if(query.length>120||!Number.isInteger(page)||page<1||page>100000||!Number.isInteger(limit)||limit<1||limit>50)throw new BlingProductError('Busca inválida.',422,'validation');
+        result=await catalog.list(auth.connectionId,query,page,limit,url.searchParams.get('incompleteOnly')==='true');
+      } else if(req.method==='GET' && productMatch) result=(await catalog.get(auth.connectionId,productMatch[1])).product;
+      else if(req.method==='GET' && url.pathname==='/mobile/find'){const code=url.searchParams.get('code')||'';if(!code||code.length>120)throw new BlingProductError('Código inválido.',422,'validation');result=await catalog.find(auth.connectionId,code);}
+      else if(req.method==='GET' && url.pathname==='/mobile/categories')result=await catalog.categories(auth.connectionId);
+      else if(req.method==='GET' && url.pathname==='/mobile/contacts'){const query=url.searchParams.get('query')||'';if(query.length<2||query.length>100)throw new BlingProductError('Informe ao menos 2 caracteres.',422,'validation');result=await catalog.contacts(auth.connectionId,query);}
+      else if(req.method==='GET' && url.pathname==='/mobile/deposits')result=await catalog.deposits(auth.connectionId);
+      else if(req.method==='GET' && url.pathname==='/mobile/revision')result=await catalog.revision(auth.connectionId);
+      else if(req.method==='POST' && url.pathname==='/mobile/images'){const body=await this.readJsonBody(req,3*1024*1024);result=await catalog.upload(auth.connectionId,body?.data??'');}
+      else if((req.method==='POST' && url.pathname==='/mobile/products')||(req.method==='PATCH' && productMatch)){
+        const body=await this.readJsonBody(req,128*1024);if(!body)throw new BlingProductError('Cadastro inválido.',422,'validation');
+        result=await catalog.mutate(auth.connectionId,body.requestId??'',body.input,productMatch?.[1]);
+        this.quickViewCache.clearForConnection(auth.connectionId);
+      }else{this.sendJson(res,404,{ok:false,error:'not_found'});return;}
+      this.sendJson(res,200,{ok:true,data:result});
+    } catch(error) {
+      if(error instanceof BlingReauthRequiredError){this.sendJson(res,401,{ok:false,error:'unauthorized',message:'Conecte novamente ao Bling.'});return;}
+      if(error instanceof BlingProductError){this.sendJson(res,error.status,{ok:false,error:error.code,message:error.message});return;}
+      this.sendJson(res,500,{ok:false,error:'unknown',message:'Não foi possível concluir a operação. Consulte o Bling antes de repetir uma gravação.'});
+    }
+  }
 
   private async handleStartAuth(req: IncomingMessage, res: ServerResponse, clientIp: string): Promise<void> {
     const rateCheck = startAuthLimiter.check(clientIp);
