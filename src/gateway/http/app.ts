@@ -383,6 +383,11 @@ export class GatewayApp {
       } else if(req.method==='GET' && productMatch) result=(await catalog.get(auth.connectionId,productMatch[1])).product;
       else if(req.method==='GET' && url.pathname==='/mobile/find'){const code=url.searchParams.get('code')||'';if(!code||code.length>120)throw new BlingProductError('Código inválido.',422,'validation');result=await catalog.find(auth.connectionId,code);}
       else if(req.method==='POST' && url.pathname==='/mobile/description'){const body=await this.readJsonBody(req,16*1024);result=await generateDescription(body?.input??{},this.config.descriptionApiKey,this.config.descriptionModel);}
+      else if(req.method==='GET' && url.pathname==='/mobile/category-fields')result=await catalog.categoryFields(auth.connectionId,url.searchParams.get('categoryId')||'');
+      else if(req.method==='GET' && url.pathname==='/mobile/stores')result=await catalog.stores(auth.connectionId);
+      else if(req.method==='GET' && url.pathname==='/mobile/category-links')result=await catalog.categoryLinks(auth.connectionId,url.searchParams.get('storeId')||'');
+      else if(req.method==='GET' && url.pathname==='/mobile/marketplace-categories')result=await catalog.marketplaceCategories(auth.connectionId,url.searchParams.get('storeId')||'',url.searchParams.get('parent')||'');
+      else if(req.method==='POST' && url.pathname==='/mobile/category-links'){const body=await this.readJsonBody(req,16*1024);result=await catalog.linkCategory(auth.connectionId,body??{});}
       else if(req.method==='GET' && url.pathname==='/mobile/categories')result=await catalog.categories(auth.connectionId);
       else if(req.method==='GET' && url.pathname==='/mobile/contacts'){const query=url.searchParams.get('query')||'';if(query.length<2||query.length>100)throw new BlingProductError('Informe ao menos 2 caracteres.',422,'validation');result=await catalog.contacts(auth.connectionId,query);}
       else if(req.method==='GET' && url.pathname==='/mobile/deposits')result=await catalog.deposits(auth.connectionId);

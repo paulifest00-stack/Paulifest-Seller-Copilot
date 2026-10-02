@@ -109,7 +109,8 @@ export function mapProduct(raw: Raw): Product {
       num(dimensions.profundidade) === null
         ? null
         : Number(dimensions.profundidade) * factor,
-    description: text(raw.descricaoComplementar),
+    description: text(raw.descricaoCurta) || text(raw.descricaoComplementar),
+    customFields: (raw.camposCustomizados ?? []).map((f: Raw) => ({ id: String(f.idCampoCustomizado), value: text(f.valor), item: text(f.item) })),
     images,
     origins: {},
     syncStatus: "synced",
@@ -134,6 +135,7 @@ export function validateMobileInput(input: ProductInput) {
     if (typeof input[key] !== "string") fail(`Campo inválido: ${key}.`);
   if (!input.name.trim() || input.name.length > 120 || !input.sku.trim())
     fail("Informe nome (até 120 caracteres) e SKU.");
+  if (input.description.length > 5000) fail("Descrição deve ter até 5.000 caracteres.");
   if (!["active", "inactive"].includes(input.status))
     fail("Situação inválida.");
   for (const k of ["gtin", "gtinPackage"] as const)
@@ -172,6 +174,7 @@ export function validateMobileInput(input: ProductInput) {
     )
   )
     fail("Envie as fotos antes de salvar.");
+  if (input.customFields !== undefined && (!Array.isArray(input.customFields) || input.customFields.length > 100 || input.customFields.some(f => !/^[1-9]\d*$/.test(f.id) || typeof f.value !== "string" || f.value.length > 5000 || (f.item !== undefined && typeof f.item !== "string")))) fail("Atributos inválidos.");
   const critical = [
     "sku",
     "gtin",
@@ -207,11 +210,11 @@ export function productPayload(
     price: "preco",
     netWeightKg: "pesoLiquido",
     grossWeightKg: "pesoBruto",
-    description: "descricaoComplementar",
+    description: "descricaoCurta",
   };
   for (const [key, destination] of Object.entries(mapping)) {
     const value = (input as unknown as Raw)[key];
-    if (!previous || value !== (previous as unknown as Raw)[key]) {
+    if (!previous || value !== (previous as unknown as Raw)[key] || (key === "description" && value && !raw?.descricaoCurta)) {
       if (value === null) {
         if (previous && (previous as unknown as Raw)[key] !== null)
           fail("Para limpar preço ou peso, informe zero.");
@@ -267,6 +270,15 @@ export function productPayload(
       video: raw?.midia?.video ?? { url: "" },
       imagens: { imagensURL: input.images.map((i) => ({ link: i.url })) },
     };
+  if (input.customFields && JSON.stringify(input.customFields) !== JSON.stringify(previous?.customFields ?? [])) {
+    const fields = [...(raw?.camposCustomizados ?? [])];
+    for (const field of input.customFields) {
+      const old = fields.findIndex((f: Raw) => String(f.idCampoCustomizado) === field.id);
+      const next = { ...(old >= 0 ? fields[old] : {}), idCampoCustomizado: Number(field.id), valor: field.value, item: field.item ?? "" };
+      if (old >= 0) fields[old] = next; else fields.push(next);
+    }
+    out.camposCustomizados = fields;
+  }
   return out;
 }
 export function verifyWebhook(
@@ -509,7 +521,87 @@ export class MobileCatalog {
         return rows.map(r => ({ id: String(r.id), name: path(r) })).sort((a,b) => a.name.localeCompare(b.name, "pt-BR"));
       }
     }
-    fail("Quantidade de categorias excedida.");
+    return fail("Quantidade de categorias excedida.");
+  }
+  private async pages(connection: string, endpoint: string) {
+    const rows: Raw[] = [];
+    for (let page = 1; page <= 100; page++) {
+      const batch = await this.request(connection, `${endpoint}${endpoint.includes("?") ? "&" : "?"}pagina=${page}&limite=100`);
+      if (!Array.isArray(batch)) return fail("Resposta de categorias inválida.");
+      rows.push(...batch);
+      if (batch.length < 100) return rows;
+    }
+    return fail("Há categorias demais para carregar. Refine a busca.");
+  }
+  async stores(connection: string) {
+    return (await this.pages(connection, "canais-venda?situacao=1")).map(r => ({ id: String(r.id), name: text(r.descricao), type: text(r.tipo) }));
+  }
+  private async store(connection: string, storeId: string) {
+    if (!/^[1-9]\d*$/.test(storeId)) return fail("Loja inválida.");
+    const store = (await this.stores(connection)).find(r => r.id === storeId);
+    if (!store) return fail("Loja não encontrada ou desativada.");
+    return store;
+  }
+  async categoryLinks(connection: string, storeId: string) {
+    await this.store(connection, storeId);
+    return (await this.pages(connection, `categorias/lojas?idLoja=${storeId}`))
+      .filter(r => String(r.loja?.id) === storeId)
+      .map(r => ({ id: String(r.id), categoryId: String(r.categoriaProduto?.id), code: String(r.codigo), name: text(r.descricao) }));
+  }
+  async marketplaceCategories(connection: string, storeId: string, parent = "") {
+    const store = await this.store(connection, storeId);
+    if (parent && !/^[A-Za-z0-9_-]{1,80}$/.test(parent)) return fail("Categoria inválida.");
+    const rows = await this.request(connection, `anuncios/categorias?${new URLSearchParams({ idLoja: storeId, tipoIntegracao: store.type, ...(parent ? { idCategoria: parent } : {}) })}`);
+    if (!Array.isArray(rows)) return fail("O Bling não disponibilizou a árvore desta loja.");
+    return rows.filter(r => String(r.id) !== parent).map((r: Raw) => ({ id: String(r.id), name: text(r.nome ?? r.descricao) }));
+  }
+  async linkCategory(connection: string, body: Raw) {
+    const lock = await this.pool.connect();
+    try {
+      await lock.query("SELECT pg_advisory_lock(hashtext($1))", [`category-link:${connection}:${body?.storeId}:${body?.categoryId}`]);
+    const storeId = String(body?.storeId ?? ""), categoryId = String(body?.categoryId ?? "");
+    if (!(await this.categories(connection)).some(c => c.id === categoryId)) return fail("Escolha uma categoria interna existente.");
+    const path = body?.path;
+    if (!Array.isArray(path) || !path.length || path.length > 10) return fail("Selecione a categoria da loja até o último nível.");
+    let parent = "", leaf: { id: string; name: string } | undefined;
+    for (const id of path) {
+      if (typeof id !== "string") return fail("Categoria inválida.");
+      leaf = (await this.marketplaceCategories(connection, storeId, parent)).find(r => r.id === id);
+      if (!leaf) return fail("A árvore da loja mudou. Escolha novamente a categoria.");
+      parent = leaf.id;
+    }
+    if (!leaf || (await this.marketplaceCategories(connection, storeId, leaf.id)).length) return fail("Selecione o último nível da categoria da loja.");
+    const links = await this.categoryLinks(connection, storeId);
+    const existing = links.filter(l => l.categoryId === categoryId);
+    if (existing.length) {
+      if (existing.length === 1 && existing[0]!.code === leaf.id) return existing[0];
+      return fail("Esta categoria interna já possui vínculo nesta loja. Use outra categoria interna ou altere o vínculo no Bling.", 409, "conflict");
+    }
+    // Shared mapping: user reviews this scope explicitly in the form.
+    await this.request(connection, "categorias/lojas", "POST", {
+      loja: { id: Number(storeId) }, categoriaProduto: { id: Number(categoryId) }, codigo: leaf.id, descricao: leaf.name,
+    });
+    const saved = (await this.categoryLinks(connection, storeId)).find(l => l.categoryId === categoryId && l.code === leaf!.id);
+    if (!saved) return fail("Vínculo enviado, mas não confirmado. Atualize os vínculos antes de tentar novamente.", 409, "write_uncertain");
+    return saved;
+    } finally {
+      await lock.query("SELECT pg_advisory_unlock(hashtext($1))", [`category-link:${connection}:${body?.storeId}:${body?.categoryId}`]);
+      lock.release();
+    }
+  }
+  async categoryFields(connection: string, categoryId: string) {
+    if (categoryId && !/^[1-9]\d*$/.test(categoryId)) return fail("Categoria inválida.");
+    const modules = await this.request(connection, "campos-customizados/modulos");
+    const module = Array.isArray(modules) ? modules.find((r: Raw) => String(r.modulo).toLowerCase() === "produtos") : undefined;
+    if (!module?.id) return [];
+    const base = await this.pages(connection, `campos-customizados/modulos/${module.id}`);
+    const result: Raw[] = [];
+    for (const field of base.filter(f => f.situacao === 1)) {
+      const f = await this.request(connection, `campos-customizados/${field.id}`);
+      if (f.agrupadores?.length && !f.agrupadores.some((g: Raw) => String(g.id) === categoryId)) continue;
+      result.push({ id: String(field.id), name: text(f.nome ?? field.nome), required: f.obrigatorio === true, options: (f.opcoes ?? []).map((o: Raw) => text(o.nome)) });
+    }
+    return result;
   }
   async contacts(connection: string, query: string) {
     const rows = await this.request(

@@ -45,6 +45,7 @@ export interface Product {
   heightCm: number | null;
   depthCm: number | null;
   description: string;
+  customFields?: { id: string; value: string; item?: string }[];
   images: ProductImage[];
   origins: Partial<Record<EditableField, FieldOrigin>>;
   syncStatus: SyncStatus;
@@ -60,6 +61,7 @@ export type EditableField = Exclude<
   | "syncStatus"
   | "updatedAt"
   | "images"
+  | "customFields"
 >;
 
 /** Payload for create/update. Screens never set ids/sync metadata. */
@@ -106,6 +108,7 @@ export const emptyInput = (): ProductInput => ({
   heightCm: null,
   depthCm: null,
   description: "",
+  customFields: [],
   images: [],
   origins: {},
 });

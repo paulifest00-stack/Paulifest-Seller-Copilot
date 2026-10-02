@@ -114,6 +114,7 @@ async function fixture() {
   const products = new Map();
   const stocks = new Map();
   const stockWrites = [];
+  const categoryLinks = [];
   let next = 100;
   let writes = 0;
   const server = createServer(async (req, res) => {
@@ -121,7 +122,19 @@ async function fixture() {
     assert.equal(req.headers["enable-jwt"], "1");
     const url = new URL(req.url, "http://localhost");
     let data;
-    if (req.method === "POST" && url.pathname === "/Api/v3/produtos") {
+    if (url.pathname === "/Api/v3/canais-venda") data = [{id:10,descricao:"Shopee Paulifest",tipo:"Shopee",situacao:1}];
+    else if (url.pathname === "/Api/v3/categorias/produtos") data = [{id:1,descricao:"Balões"},{id:2,descricao:"Velas"}];
+    else if (url.pathname === "/Api/v3/anuncios/categorias") {
+      assert.equal(url.searchParams.get("tipoIntegracao"), "Shopee");
+      assert.equal(url.searchParams.get("idLoja"), "10");
+      const parent = url.searchParams.get("idCategoria");
+      data = !parent ? [{id:100,nome:"Festas"}] : parent === "100" ? [{id:101,nome:"Balões"}] : [];
+    } else if (url.pathname === "/Api/v3/categorias/lojas") {
+      if (req.method === "POST") {
+        let body="";for await (const chunk of req)body+=chunk;
+        categoryLinks.push({id:999,...JSON.parse(body)});writes++;data={id:999};
+      } else data = categoryLinks;
+    } else if (req.method === "POST" && url.pathname === "/Api/v3/produtos") {
       let body = "";
       for await (const chunk of req) body += chunk;
       const p = { id: next++, ...JSON.parse(body) };
@@ -385,4 +398,37 @@ test("AI description sends only catalogue facts and requires server configuratio
   };
   try { assert.equal((await generateDescription({name:'Balão azul',cost:3,stock:20,supplierId:'10'},'test')).description,'Balão azul para sua decoração.'); }
   finally { globalThis.fetch = original; }
+});
+
+test("Shopee links require a real leaf and retry preserves the shared mapping", async () => {
+ const f=await fixture();
+ try {
+  const before=f.writes;
+  await assert.rejects(f.catalog.linkCategory('account',{storeId:'10',categoryId:'1',path:['100']}),e=>e.code==='validation');
+  await assert.rejects(f.catalog.linkCategory('account',{storeId:'10',categoryId:'1',path:['999']}));
+  assert.equal(f.writes,before);
+  const link=await f.catalog.linkCategory('account',{storeId:'10',categoryId:'1',path:['100','101']});
+  assert.equal(link.categoryId,'1');assert.equal(link.code,'101');
+  await f.catalog.linkCategory('account',{storeId:'10',categoryId:'1',path:['100','101']});
+  assert.equal(f.writes,before+1);
+  await assert.rejects(f.catalog.categoryLinks('other','11'));
+ }finally{await f.close();}
+});
+test("export description uses descricaoCurta and preserves complementary content",()=>{
+ const raw={id:1,nome:'Balão',codigo:'BAL',descricaoComplementar:'Descrição que já existia'};
+ const p=mapProduct(raw);
+ const payload=productPayload(p,p,raw);
+ assert.equal(payload.descricaoCurta,'Descrição que já existia');
+ assert.equal(payload.descricaoComplementar,undefined);
+ assert.throws(()=>validateMobileInput({...input(),description:'a'.repeat(5001)}));
+});
+
+test("custom field changes preserve unrelated fields and their ERP link IDs",()=>{
+ const raw={id:1,nome:'Produto',codigo:'A',camposCustomizados:[{idCampoCustomizado:7,idVinculo:70,valor:'Azul',item:''},{idCampoCustomizado:8,idVinculo:80,valor:'Preservar',item:''}]};
+ const p=mapProduct(raw);
+ const patch=productPayload({...p,customFields:[{id:'7',value:'Vermelho'}]},p,raw);
+ assert.equal(patch.camposCustomizados[0].idVinculo,70);
+ assert.equal(patch.camposCustomizados[0].valor,'Vermelho');
+ assert.equal(patch.camposCustomizados[1].valor,'Preservar');
+ assert.throws(()=>validateMobileInput({...input(),customFields:[{id:'invalid',value:'a'}]}));
 });

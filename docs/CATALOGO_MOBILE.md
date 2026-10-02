@@ -53,3 +53,13 @@ Custo consulta o registro padrão já existente em produtos/fornecedores, mesmo 
 
 ## Descrição com IA
 POST /mobile/description, autenticado com sessão Gateway, recebe fatos públicos do produto e retorna {description}. Configure OPENAI_API_KEY somente no servidor, opcional OPENAI_DESCRIPTION_MODEL (gpt-4.1-mini). Nenhum custo, saldo, fornecedor ou token Bling é transmitido ao provedor. A interface exibe a sugestão e só aplica após ação explícita; salvar o produto continua separado. Sem chave, retorna ai_not_configured. Não usa os créditos do Lovable.
+
+
+## Categorias e Shopee
+Sugestões pelo nome usam apenas categorias internas reais e nomes de vínculos já existentes. São sugestões por correspondência de palavras (incluindo alguns termos equivalentes), não classificações garantidas; o usuário escolhe antes de salvar.
+O formulário consulta canais de venda ativos e categorias/lojas por conta. Ao selecionar a categoria interna, mostra o vínculo específico da loja (Shopee priorizada quando disponível). Para um primeiro vínculo, consulta anuncios/categorias pela integração e percorre a árvore. O servidor revalida o caminho e exige o último nível. A criação do vínculo é compartilhada por todos os produtos daquela categoria interna; a interface avisa esse alcance antes de confirmar. Não substitui vínculos existentes por inferência. Se a API do Bling rejeitar a árvore daquela integração, o primeiro vínculo precisa ser configurado no Bling; depois o catálogo consulta e usa o vínculo existente.
+Campos customizados ativos do módulo Produtos são carregados conforme os agrupadores da categoria, quando a API disponibiliza o módulo e suas definições. Valores são salvos em camposCustomizados preservando idVinculo e os campos não alterados. Isto não cria automaticamente o mapeamento de atributos com a Shopee.
+Descrição do formulário é gravada em descricaoCurta, exigida pelo fluxo Shopee. A descrição complementar existente é preservada; no primeiro salvamento, uma descrição complementar legada é aproveitada como descricaoCurta quando ela está vazia.
+A revisão recolhida verifica os dados gerais publicados pelo Bling: nome, SKU, preço, peso bruto, dimensões até 70cm, descrição 10–5000 caracteres, imagem e categoria. Ela não certifica atributos da Shopee, vigência de categoria nem aprovação da exportação.
+Escopos adicionais: canais de venda, categorias de lojas, anúncios/categorias e campos customizados (consulta), categorias de lojas (criação). Escopos ausentes exibem erro e não bloqueiam uma edição independente de preço/estoque.
+Fontes: https://ajuda.bling.com.br/hc/pt-br/articles/360058302333-Categorias-da-Shopee e https://ajuda.bling.com.br/hc/pt-br/articles/4414423105815-Exporta%C3%A7%C3%A3o-de-produtos-para-a-Shopee .
