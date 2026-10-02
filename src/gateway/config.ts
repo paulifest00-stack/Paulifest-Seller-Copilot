@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { OFFICIAL_BLING_AUTH_URL } from '../shared/gateway-contracts.ts';
 
 export interface GatewayConfig {
+  mobilePublicUrl?: string;
+  allowedWebOrigins?: string[];
   blingClientId: string;
   blingClientSecret: string;
   blingRedirectUri: string;
@@ -36,6 +38,10 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
   const allowedExtensionOrigins = env.GATEWAY_ALLOWED_EXTENSION_ORIGINS
     ? env.GATEWAY_ALLOWED_EXTENSION_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
     : [];
+  const allowedWebOrigins = (env.GATEWAY_ALLOWED_WEB_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+  for (const origin of allowedWebOrigins) { const url = new URL(origin); if (url.origin !== origin || (environment === 'production' && url.protocol !== 'https:')) throw new Error('Origem web inválida.'); }
+  const mobilePublicUrl = env.GATEWAY_PUBLIC_URL?.trim().replace(/\/+$/, '');
+  if (mobilePublicUrl) { const publicUrl = new URL(mobilePublicUrl); if (publicUrl.protocol !== 'https:' || publicUrl.origin !== mobilePublicUrl) throw new Error('GATEWAY_PUBLIC_URL deve ser uma origem HTTPS sem caminho.'); }
   const trustProxy = env.GATEWAY_TRUST_PROXY === 'true';
   const quickViewCacheTtlMs = parseInt(env.GATEWAY_QUICK_VIEW_CACHE_TTL_MS || '60000', 10);
 
@@ -89,7 +95,8 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     }
 
     return {
-      blingClientId,
+      mobilePublicUrl, allowedWebOrigins,
+    blingClientId,
       blingClientSecret,
       blingRedirectUri,
       blingBaseUrl,
@@ -150,7 +157,8 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
     }
 
     return {
-      blingClientId,
+      mobilePublicUrl, allowedWebOrigins,
+    blingClientId,
       blingClientSecret,
       blingRedirectUri,
       blingBaseUrl,
@@ -194,6 +202,7 @@ export function loadGatewayConfig(env: Record<string, string | undefined> = proc
   }
 
   return {
+    mobilePublicUrl, allowedWebOrigins,
     blingClientId,
     blingClientSecret,
     blingRedirectUri,

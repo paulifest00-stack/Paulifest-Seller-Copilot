@@ -17,7 +17,8 @@
     "start:gateway:local": "node --env-file=.env dist-gateway/gateway/server.js",
     "verify:extension-isolation": "npm run clean:extension && npm run build && node scripts/verify-extension-isolation.mjs",
     "preview": "vite preview",
-    "typecheck:tests": "tsc --project tsconfig.tests.json --noEmit"
+    "typecheck:tests": "tsc --project tsconfig.tests.json --noEmit",
+    "test:mobile": "npm run build:gateway && node --test tests/mobile/*.test.mjs"
   },
   "engines": {
     "node": ">=22"

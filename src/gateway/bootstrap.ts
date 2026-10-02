@@ -1,3 +1,7 @@
+import { MobileCatalog } from './mobile/catalog.ts';
+import { BlingOAuthClient } from './integrations/bling/bling-oauth-client.ts';
+import { BlingTokenManager } from './integrations/bling/bling-token-manager.ts';
+import { BlingProductClient } from './integrations/bling/bling-product-client.ts';
 import { MlService, loadMlConfig } from './integrations/mercadolivre/ml-service.ts';
 import type { Pool } from 'pg';
 import { loadGatewayConfig, type GatewayConfig } from './config.ts';
@@ -44,7 +48,12 @@ export async function startGateway(
     );
 
     const repository = new PostgresGatewayRepository(pool);
+    const oauthClient = new BlingOAuthClient({clientId:config.blingClientId,clientSecret:config.blingClientSecret,redirectUri:config.blingRedirectUri,baseUrl:config.blingBaseUrl,authUrl:config.blingAuthUrl,timeoutMs:config.blingTimeoutMs});
+    const tokenManager = new BlingTokenManager({repository,oauthClient,encryptionKey:config.encryptionKey});
+    const productClient = new BlingProductClient({baseUrl:config.blingBaseUrl,timeoutMs:config.blingTimeoutMs});
     app = new GatewayApp({
+      oauthClient, tokenManager, productClient,
+      mobileCatalog: new MobileCatalog(pool,config,tokenManager,productClient),
       config,
       repository,
       mlService: mlConfig ? new MlService(pool, mlConfig, config.encryptionKey) : undefined,
