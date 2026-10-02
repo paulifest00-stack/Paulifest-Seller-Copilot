@@ -1,3 +1,4 @@
+import { signRevision, mergeRevision } from "./revision.ts";
 import { normalizeFiscalCode, normalizeFiscalInput } from "./fiscal.ts";
 import {
   createHash,
@@ -396,7 +397,9 @@ export class MobileCatalog {
       ...raw.estoque,
       saldoFisicoTotal: balance[0]?.saldoFisicoTotal ?? null,
     };
-    return { raw, product: mapProduct(raw), balance: balance[0] };
+    const product = mapProduct(raw);
+    product.version = signRevision(product, connection, this.config.jwtSecret);
+    return { raw, product, balance: balance[0] };
   }
   async list(
     connection: string,
@@ -665,12 +668,13 @@ export class MobileCatalog {
         `mobile:${connection}:${id ?? "create"}`,
       ]);
       const current = id ? await this.get(connection, id) : undefined;
-      if (current && input.version !== current.product.version)
-        fail(
-          "Produto alterado no Bling. Recarregue antes de salvar.",
-          409,
-          "conflict",
-        );
+      if (current) {
+        if (input.version?.startsWith("v3.")) {
+          input = mergeRevision(input, current.product, connection, this.config.jwtSecret);
+        } else if (input.version !== mapProduct(current.raw).version) {
+          fail("Esta edição foi aberta com uma referência antiga. Reabra o produto para carregar os dados atuais.", 409, "conflict");
+        }
+      }
       if (input.stock !== null && input.stock !== (current?.product.stock ?? 0) && current)
         stockMovements(current.balance, await this.deposits(connection), input.stock, input.depositId);
       const found = await this.find(connection, input.sku);
