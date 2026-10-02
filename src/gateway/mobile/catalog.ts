@@ -23,8 +23,14 @@ const text = (v: unknown) => (typeof v === "string" ? v : "");
 const fail = (message: string, status = 422, code = "validation"): never => {
   throw new BlingProductError(message, status, code);
 };
-const version = (raw: Raw) =>
-  createHash("sha256").update(JSON.stringify(raw)).digest("hex");
+const canonical = (value: any): any => {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  return value;
+};
+const version = (product: Raw) =>
+  "v2:" + createHash("sha256").update(JSON.stringify(canonical(product))).digest("hex");
 /** Convert the desired total into entry/exit movements, preserving other balances. */
 export function stockMovements(balance: Raw, deposits: Raw[], desired: number, preferred?: string) {
   const current = Number(balance?.saldoFisicoTotal ?? 0);
@@ -76,11 +82,10 @@ export function mapProduct(raw: Raw): Product {
     .filter((i: { url: string }) => i.url);
   if (!images.length && raw.imagemURL)
     images.push({ url: raw.imagemURL, local: false });
-  return {
+  const product: Product = {
     ...emptyInput(),
     id: String(raw.id),
     remoteId: String(raw.id),
-    version: version(raw),
     status: raw.situacao === "I" ? "inactive" : "active",
     name: text(raw.nome),
     sku: text(raw.codigo),
@@ -117,6 +122,9 @@ export function mapProduct(raw: Raw): Product {
     syncStatus: "synced",
     updatedAt: text(raw.dataAlteracao) || "",
   };
+  const { updatedAt, origins, syncStatus, ...editable } = product;
+  product.version = version(editable);
+  return product;
 }
 export function validateMobileInput(input: ProductInput) {
   if (!input || typeof input !== "object") fail("Cadastro inválido.");
@@ -753,7 +761,7 @@ export class MobileCatalog {
       );
       if (changed)
         fail(
-          `A gravação pode ter sido parcial. Consulte o produto ${productId ?? "pelo SKU"} no Bling antes de repetir.`,
+          `A gravação pode ter sido parcial. ${error instanceof BlingProductError ? error.message : "Não foi possível confirmar a etapa final."} Consulte o produto ${productId ?? "pelo SKU"} no Bling antes de repetir.`,
           409,
           "write_uncertain",
         );

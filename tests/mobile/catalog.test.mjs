@@ -449,3 +449,30 @@ test("formatted NCM and CEST load and save without dropping leading zeros", () =
   assert.throws(() => validateMobileInput({ ...input(), ncm: "123456789" }));
   assert.throws(() => validateMobileInput({ ...input(), cest: "01.001.000" }));
 });
+
+test("versions ignore API key ordering and volatile metadata but detect editable changes", () => {
+  const a = { id: 1, nome: "Teste", codigo: "TEST-1", preco: 10,
+    estoque: { saldoFisicoTotal: 5 }, tributacao: { origem: 0, ncm: "9505.90.00" },
+    dataAlteracao: "2026-10-01", transportMetadata: { request: 1 } };
+  const b = { tributacao: { ncm: "95059000", origem: 0 }, codigo: "TEST-1",
+    estoque: { saldoFisicoTotal: 5 }, preco: 10, nome: "Teste", id: 1,
+    dataAlteracao: "2026-10-02", transportMetadata: { request: 2 } };
+  assert.equal(mapProduct(a).version, mapProduct(b).version);
+  for (const patch of [{ nome: "Outro" }, { preco: 11 },
+    { estoque: { saldoFisicoTotal: 6 } }, { fornecedor: { precoCusto: 7 } }])
+    assert.notEqual(mapProduct(a).version, mapProduct({ ...a, ...patch }).version);
+});
+
+test("editing stock survives reordered API responses and irrelevant metadata changes", async () => {
+  const f = await fixture();
+  try {
+    const p = await f.catalog.mutate("account", "stable-version-create", input());
+    const raw = f.products.get(p.id);
+    f.products.set(p.id, { dataAlteracao: "novo", ...Object.fromEntries(Object.entries(raw).reverse()), responseMetadata: "novo" });
+    const saved = await f.catalog.mutate("account", "stable-version-stock", { ...p, stock: 10 }, p.id);
+    assert.equal(saved.stock, 10);
+    assert.equal(f.stockWrites.length, 1);
+    assert.equal(f.stockWrites[0].operacao, "E");
+    assert.equal(f.stockWrites[0].quantidade, 5);
+  } finally { await f.close(); }
+});
